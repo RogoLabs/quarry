@@ -1,0 +1,197 @@
+/* ============================================================================
+   theme.css: the palette and the typeface, nothing else.
+   ============================================================================
+
+   Separate from app.css on purpose: this is the file a human edits to change a
+   colour, and the file `tests/test_design_tokens.py` parses to assert every
+   pairing against its floor.
+
+   BRAND. RogoLabs: Tailwind slate neutrals, a blue accent, Inter for UI text.
+   The brand hexes are used where they clear the floors below. Where one does
+   not, the next slate or hue step that does is used instead, and the swap is
+   named in a comment on that line.
+
+   STRUCTURE (docs/DESIGN-PLAN.md UI8). Three blocks, in this order:
+
+     1. bare :root                     the complete LIGHT palette, unconditional
+     2. @media (prefers-color-scheme: dark) :root:not([data-theme="light"])
+     3. :root[data-theme="dark"]
+
+   Light is unconditional so that an explicit override always has values to
+   reach. Dark is the brand's primary look; base.html stamps it as the default
+   before first paint, and if that script never runs the page follows the OS.
+
+   FLOORS, stricter than WCAG AA, enforced by test:
+
+     --ink     >= 12.0   14px prose read for an hour
+     --ink-2   >=  7.0   tens of thousands of 13px table cells
+     --ink-3   >=  4.6   every microlabel, gutter and .dim in the product
+     roles     >=  4.6   on all five surfaces, on --accent-bg, and on their own fill
+     --edge    >=  3.0   every control boundary (WCAG 1.4.11)
+
+   `opacity` is BANNED on anything containing text. Contrast has to be
+   expressible in tokens or it cannot be audited.
+   ========================================================================= */
+
+/* Inter, vendored. A webfont fetched from a CDN would be egress the ledger
+   cannot record, because the browser issues it, not quarry. This file is served
+   from /static like everything else. See static/VENDOR.md for the hash and
+   static/INTER-LICENSE.txt for the OFL. The declared weight range is the three
+   weights the product uses. */
+@font-face{
+  font-family:"Inter";
+  font-style:normal;
+  font-weight:400 600;
+  font-display:swap;
+  src:url("inter-latin-wght-normal.woff2") format("woff2");
+}
+
+:root{
+  color-scheme: light dark;
+
+  /* ---- surfaces (slate) ---------------------------------------------------- */
+  --bg:#FFFFFF;
+  --panel:#F8FAFC;
+  --sunk:#F1F5F9;
+  --hover:#F0F4F8;     /* lighter than slate-200: #2563EB on #E2E8F0 is 4.43 */
+  --raised:#FFFFFF;
+  --rule:#E2E8F0;
+
+  /* Theme-invariant. One mid slate clears 3:1 on every surface in both themes
+     (worst 3.44 on dark --hover, 3.50 on light --hover). */
+  --edge:#738399;
+
+  /* ---- ink ------------------------------------------------------------------ */
+  --ink:#0F172A;
+  --ink-2:#334155;
+  --ink-3:#475569;
+  --on-fill:#FFFFFF;
+
+  /* ---- accent: reserved for "this opens its evidence" ----------------------- */
+  --accent:#2563EB;
+  --accent-h:#1D4ED8;
+  --accent-bg:#EFF6FF;
+
+  /* ---- highlight: the one thing on a page to look at -------------------------
+     Amber, spent as a 3px edge only, never as text, and at most once per page.
+     Light uses amber-600 because #F59E0B is 2.15:1 on white, under the 3:1 a
+     non-text mark needs. */
+  --highlight:#D97706;
+
+  /* ---- adjudication roles -----------------------------------------------------
+     Six roles, not severity classes. Read the "means" column in app.css's role
+     block: it is the product's thesis rendered as a palette.                  */
+  --verified:#166534;    --verified-bg:#F0FDF4;    /* machine-checked, it held      */
+  --incomplete:#92400E;  --incomplete-bg:#FFFBEB;  /* instrument unreliable here    */
+  --alarm:#B91C1C;       --alarm-bg:#FEF2F2;       /* failed / data loss. Brand
+                                                      #DC2626 is 4.41 on --sunk     */
+  --killed:#334155;      --killed-bg:#F1F5F9;      /* evidence said no              */
+  --unmeasured:#475569;  --unmeasured-bg:#F1F5F9;  /* nothing has checked this      */
+  --inert:#475569;       --inert-bg:#F1F5F9;       /* someone's unverified claim    */
+
+  /* ---- type ----------------------------------------------------------------- *
+     Inter for UI text, the system stack behind it while it loads (swap).
+     `ui-monospace` leads the mono stack: "SF Mono" ships with Xcode, not the
+     base OS.                                                                   */
+  --sans:"Inter",-apple-system,BlinkMacSystemFont,system-ui,"Segoe UI",sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+
+  /* Seven sizes. --fs-title is the CEILING: nothing on the screen is larger
+     than the name of the thing you are looking at. */
+  --fs-micro:10px;   /* uppercase mono microlabels. Floor; nothing smaller ships */
+  --fs-meta:11px;    /* timestamps, sha, paths in tables, kbd                    */
+  --fs-dense:12px;   /* rule ids, code, dense panes                             */
+  --fs-cell:13px;    /* table cells, prose inside a pane                        */
+  --fs-body:14px;    /* body                                                    */
+  --fs-lead:15px;    /* the finding title in the detail pane                    */
+  --fs-title:18px;   /* page h1 AND stat numbers. Ceiling.                      */
+
+  --lh-tight:1.25; --lh-ui:1.45; --lh-prose:1.6; --lh-code:1.55;
+  --tr-micro:.09em; --tr-tool:.06em;
+  /* 400/500/600 only. Light weights on a dark ground thin the strokes and drop
+     effective contrast below what the token measures. */
+  --wt-reg:400; --wt-med:500; --wt-bold:600;
+
+  /* ---- geometry ------------------------------------------------------------- *
+     Pane, not card. The 3px coloured edge is load-bearing (it means "here is my
+     adjudication state"), so --bw-mark is semantic and never decorative.      */
+  --r-chip:3px; --r-ctl:5px; --r-panel:6px; --r-overlay:8px;
+  --bw-hair:1px; --bw-mark:3px;
+
+  --sp-2:2px;  --sp-4:4px;  --sp-6:6px;  --sp-8:8px;  --sp-12:12px;
+  --sp-16:16px; --sp-20:20px; --sp-24:24px; --sp-32:32px; --sp-48:48px;
+  --sp-tail:64px;
+
+  --viz-track:var(--sunk);
+  --viz-fill:var(--accent);
+
+  --measure:88ch;
+  --shadow-overlay:0 12px 32px rgb(15 23 42/.18), 0 0 0 1px var(--edge);
+}
+
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+
+    --bg:#0F172A;
+    --panel:#1E293B;
+    --sunk:#0B1222;
+    --hover:#223047;
+    --raised:#1E293B;
+    --rule:#334155;
+
+    --ink:#F1F5F9;
+    --ink-2:#CBD5E1;
+    --ink-3:#94A3B8;
+    --on-fill:#0F172A;
+
+    --accent:#60A5FA;
+    --accent-h:#3B82F6;
+    --accent-bg:#172554;
+
+    --highlight:#F59E0B;
+
+    --verified:#4ADE80;    --verified-bg:#052E16;
+    --incomplete:#F59E0B;  --incomplete-bg:#2A1C05;
+    --alarm:#F87171;       --alarm-bg:#3A1414;
+    --killed:#94A3B8;      --killed-bg:#172033;
+    --unmeasured:#A5B4C8;  --unmeasured-bg:#172033;
+    --inert:#94A3B8;       --inert-bg:#172033;
+
+    --shadow-overlay:0 12px 32px rgb(0 0 0/.55), 0 0 0 1px var(--edge);
+  }
+}
+
+/* The explicit choice wins in the other direction too. The values are repeated
+   rather than expressed with light-dark(), which shipped in Safari 17.5, above
+   this product's 17.0 floor. tests/test_design_tokens.py parses BOTH blocks. */
+:root[data-theme="dark"]{
+  color-scheme: dark;
+
+  --bg:#0F172A;
+  --panel:#1E293B;
+  --sunk:#0B1222;
+  --hover:#223047;
+  --raised:#1E293B;
+  --rule:#334155;
+
+  --ink:#F1F5F9;
+  --ink-2:#CBD5E1;
+  --ink-3:#94A3B8;
+  --on-fill:#0F172A;
+
+  --accent:#60A5FA;
+  --accent-h:#3B82F6;
+  --accent-bg:#172554;
+
+  --highlight:#F59E0B;
+
+  --verified:#4ADE80;    --verified-bg:#052E16;
+  --incomplete:#F59E0B;  --incomplete-bg:#2A1C05;
+  --alarm:#F87171;       --alarm-bg:#3A1414;
+  --killed:#94A3B8;      --killed-bg:#172033;
+  --unmeasured:#A5B4C8;  --unmeasured-bg:#172033;
+  --inert:#94A3B8;       --inert-bg:#172033;
+
+  --shadow-overlay:0 12px 32px rgb(0 0 0/.55), 0 0 0 1px var(--edge);
+}

@@ -1,0 +1,57 @@
+;; quarry-clone.sb — Tier 1-net: the clone stage only.
+;;
+;; git needs the network, so this profile cannot deny it. Everything else is the same
+;; as tier1: no credential read, no host read, no host write, no named system service.
+;; Combined with an empty credential.helper and GIT_CONFIG_GLOBAL=/dev/null, this is an
+;; anonymous clone that structurally cannot present the operator's gh token to anyone.
+;;
+;; Parameters: RUNDIR, HOSTHOME, TOOLSDIR, RULESDIR, DBDIR.
+(version 1)
+(allow default)
+
+;; Network IS allowed here — that is the whole difference from tier1, and the reason
+;; this profile exists as a separate file rather than a flag.
+
+;; No named system service, as in tier1. MEASURED: an anonymous HTTPS shallow clone
+;; (DNS, TLS, smart HTTP, git-remote-https) succeeds with zero services allowed.
+;; Denying them all also covers com.apple.SecurityServer, the keychain front door.
+(deny mach-lookup)
+(deny job-creation)
+(deny user-preference-read user-preference-write)
+(deny  signal)
+(allow signal (target same-sandbox))
+
+;; /private/tmp, /private/var/folders and /Volumes hold other runs' volumes, agent
+;; sockets, per-user caches and every other mounted disk; see tier1 section 4.
+(deny  file-read* (subpath "/Users")
+                  (subpath "/private/tmp")
+                  (subpath "/private/var/folders")
+                  (subpath "/Volumes"))
+(allow file-read* (subpath (param "RUNDIR")))
+(allow file-read-metadata (path-ancestors (param "RUNDIR")))
+(allow file-read* (subpath (param "TOOLSDIR")))
+;;    Path resolution needs search on the ancestors of TOOLSDIR. `path-ancestors`
+;;    grants metadata ONLY on that exact chain — not contents, and not siblings.
+;;    Verified: with this rule ~/.ssh is still "Operation not permitted" to both
+;;    cat and ls.
+(allow file-read-metadata (path-ancestors (param "TOOLSDIR")))
+(allow file-read* (subpath (param "RULESDIR")))
+(allow file-read-metadata (path-ancestors (param "RULESDIR")))
+(allow file-read* (subpath (param "DBDIR")))
+(allow file-read-metadata (path-ancestors (param "DBDIR")))
+
+(deny file-read*  (subpath (string-append (param "HOSTHOME") "/.ssh"))
+                  (subpath (string-append (param "HOSTHOME") "/.aws"))
+                  (subpath (string-append (param "HOSTHOME") "/.gnupg"))
+                  (subpath (string-append (param "HOSTHOME") "/.config"))
+                  (subpath (string-append (param "HOSTHOME") "/.netrc"))
+                  (subpath (string-append (param "HOSTHOME") "/Library/Keychains")))
+;; Hooks are already off (core.hooksPath=/dev/null); this makes "nothing the target
+;; shipped ever runs" hold at the OS too. launchctl: see tier1's header.
+(deny process-exec (literal "/bin/launchctl")
+                   (subpath (string-append (param "RUNDIR") "/src"))
+                   (subpath (string-append (param "RUNDIR") "/quarantine")))
+
+(deny  file-write*)
+(allow file-write* (subpath (param "RUNDIR"))
+                   (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr"))

@@ -1,0 +1,935 @@
+/* ============================================================================
+   app.css — structure and components. Palette lives in theme.css.
+   ============================================================================
+
+   Six cascade layers. The ORDER IS THE ARCHITECTURE: it makes specificity
+   irrelevant, so a page rule never has to out-specify a component rule and
+   nobody reaches for !important.
+
+   This file replaced six per-template <style> blocks holding 197 lines, 13
+   selectors defined in more than one file (10 of which had already silently
+   diverged), and 85 inline style= attributes — 67 of which would have outranked
+   this stylesheet entirely, because inline styles beat every @layer.
+
+   The bug that made this urgent: _detail.html is rendered in TWO contexts — as an
+   include inside triage.html and as an htmx fragment swapped into run.html's
+   #peek. Ten of the fifteen classes it uses were defined only inside triage.html's
+   own <style> block. So the killed-set evidence pane, which exists to make the
+   funnel auditable, rendered Python source in proportional sans with
+   `white-space: normal` — indentation collapsed. That is why the components layer
+   below owns every _detail class, and why _detail.html has no <style> of its own,
+   ever.
+   ========================================================================= */
+
+@layer reset, base, layout, components, pages, utilities;
+
+/* ========================================================== reset ========= */
+@layer reset{
+  *,*::before,*::after{box-sizing:border-box}
+
+  html{block-size:100%}
+
+  /* No `overflow:hidden`. The old shell set it on <body> along
+     `height:calc(100vh - 46px)` hand-copied into six files, which meant: the
+     browser could not restore scroll position after the dismiss/restore 303, Cmd+F
+     could not scroll to a match inside a nested pane, and at 200% zoom / 400%
+     reflow content was clipped with no way to reach it — WCAG 1.4.4 and 1.4.10,
+     both AA. */
+  body{
+    margin:0;
+    min-block-size:100dvh;
+    background:var(--bg);
+    color:var(--ink);
+    font:var(--wt-reg) var(--fs-body)/var(--lh-ui) var(--sans);
+    -webkit-font-smoothing:antialiased;
+    /* Inter's single-storey a; numbers opt into tabular figures where they sit
+       in columns (.num, cards, the pipeline strip). */
+    font-feature-settings:"cv11" 1;
+  }
+
+  :focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:2px}
+  /* <main> takes focus only as the skip link's target; it is not a control. */
+  main:focus{outline:none}
+
+  @media (prefers-reduced-motion: reduce){
+    *,*::before,*::after{
+      animation-duration:.01ms!important;animation-iteration-count:1!important;
+      transition-duration:.01ms!important;scroll-behavior:auto!important;
+    }
+  }
+}
+
+/* =========================================================== base ========= */
+@layer base{
+  /* Links in prose are underlined. --accent against --ink-2 is 1.20:1, far under
+     the 3:1 that colour-only differentiation requires (WCAG 1.4.1), so a
+     colourblind operator reading a paragraph could not see the link at all.
+     Links that ARE rows or cells opt out below — they have a row-level affordance
+     and a selected state. */
+  a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
+  a:hover{color:var(--accent-h)}
+
+  h1,h2,h3{margin:0;font-weight:var(--wt-bold);text-wrap:balance}
+  h1{font-size:var(--fs-title);line-height:var(--lh-tight)}
+
+  /* The 10px uppercase mono microlabel is the best decision in the original CSS:
+     it gives every section a label that costs one line and reads as instrument
+     chrome rather than content. h2 and h3 are that label. Heading LEVEL is
+     semantics; heading SIZE is style, and conflating them is what produced a
+     document outline that changed shape as the operator pressed `j`. */
+  h2,h3{
+    font:var(--wt-med) var(--fs-micro)/var(--lh-ui) var(--mono);
+    letter-spacing:var(--tr-micro);text-transform:uppercase;color:var(--ink-3);
+  }
+
+  p{margin:0 0 1em}
+  p:last-child{margin-bottom:0}
+
+  code{font-family:var(--mono);font-size:.92em}
+
+  kbd{
+    font:var(--fs-meta)/1 var(--mono);
+    background:var(--sunk);border:1px solid var(--edge);border-block-end-width:2px;
+    border-radius:var(--r-ctl);padding:2px 5px;color:var(--ink-2);
+  }
+
+  /* `font: 12px/1 inherit` is INVALID CSS — `inherit` is not a legal family inside
+     the shorthand, so the whole declaration was dropped and every button in the
+     product rendered in Arial 13.333px. There were nine such declarations; this is
+     why the longhand is spelled out here. */
+  button,.btn{
+    font-family:var(--sans);font-size:var(--fs-dense);line-height:1;
+    background:var(--sunk);color:var(--ink);
+    border:1px solid var(--edge);border-radius:var(--r-ctl);
+    padding:7px 11px;cursor:pointer;
+  }
+  button:hover,.btn:hover{background:var(--hover);text-decoration:none}
+  button.danger{color:var(--alarm);border-color:var(--alarm)}
+  button.ghost{background:transparent}
+
+  select,input[type=number],input[type=text]{
+    inline-size:100%;
+    font-family:var(--sans);font-size:var(--fs-cell);
+    background:var(--sunk);color:var(--ink);
+    border:1px solid var(--edge);border-radius:var(--r-ctl);padding:8px 10px;
+  }
+  input[type=checkbox]{accent-color:var(--accent)}
+
+  label{
+    display:block;
+    font:var(--wt-med) var(--fs-micro)/var(--lh-ui) var(--mono);
+    letter-spacing:var(--tr-tool);text-transform:uppercase;
+    color:var(--ink-3);margin:0 0 7px;
+  }
+
+  table{border-collapse:collapse;inline-size:100%;font-size:var(--fs-cell)}
+
+  caption{
+    text-align:start;
+    font:var(--wt-med) var(--fs-micro)/var(--lh-ui) var(--mono);
+    letter-spacing:var(--tr-micro);text-transform:uppercase;color:var(--ink-3);
+    padding:9px 12px;background:var(--sunk);border-block-end:1px solid var(--rule);
+  }
+
+  /* COLUMN headers only. `th` unqualified also matches `th[scope="row"]`, which made
+     every row-header cell sunk-backgrounded and sticky — so the funnel's stage names
+     and the by-lens tables rendered as boxed, floating cells. A row header is a cell
+     that happens to label its row. */
+  thead th{
+    text-align:start;
+    font:var(--wt-med) var(--fs-micro)/var(--lh-ui) var(--mono);
+    letter-spacing:var(--tr-tool);text-transform:uppercase;color:var(--ink-3);
+    padding:8px 12px;background:var(--sunk);
+    /* --edge, not --rule: when the header sticks, rows scroll UNDER it, and at
+       1.07:1 that boundary was invisible. */
+    border-block-end:1px solid var(--edge);
+  }
+  /* Sticky only inside a bounded container — see .tbl.tall. Applied unconditionally
+     it sticks to a box that never scrolls, which is the no-op this started as. */
+  .tbl.tall thead th{position:sticky;inset-block-start:0;z-index:1}
+
+  tbody th{
+    text-align:start;font-weight:var(--wt-reg);
+    padding:8px 12px;border-block-end:1px solid var(--rule);
+    color:var(--ink-2);vertical-align:top;
+  }
+
+  td{
+    padding:8px 12px;border-block-end:1px solid var(--rule);
+    color:var(--ink-2);vertical-align:top;
+  }
+  tbody tr:last-child td{border-block-end:none}
+}
+
+/* ========================================================= layout ========= */
+@layer layout{
+  /* The shell measures its own header instead of asserting its height.
+     `grid-template-rows: auto 1fr` makes the header contribute its height and the
+     main row take the remainder; `min-block-size:0` on the grid item is the
+     non-obvious requirement — without it a grid item's automatic minimum size is
+     its content and the inner scroller never bounds. The number 46 does not
+     appear in this file. */
+  /* `grid-template-columns` is explicit, and that is load-bearing. Without it the
+     single implicit column is `auto`, which sizes to its content's MAX-CONTENT
+     width — so `main` grew to 1140px inside an 855px viewport and scrolled the whole
+     page sideways, putting the fourth stat card and three table columns out of
+     reach. `minmax(0,1fr)` bounds the column to the container; `min-inline-size:0`
+     does the same for the item, because a grid item's automatic minimum is also its
+     content. Exactly the trap that made `.prow`'s ellipsis never fire.
+
+     MEASURED before: body clientWidth 855, scrollWidth 1140. */
+  .app{
+    display:grid;grid-template-rows:auto 1fr;grid-template-columns:minmax(0,1fr);
+    min-block-size:100dvh;
+  }
+  .app > main{
+    min-block-size:0;min-inline-size:0;display:flex;flex-direction:column;
+  }
+
+  header.top{
+    display:flex;align-items:center;gap:var(--sp-16);
+    padding:0 var(--sp-16);min-block-size:46px;
+    border-block-end:1px solid var(--rule);background:var(--panel);
+    position:sticky;inset-block-start:0;z-index:10;
+  }
+  /* The wordmark: "Quarry" in Inter 600, then a small "by RogoLabs" link. The
+     accent on "Labs" is the RogoLabs mark itself, the one place the accent is
+     spent on something that is not "this opens its evidence". */
+  .brand{display:flex;align-items:baseline;gap:var(--sp-8);white-space:nowrap}
+  .brand .word{
+    font:var(--wt-bold) var(--fs-lead)/1 var(--sans);letter-spacing:-.01em;
+    color:var(--ink);text-decoration:none;
+  }
+  .brand .word:hover{color:var(--ink);text-decoration:none}
+  .brand .by{
+    font:var(--wt-med) var(--fs-meta)/1 var(--sans);color:var(--ink-3);
+    text-decoration:none;
+  }
+  .brand .by:hover{color:var(--ink-2);text-decoration:underline}
+  .brand .labs{color:var(--accent)}
+
+  /* Skip link: off-screen until focused, then the first thing on the page. */
+  .skip{
+    position:absolute;inset-inline-start:var(--sp-8);inset-block-start:-48px;z-index:60;
+    background:var(--panel);color:var(--ink);padding:8px 12px;
+    border:1px solid var(--edge);border-radius:var(--r-ctl);text-decoration:none;
+  }
+  .skip:focus{inset-block-start:var(--sp-8)}
+
+  header.top nav{display:flex;gap:2px;margin-inline-start:var(--sp-8);flex-wrap:wrap}
+  header.top nav a{
+    padding:6px 11px;border-radius:var(--r-ctl);
+    color:var(--ink-3);font:var(--wt-med) var(--fs-cell)/1.2 var(--sans);
+    text-decoration:none;
+  }
+  header.top nav a:hover{background:var(--hover);color:var(--ink-2);text-decoration:none}
+  /* Selected: a filled tab plus a 2px accent underline, so the state does not
+     rest on a background that is 1.1:1 from the header. */
+  header.top nav a.on{
+    background:var(--sunk);color:var(--ink);
+    box-shadow:inset 0 -2px 0 var(--accent);
+  }
+  .theme-btn{font-size:var(--fs-body);padding:6px 9px}
+
+  .spacer{flex:1}
+
+  .meta{
+    font:var(--fs-meta)/var(--lh-ui) var(--mono);color:var(--ink-3);
+    display:flex;gap:var(--sp-12);align-items:center;flex-wrap:wrap;
+  }
+  .meta b{color:var(--ink);font-weight:var(--wt-bold)}
+  .meta a{text-decoration:none}
+  .meta a:hover{text-decoration:underline}
+
+  .page{
+    overflow-y:auto;min-block-size:0;flex:1;
+    padding:var(--sp-24) var(--sp-32) var(--sp-tail);
+  }
+  .wrap{max-inline-size:1100px;margin:0 auto}
+  .wrap.narrow{max-inline-size:1000px}
+  .scrollable{overflow-y:auto;overflow-x:hidden;min-block-size:0}
+
+  /* Bounded rather than fixed. 340px + 300px ate half a 1280 laptop, and `1fr`
+     was unbounded upward so prose got a 140-character measure on a 27" display. */
+  .shell{
+    display:grid;
+    grid-template-columns:minmax(240px,300px) minmax(260px,340px) 1fr;
+    min-block-size:0;flex:1;
+  }
+  .col{
+    border-inline-end:1px solid var(--rule);
+    display:flex;flex-direction:column;min-inline-size:0;min-block-size:0;
+  }
+  .col:last-child{border-inline-end:none}
+  .colhead{
+    flex:0 0 auto;display:flex;align-items:center;gap:var(--sp-8);
+    padding:9px 12px;border-block-end:1px solid var(--rule);background:var(--panel);
+  }
+
+  .empty-state{display:grid;place-items:center;flex:1;padding:var(--sp-32)}
+}
+
+/* ===================================================== components ========= */
+@layer components{
+
+  /* ---- pills: six roles, each with a glyph ------------------------------- *
+     Colour alone cannot carry these. Under deuteranopia the previous --ok and
+     --kill were 1.06:1 apart — the same beige — and the pill FILLS were within
+     1.06:1 of each other in normal vision, because all three hues were tuned to
+     one luminance band to sit comfortably on a dark ground. No better hue fixes
+     that, so the glyph is the second channel and it is not optional.
+
+     `inert` has no glyph, and that is the load-bearing part: ABSENCE OF A GLYPH
+     MEANS THE CHIP ASSERTS NOTHING. Tool name, rule id, CWE, lens, model and
+     `claims high` are labels, not judgments. A reader who learns "glyph =
+     judgment" reads `claims high` correctly on first sight.
+
+     Every glyph is in a range the system monospace already covers: no icon font,
+     no SVG sprite, no asset.                                                  */
+  .pill{
+    display:inline-flex;align-items:baseline;gap:4px;
+    font:var(--wt-med) var(--fs-micro)/1.6 var(--mono);
+    letter-spacing:var(--tr-tool);text-transform:uppercase;
+    padding:1px 6px;border-radius:var(--r-chip);white-space:nowrap;
+  }
+  .pill::before{font-weight:var(--wt-bold)}
+
+  .pill.verified   {background:var(--verified-bg);  color:var(--verified)}
+  .pill.incomplete {background:var(--incomplete-bg);color:var(--incomplete)}
+  .pill.alarm      {background:var(--alarm-bg);     color:var(--alarm)}
+  .pill.killed     {background:var(--killed-bg);    color:var(--killed)}
+  .pill.unmeasured {background:var(--unmeasured-bg);color:var(--unmeasured)}
+  .pill.inert      {background:var(--inert-bg);     color:var(--inert)}
+  .pill.accent     {background:var(--accent-bg);    color:var(--accent)}
+
+  .pill.verified::before   {content:"\2713"}   /* ✓ machine-checked, it held      */
+  .pill.incomplete::before {content:"\25D0"}   /* ◐ may have lost something       */
+  .pill.alarm::before      {content:"\25B2"}   /* ▲ instrument failed / data loss  */
+  .pill.killed::before     {content:"\2212"}   /* − evidence said no              */
+  .pill.unmeasured::before {content:"?"}       /* ? nothing has checked this      */
+  /* .pill.inert and .pill.accent: no glyph, deliberately. */
+
+  a.pill{text-decoration:none}
+  a.pill:hover{text-decoration:underline}
+
+  /* ---- cards ------------------------------------------------------------ */
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:var(--sp-12)}
+  .card{
+    background:var(--panel);border:1px solid var(--rule);
+    border-radius:var(--r-panel);padding:var(--sp-16);
+  }
+  .card.mark{border-inline-start:var(--bw-mark) solid var(--incomplete)}
+  .card .k{
+    font:var(--wt-med) var(--fs-micro)/var(--lh-ui) var(--mono);
+    letter-spacing:var(--tr-tool);text-transform:uppercase;color:var(--ink-3);
+  }
+  /* --fs-title is the ceiling, and a stat this size must be a link to the set it
+     summarises (UI12). The four cards on /runs/{id} were the largest numbers on
+     the screen and the only ones that were NOT links, sitting six lines above an
+     <h2> promising that every number is a link. */
+  .card .v{
+    display:block;margin-block-start:5px;
+    font:var(--wt-bold) var(--fs-title)/var(--lh-tight) var(--mono);
+    font-variant-numeric:tabular-nums;color:var(--ink);
+  }
+  a.card{text-decoration:none;display:block}
+  a.card:hover{background:var(--hover);text-decoration:none}
+  a.card:hover .v{color:var(--accent)}
+
+  /* ---- tables ----------------------------------------------------------- */
+  /* A table cannot be both a horizontal scroller and have a page-level sticky
+     header: `overflow:clip` lets the sticky <th> escape to the page scroller, but
+     creates no scrollport, so a table wider than its container pushes the whole
+     PAGE sideways instead. MEASURED: /research/{id} rendered 1140px of document in
+     an 855px viewport, so the fourth stat card and three table columns were simply
+     unreachable — `th{white-space:nowrap}` gives these tables a wide content
+     minimum and nothing let them scroll.
+
+     So the choice is made rather than fudged: horizontal scroll wins. A sticky
+     header you cannot reach column six of is worth less than a header that scrolls
+     away, and the page must never scroll sideways.
+
+     `.tall` is the exception, for the killed-set table that can carry 300 rows: a
+     bounded height makes the container its own scrollport, so the sticky header
+     works *inside* it — which is the only place stickiness earns its cost. */
+  .tbl{
+    background:var(--panel);border:1px solid var(--rule);
+    border-radius:var(--r-panel);overflow:auto;
+  }
+  .tbl.tall{max-block-size:70vh}
+
+  /* ---- progress bar ---------------------------------------------------- */
+  .bar{
+    block-size:6px;background:var(--viz-track);border:1px solid var(--rule);
+    border-radius:var(--r-ctl);overflow:hidden;min-inline-size:90px;
+  }
+  /* The datum is the only thing left in an inline style, as a custom property,
+     so the presentation stays in CSS: style="--pct:42%" */
+  .bar > span{display:block;block-size:100%;inline-size:var(--pct,0%);background:var(--viz-fill)}
+
+  /* ---- pipeline strip (/runs/{id}) ---------------------------------------- *
+     Five stages, left to right, each a link to its set. The arrow between
+     stages is drawn by CSS on the list item, so it carries no text. */
+  .pipeline ol{
+    list-style:none;margin:0 0 var(--sp-24);padding:0;
+    display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:var(--sp-8);
+  }
+  .pipeline li{position:relative;min-inline-size:0}
+  .pipeline li + li::before{
+    content:"";position:absolute;inset-inline-start:-7px;inset-block-start:50%;
+    inline-size:6px;block-size:6px;margin-block-start:-3px;
+    border-block-start:1.5px solid var(--edge);border-inline-end:1.5px solid var(--edge);
+    transform:rotate(45deg);
+  }
+  .pipeline a{
+    display:grid;grid-template-columns:auto 1fr;grid-template-rows:auto auto;
+    column-gap:var(--sp-8);row-gap:2px;align-items:baseline;
+    padding:10px 12px;background:var(--panel);border:1px solid var(--rule);
+    border-radius:var(--r-panel);text-decoration:none;color:var(--ink-2);
+  }
+  .pipeline a:hover{background:var(--hover);text-decoration:none}
+  .pipeline a:hover .pv{color:var(--accent)}
+  .pipeline .pn{
+    grid-column:1 / -1;
+    font:var(--wt-med) var(--fs-micro)/var(--lh-ui) var(--mono);
+    letter-spacing:var(--tr-micro);text-transform:uppercase;color:var(--ink-3);
+  }
+  .pipeline .pv{
+    font:var(--wt-bold) var(--fs-lead)/1.2 var(--sans);color:var(--ink);
+    font-variant-numeric:tabular-nums;
+  }
+  .pipeline .pu{font-size:var(--fs-meta);color:var(--ink-3);line-height:1.3}
+
+  /* ---- validation summary card (/runs/{id}) ------------------------------- */
+  .vcard{
+    display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-12);
+    background:var(--panel);border:1px solid var(--rule);border-radius:var(--r-panel);
+    padding:var(--sp-16);
+  }
+  .vcard .note{grid-column:1 / -1;margin:0}
+  .vstat{
+    display:flex;align-items:center;justify-content:space-between;gap:var(--sp-8);
+    padding:10px 12px;background:var(--bg);border:1px solid var(--rule);
+    border-radius:var(--r-ctl);text-decoration:none;
+  }
+  .vstat:hover{background:var(--hover);text-decoration:none}
+  .vstat .v{
+    font:var(--wt-bold) var(--fs-title)/1 var(--sans);color:var(--ink);
+    font-variant-numeric:tabular-nums;
+  }
+  .vstat:hover .v{color:var(--accent)}
+
+  /* The highlight edge: amber, non-text, at most once per page. It marks the one
+     thing to look at (confirmed verdicts on a run, the review banner on a draft). */
+  .hl{border-inline-start:var(--bw-mark) solid var(--highlight)}
+
+  /* ---- segmented filters (/validation, triage verdict row) ---------------- */
+  .seg,.vfilter{display:flex;flex-wrap:wrap;gap:var(--sp-4);align-items:center}
+  .seg a,.vfilter a{
+    display:inline-flex;align-items:baseline;gap:6px;
+    padding:5px 10px;border:1px solid var(--rule);border-radius:999px;
+    color:var(--ink-2);text-decoration:none;font-size:var(--fs-dense);
+  }
+  .seg a:hover,.vfilter a:hover{background:var(--hover);text-decoration:none}
+  .seg a.on,.vfilter a.on{
+    background:var(--accent-bg);color:var(--ink);border-color:var(--accent);
+  }
+  .seg .num,.vfilter .num{color:var(--ink-3);font-size:var(--fs-meta)}
+  .seg a.on .num,.vfilter a.on .num{color:var(--ink-2)}
+  .vfilter{
+    padding:8px 12px;border-block-end:1px solid var(--rule);background:var(--panel);
+  }
+  .vfilter a{padding:2px 8px;font-size:var(--fs-meta)}
+  .vfilter .lbl{
+    font:var(--wt-med) var(--fs-micro)/var(--lh-ui) var(--mono);
+    letter-spacing:var(--tr-micro);text-transform:uppercase;color:var(--ink-3);
+    margin-inline-end:2px;
+  }
+
+  /* ---- verdict block in the detail pane ----------------------------------- *
+     The 3px edge is the adjudication state, as everywhere else. The rationale is
+     target-controlled probe evidence, so it renders as code. */
+  .verdict{
+    border:1px solid var(--rule);border-inline-start:var(--bw-mark) solid var(--unmeasured);
+    border-radius:var(--r-panel);background:var(--panel);
+    padding:10px 12px;margin-block-end:var(--sp-8);
+  }
+  .verdict.v-confirmed{border-inline-start-color:var(--verified)}
+  .verdict.v-needs-review{border-inline-start-color:var(--incomplete)}
+  .verdict.v-rejected{border-inline-start-color:var(--killed)}
+  .vhead{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-block-end:6px}
+  .vmeta{font:var(--wt-reg) var(--fs-meta)/var(--lh-ui) var(--mono);color:var(--ink-3)}
+  /* Label above value: a side-by-side grid gave "differs from baseline" a
+     column that left the evidence itself a third of a narrow pane. */
+  .rationale{margin:var(--sp-8) 0 0}
+  .rationale dt{
+    font:var(--wt-med) var(--fs-micro)/1.6 var(--mono);
+    letter-spacing:var(--tr-tool);text-transform:uppercase;color:var(--ink-3);
+    margin-block-start:var(--sp-8);
+  }
+  .rationale dt:first-child{margin-block-start:0}
+  .rationale dd{margin:2px 0 0;min-inline-size:0}
+  .vcode{
+    margin:0;padding:6px 8px;background:var(--sunk);border:1px solid var(--rule);
+    border-radius:var(--r-ctl);color:var(--ink-2);
+    font:var(--wt-reg) var(--fs-meta)/1.5 var(--mono);
+    white-space:pre-wrap;overflow-wrap:anywhere;max-block-size:30vh;overflow:auto;
+  }
+
+  /* ---- advisory draft ----------------------------------------------------- */
+  .banner{
+    background:var(--panel);border:1px solid var(--rule);border-radius:var(--r-panel);
+    padding:12px 16px;color:var(--ink-2);font-size:var(--fs-cell);
+  }
+  .banner.hl{border-inline-start:var(--bw-mark) solid var(--highlight)}
+  .banner b{color:var(--ink)}
+  .facts{
+    display:grid;grid-template-columns:max-content minmax(0,1fr);
+    column-gap:var(--sp-16);row-gap:var(--sp-6);margin:0;
+    font-size:var(--fs-cell);
+  }
+  .facts dt{
+    font:var(--wt-med) var(--fs-micro)/1.9 var(--mono);
+    letter-spacing:var(--tr-tool);text-transform:uppercase;color:var(--ink-3);
+  }
+  .facts dd{margin:0;color:var(--ink-2);overflow-wrap:anywhere}
+  .advtext{
+    margin:0;padding:var(--sp-16);background:var(--panel);border:1px solid var(--rule);
+    border-radius:var(--r-panel);color:var(--ink);
+    font:var(--wt-reg) var(--fs-dense)/var(--lh-code) var(--mono);
+    white-space:pre-wrap;overflow-wrap:anywhere;max-block-size:70vh;overflow:auto;
+  }
+
+  /* ---- triage: producer + occurrence rows ------------------------------- *
+     DOM order is the j/k contract. No rule in this layer may apply `order`,
+     `flex-*-reverse` or explicit grid placement to .prow or .orow — the keyboard
+     handler walks querySelectorAll in DOM order, so a visual reorder would make
+     `j` move somewhere the eye did not predict, and no unit test would catch it. */
+  .prow,.orow{
+    display:block;padding:8px 12px;
+    border-block-end:1px solid var(--rule);
+    /* The selection gutter lives in this transparent border. A background tint
+       CANNOT do this job: --accent-bg against --bg is 1.26:1, and no tint that
+       reaches the 3:1 WCAG 1.4.11 needs for a state indicator still leaves its
+       own text legible. The selected row was marked at 1.22:1 — and selected and
+       hovered were the same pixel, 1.01:1 apart. */
+    border-inline-start:var(--bw-mark) solid transparent;
+    text-decoration:none;cursor:pointer;
+  }
+  .prow:hover,.orow:hover{background:var(--hover);text-decoration:none}
+  .prow.sel,.orow.sel{
+    background:var(--accent-bg);
+    border-inline-start-color:var(--accent);   /* 9.10:1 dark, 7.55:1 light */
+  }
+  .prow{display:grid;grid-template-columns:1fr auto;gap:var(--sp-8);align-items:baseline}
+  /* A grid item's automatic minimum size is its content, so without this the cell
+     grows to fit the rule id and the child's text-overflow never triggers. */
+  .prow > span:first-child{min-inline-size:0;overflow:hidden}
+  .prow .tool{
+    display:block;
+    font:var(--wt-med) var(--fs-micro)/var(--lh-ui) var(--mono);
+    letter-spacing:var(--tr-tool);text-transform:uppercase;color:var(--ink-3);
+  }
+  /* Truncate, never break mid-token. `word-break:break-all` rendered
+     `javascript.express.security.audit.xss.mustache.var-in-href` as
+     `…audit.xss.must / ache.var-in-hre / f` — the most important string on the
+     screen, made unreadable by its own overflow rule. The tail is what you read,
+     so the head is what gets clipped; the full id is in `title`. */
+  .prow .rule{
+    display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    font:var(--wt-reg) var(--fs-dense)/1.4 var(--mono);color:var(--ink-2);
+  }
+  .prow.sel .rule{color:var(--ink)}
+  .prow .right{display:flex;flex-direction:column;align-items:flex-end;gap:3px}
+  .prow .cnt{
+    font:var(--wt-med) var(--fs-dense)/1 var(--mono);
+    font-variant-numeric:tabular-nums;color:var(--ink);
+  }
+  .orow .p{
+    display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    font:var(--wt-reg) var(--fs-meta)/1.5 var(--mono);color:var(--ink-2);
+  }
+  .orow .s{font:var(--wt-reg) var(--fs-micro)/1.5 var(--mono);color:var(--ink-3)}
+
+  .band{
+    font:var(--wt-med) var(--fs-micro)/var(--lh-ui) var(--mono);
+    letter-spacing:var(--tr-micro);text-transform:uppercase;
+    padding:10px 12px 5px;color:var(--ink-3);background:var(--bg);
+    position:sticky;inset-block-start:0;
+    border-block-end:1px solid var(--rule);z-index:1;
+  }
+  /* Was `opacity:.75`, which composited to 3.41:1 — below AA, on the text that
+     defines the product's own sort key. `opacity` is banned on text. */
+  .band .hint{text-transform:none;letter-spacing:0;color:var(--ink-3)}
+
+  /* ---- undo strip ------------------------------------------------------- *
+     A toast that carries the only undo affordance is a race between reading speed
+     and a timer. This is pinned until the next disposition. `restore` existed as
+     thirty lines of correct, tested inverse logic that no template referenced —
+     the UI said "Reversible" and provided no way to reverse. */
+  .undo{
+    display:flex;align-items:center;gap:var(--sp-8);flex-wrap:wrap;
+    padding:8px 12px;background:var(--accent-bg);
+    border-block-end:1px solid var(--edge);
+    font:var(--wt-reg) var(--fs-meta)/var(--lh-ui) var(--mono);color:var(--ink-2);
+  }
+  .undo form{margin:0}
+  .undo .what{color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  /* ---- detail pane ------------------------------------------------------ *
+     EVERY class below is used by _detail.html, which renders both as an include
+     in triage.html and as an htmx fragment in run.html. That is exactly why they
+     live in a shared stylesheet and why _detail.html has no <style> of its own. */
+  .detail{padding:0;display:flex;flex-direction:column;min-block-size:0}
+  .evidence-page{overflow:visible}
+  .dhead{
+    padding:14px 18px;border-block-end:1px solid var(--rule);
+    background:var(--panel);flex:0 0 auto;
+  }
+  .dhead h2{
+    font:var(--wt-bold) var(--fs-lead)/1.35 var(--sans);
+    letter-spacing:0;text-transform:none;color:var(--ink);
+    margin:0 0 6px;overflow-wrap:break-word;
+  }
+  .dhead .loc{font:var(--wt-reg) var(--fs-meta)/var(--lh-ui) var(--mono);color:var(--ink-3)}
+  .dtags{display:flex;gap:6px;flex-wrap:wrap;margin-block-start:9px;align-items:center}
+  .dtags .claim{
+    font:var(--wt-reg) var(--fs-meta)/var(--lh-ui) var(--mono);color:var(--ink-3);
+  }
+  .dbody{padding:var(--sp-16) 18px;min-block-size:0}
+  .sec{margin-block-end:var(--sp-20)}
+  .sec:last-child{margin-block-end:0}
+  .sec h3{margin:0 0 var(--sp-8)}
+  /* .msg preserves newlines because scanner messages contain them. Prose must not
+     use it — source indentation would render as page indentation. */
+  .msg{color:var(--ink-2);white-space:pre-wrap;font-size:var(--fs-cell);max-inline-size:var(--measure)}
+  .prose{color:var(--ink-2);font-size:var(--fs-cell);max-inline-size:var(--measure)}
+
+  /* ---- code pane ------------------------------------------------------- *
+     `tabindex="0"` + `role="region"` because the pane had neither and contained no
+     focusable descendants, so of a ±40-line evidence window roughly twenty lines
+     were reachable by mouse wheel only — a straight WCAG 2.1.1 failure on the
+     content-addressed blob the whole product exists to show you.
+
+     max-block-size and overflow-y are HERE, not set imperatively from JS. The old
+     script assigned both as inline styles, which beat every cascade layer, so
+     these declarations would have appeared to do nothing. */
+  .code{
+    background:var(--panel);border:1px solid var(--rule);border-radius:var(--r-panel);
+    overflow:auto;max-block-size:min(52vh,620px);
+    font:var(--wt-reg) var(--fs-dense)/var(--lh-code) var(--mono);
+  }
+  .code table{inline-size:100%;border-collapse:collapse;font:inherit}
+  .code td{padding:0 0 0 12px;border:none;white-space:pre;color:var(--ink-2)}
+  .code td.ln{
+    inline-size:1%;padding:0 12px;text-align:end;color:var(--ink-3);
+    user-select:none;background:var(--sunk);
+    border-inline-end:1px solid var(--edge);   /* was 1.24:1 — no visible gutter */
+    font-variant-numeric:tabular-nums;
+  }
+  /* The flagged line. <mark> is the semantically exact element: it gives a second
+     channel independent of hue and a screen-reader announcement for free. The old
+     treatment was a --warn-bg tint at 1.11:1 contributing nothing, and amber means
+     "recall risk" everywhere else in this palette — the flagged line is the answer
+     to "where", not a risk. Accent is what "selected" means elsewhere. */
+  .code tr.hit td{background:var(--accent-bg)}
+  .code tr.hit td.ln{color:var(--accent);font-weight:var(--wt-bold)}
+  .code tr.hit td.ln::before{content:"\25B8\00a0"}   /* ▸ */
+  .code mark{background:transparent;color:var(--ink);font-weight:var(--wt-med)}
+  .code .redacted{
+    color:var(--alarm);background:var(--alarm-bg);
+    border-radius:var(--r-chip);padding:0 3px;
+  }
+
+  /* ---- provenance ------------------------------------------------------ */
+  .prov{font-size:var(--fs-dense)}
+  .prov td{padding:5px 10px;font-family:var(--mono);font-size:var(--fs-meta)}
+  .prov th{font-size:var(--fs-micro)}
+  /* A score delta is arithmetic, not judgment: the sign already carries it, so it
+     does not spend a role colour. */
+  .prov .delta{text-align:end;color:var(--ink-2);font-variant-numeric:tabular-nums}
+
+  .actions{
+    display:flex;gap:var(--sp-8);padding:var(--sp-12) 18px;
+    border-block-start:1px solid var(--rule);background:var(--panel);
+    flex:0 0 auto;align-items:center;flex-wrap:wrap;
+  }
+  .actions .note{font-size:var(--fs-meta);color:var(--ink-3)}
+}
+
+/* ========================================================== pages ========= */
+@layer pages{
+
+  /* ---- /runs/{id} : the funnel ----------------------------------------- *
+     A real <table> with <caption> and scope. It was a <div> of <div>s holding
+     <span>s, so a screen reader read eight rows of bare numbers with no column
+     association at all — "1 path-class 319 · · 297" — on the screen the entire
+     product rests on. `display:grid` on the row keeps the original geometry while
+     the semantics become recoverable. */
+  .funnel{
+    background:var(--panel);border:1px solid var(--rule);
+    border-radius:var(--r-panel);overflow:clip;
+  }
+  .funnel table{border-collapse:collapse;inline-size:100%}
+  .funnel th,.funnel td{
+    padding:10px 14px;border-block-end:1px solid var(--rule);
+    font-size:var(--fs-cell);
+  }
+  .funnel thead th{position:static;font-size:var(--fs-micro)}
+  .funnel th.n,.funnel td.n{
+    text-align:end;font-family:var(--mono);font-variant-numeric:tabular-nums;
+    white-space:nowrap;
+  }
+  .funnel td.i{
+    font:var(--wt-reg) var(--fs-meta)/1 var(--mono);color:var(--ink-3);
+    inline-size:1%;text-align:end;
+  }
+  .funnel td.nm{font-family:var(--mono);font-size:var(--fs-dense);color:var(--ink)}
+  .funnel td.z{text-align:end;color:var(--ink-3);font-family:var(--mono)}
+  /* Once the four stat cards became links, this is both the boldest and the
+     largest number on the screen — correct, because its full derivation is visible
+     in the eleven rows above it. */
+  .funnel td.rem{
+    text-align:end;font:var(--wt-bold) var(--fs-cell)/1 var(--mono);
+    font-variant-numeric:tabular-nums;color:var(--ink);
+  }
+  .funnel tr.heuristic td.i{
+    border-inline-start:var(--bw-mark) solid var(--incomplete);
+  }
+  .legend{
+    display:flex;gap:var(--sp-16);margin-block-start:var(--sp-12);
+    font-size:var(--fs-meta);color:var(--ink-3);flex-wrap:wrap;
+  }
+  .legend b{font-weight:var(--wt-med)}
+  .legend .l-killed{color:var(--killed)}
+  .legend .l-defer{color:var(--incomplete)}
+  .legend .l-merge{color:var(--inert)}
+  .legend .l-boost{color:var(--accent)}
+
+  .sub{
+    color:var(--ink-3);font:var(--wt-reg) var(--fs-dense)/var(--lh-ui) var(--mono);
+    margin:0 0 var(--sp-24);
+  }
+  .h-sec{
+    margin:var(--sp-32) 0 var(--sp-12);padding-block-end:7px;
+    border-block-end:1px solid var(--rule);
+  }
+  .h-sec:first-of-type{margin-block-start:var(--sp-24)}
+
+  /* ---- /research : the start form -------------------------------------- */
+  .grid3{display:grid;grid-template-columns:1.4fr .9fr .5fr;gap:var(--sp-16);align-items:start}
+  /* The model checkboxes are a group with a name: fieldset and legend, styled
+     as the same microlabel a <label> gets. */
+  .fams-set{border:none;margin:var(--sp-20) 0 0;padding:0;min-inline-size:0}
+  .fams-set > legend{
+    padding:0;margin:0 0 7px;
+    font:var(--wt-med) var(--fs-micro)/var(--lh-ui) var(--mono);
+    letter-spacing:var(--tr-tool);text-transform:uppercase;color:var(--ink-3);
+  }
+  .fams{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:var(--sp-8);margin-block-start:4px}
+  .mrow{
+    display:flex;gap:var(--sp-8);align-items:center;
+    background:var(--sunk);border:1px solid var(--rule);
+    border-radius:var(--r-ctl);padding:8px 10px;cursor:pointer;
+    font-size:var(--fs-cell);text-transform:none;letter-spacing:0;color:var(--ink);
+  }
+  .mrow input{inline-size:auto}
+  .mrow .n{font:var(--wt-reg) var(--fs-dense)/1 var(--mono);color:var(--ink)}
+  /* Scoped so it cannot collide with the finding card `.f` on the detail page —
+     two selectors named `.f` meant one of them silently inherited a border and
+     10px of margin from the other. */
+  .mrow .fam{
+    font:var(--wt-med) var(--fs-micro)/1.5 var(--mono);
+    letter-spacing:var(--tr-tool);text-transform:uppercase;color:var(--ink-3);
+    margin-inline-start:auto;background:var(--panel);
+    border-radius:var(--r-chip);padding:1px 6px;
+  }
+  .note{color:var(--ink-3);font-size:var(--fs-dense);margin-block-start:var(--sp-8)}
+
+  /* ---- /research/{id} : candidate cards -------------------------------- */
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-16)}
+  .finding{
+    background:var(--panel);border:1px solid var(--rule);
+    border-inline-start:var(--bw-mark) solid var(--unmeasured);
+    border-radius:var(--r-panel);padding:14px 16px;margin-block-end:10px;
+  }
+  .finding.verified{border-inline-start-color:var(--verified)}
+  /* No `opacity`. The old `.f.killed{opacity:.6}` composited the whole card and
+     put the refuter's own verdict at 2.50:1 — the tool rendered its strongest
+     counter-evidence as the hardest thing on the screen to read, on the authority
+     of a refuter whose false-kill rate is unmeasured. Collapsing is honest;
+     dimming is not. See the <details> in research_detail.html. */
+  .finding.refuted{border-inline-start-color:var(--killed)}
+  .finding h3{
+    font:var(--wt-bold) var(--fs-body)/1.35 var(--sans);
+    letter-spacing:0;text-transform:none;color:var(--ink);margin:0 0 6px;
+  }
+  .finding .loc{font:var(--wt-reg) var(--fs-meta)/var(--lh-ui) var(--mono);color:var(--ink-3);margin-block-end:var(--sp-8)}
+  .finding pre{
+    background:var(--sunk);border:1px solid var(--rule);border-radius:var(--r-ctl);
+    padding:8px 10px;font:var(--wt-reg) var(--fs-meta)/1.5 var(--mono);
+    overflow:auto;max-block-size:40vh;margin:var(--sp-8) 0;color:var(--ink-2);
+  }
+  .finding .why{font-size:var(--fs-dense);color:var(--ink-2);margin:6px 0;max-inline-size:var(--measure)}
+  .finding .crit{font-size:var(--fs-dense);color:var(--incomplete);margin:6px 0;max-inline-size:var(--measure)}
+  .finding .ref{
+    font:var(--wt-reg) var(--fs-meta)/1.6 var(--mono);color:var(--ink-3);
+    margin-block-start:var(--sp-8);padding-block-start:var(--sp-8);
+    border-block-start:1px solid var(--rule);
+  }
+  .finding .ref b{color:var(--ink-2)}
+  .chips{display:flex;gap:5px;flex-wrap:wrap;margin-block-end:6px}
+  .lens{font:var(--wt-med) var(--fs-micro)/var(--lh-ui) var(--mono);letter-spacing:var(--tr-tool);text-transform:uppercase;color:var(--ink-3)}
+
+  /* Skipped lenses were `title=` only — unreachable by keyboard and on touch, and
+     non-conformant with WCAG 1.4.13 — on content the template itself calls
+     information rather than silence. Now visible text. */
+  .whylist{margin:var(--sp-8) 0 0;padding-inline-start:1.15em;font-size:var(--fs-dense);color:var(--ink-2)}
+  .whylist li{margin-block-end:3px}
+  .whylist .lens-name{font-family:var(--mono);color:var(--ink)}
+
+  details.collapse{border-block-start:1px solid var(--rule);margin-block-start:var(--sp-8);padding-block-start:var(--sp-8)}
+  details.collapse > summary{
+    cursor:pointer;font:var(--wt-med) var(--fs-meta)/var(--lh-ui) var(--mono);
+    color:var(--ink-2);letter-spacing:var(--tr-tool);
+  }
+  details.collapse > summary:hover{color:var(--ink)}
+  details.collapse[open] > summary{margin-block-end:var(--sp-8)}
+
+  /* ---- keyboard sheet -------------------------------------------------- *
+     The only overlay on this route, so it is the only place --shadow-overlay and
+     --r-overlay are permitted. `[x-cloak]` prevents the Alpine flash-of-unstyled
+     before the framework boots (it is deferred). */
+  .keysheet{
+    position:fixed;inset:0;z-index:50;display:grid;place-items:center;
+    background:color-mix(in srgb, var(--bg) 72%, transparent);
+  }
+  .keysheet-card{
+    background:var(--panel);border-radius:var(--r-overlay);
+    box-shadow:var(--shadow-overlay);padding:var(--sp-20) var(--sp-24);
+    min-inline-size:min(380px,90vw);
+  }
+  .keysheet-card{max-inline-size:min(460px,92vw)}
+  .keysheet-card > .row{margin-block-end:var(--sp-12)}
+  .keysheet-card h2{margin:0}
+  .keysheet-card td{border-block-end:none;padding:4px 10px 4px 0;font-size:var(--fs-cell)}
+}
+
+[x-cloak]{display:none!important}
+
+/* ====================================================== utilities ========= */
+@layer utilities{
+  .mono{font-family:var(--mono)}
+  .num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .dim{color:var(--ink-3)}
+  .r{text-align:end}
+  .sm{font-size:var(--fs-meta)}
+  .xs{font-size:var(--fs-micro)}
+  .nowrap{white-space:nowrap}
+  .plain{text-decoration:none}
+  .plain:hover{text-decoration:underline}
+  .stack{display:flex;flex-direction:column;gap:var(--sp-4)}
+  .row{display:flex;align-items:center;gap:var(--sp-8);flex-wrap:wrap}
+
+  /* Visible to a screen reader, not to the eye. Used for table captions and the
+     per-route <h1> that stops the document outline changing shape as the operator
+     presses `j`. */
+  .sr-only{
+    position:absolute;inline-size:1px;block-size:1px;padding:0;margin:-1px;
+    overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0;
+  }
+
+  /* Spacing and measure utilities. These exist so no template needs an inline
+     `style=` attribute: inline styles outrank every @layer, so a stylesheet that
+     tolerates them is a stylesheet that can be silently overridden. The only
+     surviving inline style in the templates is `--pct` on the progress bar, which
+     is a server-computed datum rather than a presentation choice. */
+  .mt-1{margin-block-start:var(--sp-4)}
+  .mt-2{margin-block-start:var(--sp-8)}
+  .mt-3{margin-block-start:var(--sp-12)}
+  .mt-4{margin-block-start:var(--sp-16)}
+  .mt-5{margin-block-start:var(--sp-20)}
+  .mb-2{margin-block-end:var(--sp-8)}
+  .mb-3{margin-block-end:var(--sp-12)}
+  .mb-6{margin-block-end:var(--sp-24)}
+  .pad{padding:var(--sp-16)}
+  .center{text-align:center}
+  .shrink{inline-size:1%}
+  .ink{color:var(--ink)}
+  .pre-wrap{white-space:pre-wrap}
+  .wrap-normal{white-space:normal}
+  .tall-none{max-block-size:none}
+  .m-tight{max-inline-size:44ch}
+  .m-narrow{max-inline-size:52ch}
+  .m-mid{max-inline-size:56ch}
+  .minw-reason{min-inline-size:20ch}
+  /* An <h2>/<h3> doing duty as a real heading rather than a microlabel. Heading
+     LEVEL is semantics; heading SIZE is style. */
+  .as-text{letter-spacing:0;text-transform:none;font-size:var(--fs-body);color:var(--ink)}
+  .fs-cell{font-size:var(--fs-cell)}
+}
+
+/* ===================================================== responsive ========= */
+
+/* 1024–1279: the band rail. Column 1 collapses to its band initials and counts,
+   recovering ~240px for the code pane on a real 13" laptop. */
+@media (max-width:1279px){
+  @layer layout{
+    .shell{grid-template-columns:minmax(210px,240px) minmax(230px,280px) 1fr}
+    .page{padding-inline:var(--sp-20)}
+  }
+}
+
+/* Below 1024: two panes. Columns 1 and 2 stack inside the left pane. Still one
+   route — `j/k` keeps working unchanged, because the handler queries .orow and
+   does not care about layout. */
+@media (max-width:1023px){
+  @layer layout{
+    /* Rows: producers take what they need up to 40vh, occurrences take the rest.
+       Without explicit rows the spanning detail column's height was shared out
+       across both rows, which opened a blank band between the two left panes. */
+    .shell{grid-template-columns:minmax(280px,42%) 1fr;grid-template-rows:auto minmax(0,1fr)}
+    .shell > .col:nth-child(1),.shell > .col:nth-child(2){grid-column:1}
+    .shell > .col:nth-child(1){grid-row:1;max-block-size:40vh}
+    .shell > .col:nth-child(2){grid-row:2;border-block-start:1px solid var(--rule)}
+    .shell > .col:nth-child(3){grid-column:2;grid-row:1 / span 2}
+  }
+  @layer pages{ .two{grid-template-columns:1fr} .grid3{grid-template-columns:1fr} }
+}
+
+/* Below 1280 the six-item nav no longer fits beside the brand, the run's context
+   strip and the egress counter, so it drops to its own row and scrolls sideways if
+   it must. Below 1024 the context strip goes too: it is the widest element in the
+   header and the least load-bearing at a width where the console is degraded. */
+@media (max-width:1279px){
+  @layer layout{
+    header.top{gap:var(--sp-8);flex-wrap:wrap;padding-block:6px}
+    header.top nav{
+      order:5;flex:1 0 100%;margin:0;flex-wrap:nowrap;overflow-x:auto;
+      padding-block-end:2px;
+    }
+    header.top nav a{padding:5px 9px;white-space:nowrap}
+    header.top .spacer{flex:1}
+  }
+}
+@media (max-width:1023px){
+  @layer layout{
+    header.top .meta:not(.plain){display:none}
+    .page{padding-inline:var(--sp-16)}
+  }
+  @layer components{
+    .pipeline ol{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
+    .pipeline li + li::before{display:none}
+  }
+}
+
+/* Below 720: refuse. A triage console that pretends to work on a phone will be
+   USED on a phone, and there `D` is one tap from `UPDATE producers SET enabled=0`
+   corpus-wide. Refusing to reflow is the safety control, not laziness. */
+@media (max-width:719px){
+  @layer layout{
+    .shell{display:none}
+    .too-small{display:grid!important;place-items:center;flex:1;padding:var(--sp-24)}
+  }
+}
+.too-small{display:none}

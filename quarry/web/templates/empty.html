@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Quarry{% endblock %}
+{% block body %}
+{#  Four shell commands rather than an empty-state illustration. This is the first
+    screen a new operator sees and it should tell them what to type. #}
+<div class="empty-state">
+  <div class="m-narrow">
+    <h1 class="mb-2">Nothing ingested yet</h1>
+    <p class="dim">Point Quarry at a repository, then run the deterministic layer.
+      No model calls, no cost.</p>
+    <div class="code tall-none mt-4">
+      <table><tbody>
+        <tr><td>quarry db sync</td></tr>
+        <tr><td>quarry ingest OWASP/Nettacker</td></tr>
+        <tr><td>quarry scan 1</td></tr>
+        <tr><td>quarry funnel 1</td></tr>
+      </tbody></table>
+    </div>
+  </div>
+</div>
+{% endblock %}

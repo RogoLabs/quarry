@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% set nav = 'runs' %}
+{% block title %}Runs · Quarry{% endblock %}
+{% block body %}
+<div class="page"><div class="wrap">
+  <h1>Runs</h1>
+  <p class="sub">every ingest, and what each stage of the pipeline made of it</p>
+  <div class="tbl">
+    <table>
+      <caption class="sr-only">All runs, newest first</caption>
+      <thead><tr>
+        <th scope="col" class="r">#</th><th scope="col">Target</th>
+        <th scope="col">SHA</th><th scope="col">License</th><th scope="col">Status</th>
+        <th scope="col" class="r">Raw</th><th scope="col" class="r">Live</th>
+        <th scope="col" class="r">Verdicts</th><th scope="col" class="r">Drafts</th>
+        <th scope="col">Started</th>
+      </tr></thead>
+      <tbody>
+      {% for r in runs %}
+        <tr>
+          <td class="r"><a href="/runs/{{ r.id }}">{{ r.id }}</a></td>
+          <th scope="row"><a href="/runs/{{ r.id }}">{{ r.target }}</a></th>
+          <td class="mono sm">{{ (r.git_sha or '')[:10] }}</td>
+          <td>{{ r.license_spdx or 'none' }}{% if r.license_spdx and not r.license_osi %}
+              <span class="pill incomplete">not OSI</span>{% endif %}</td>
+          {#  A running run is not painted in the kill colour: the map is four-way, not
+              `good if done else bad`. #}
+          <td>
+            {% if r.status == 'done' %}<span class="pill verified">done</span>
+            {% elif r.status == 'running' %}<span class="pill accent">running</span>
+            {% elif r.status == 'cancelled' %}<span class="pill inert">cancelled</span>
+            {% elif r.status == 'failed' %}<span class="pill alarm">failed</span>
+            {% else %}<span class="pill inert">{{ r.status }}</span>{% endif %}
+          </td>
+          <td class="num r"><a class="plain" href="/runs/{{ r.id }}#funnel">{{ r.total }}</a></td>
+          <td class="num r"><a class="plain" href="/triage?run={{ r.id }}">{{ r.live }}</a></td>
+          <td class="num r"><a class="plain" href="/validation?run={{ r.id }}">{{ r.n_verdicts }}</a>{% if r.n_confirmed %}
+            <a class="pill verified" href="/validation?run={{ r.id }}&amp;state=confirmed">{{ r.n_confirmed }} confirmed</a>{% endif %}</td>
+          <td class="num r"><a class="plain" href="/advisories?run={{ r.id }}">{{ r.n_advisories }}</a></td>
+          <td class="mono sm dim">{{ r.started_at|local }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="10" class="dim">Nothing ingested yet.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div></div>
+{% endblock %}

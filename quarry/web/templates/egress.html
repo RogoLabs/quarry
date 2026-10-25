@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% set nav = 'egress' %}
+{% block title %}Egress{% endblock %}
+{% block body %}
+<div class="page"><div class="wrap">
+  <h1>Egress</h1>
+  <p class="sub">every byte this machine has sent, all runs, no limit</p>
+  <p class="prose mb-6">“Completely local” is only worth
+    saying if it is auditable, so this is the ledger rather than a claim about it. A
+    counter in the header reads from the same rows.</p>
+
+  {#  bytes_out is the number that answers the product's central claim, and it was
+      stored from the first migration and never rendered anywhere. #}
+  <div class="cards">
+    <div class="card"><span class="k">bytes out</span>
+      <span class="v">{{ led.bytes_out }}</span></div>
+    <div class="card"><span class="k">bytes in</span>
+      <span class="v">{{ led.bytes_in }}</span></div>
+    <div class="card"><span class="k">events</span>
+      <span class="v">{{ led.n_events }}</span></div>
+    <div class="card"><span class="k">destinations</span>
+      <span class="v">{{ led.n_destinations }}</span></div>
+  </div>
+
+  <h2 class="h-sec">The ledger</h2>
+  <div class="tbl">
+    <table>
+      <caption class="sr-only">Every recorded egress event, newest first</caption>
+      <thead><tr>
+        <th scope="col">Scope</th><th scope="col">Stage</th><th scope="col">Destination</th>
+        <th scope="col" class="r">Out</th><th scope="col" class="r">In</th>
+        <th scope="col">Note</th><th scope="col">When</th>
+      </tr></thead>
+      <tbody>
+      {% for e in led.rows %}
+        <tr>
+          <td>{% if e.run_id %}<a class="pill accent" href="/runs/{{ e.run_id }}">{{ e.scope }}</a>
+              {% else %}<span class="pill inert">global</span>{% endif %}</td>
+          <td class="mono sm">{{ e.stage }}</td>
+          <td class="mono sm">{{ e.destination }}</td>
+          <td class="num r sm">{{ e.bytes_out or 0 }}</td>
+          <td class="num r sm">{{ e.bytes_in or 0 }}</td>
+          <td class="dim sm">{{ e.note }}</td>
+          <td class="mono sm dim nowrap">{{ e.created_at|local }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="7" class="dim">Nothing recorded: no database sync, no clone,
+          no metadata fetch has run on this machine yet. An empty ledger is a
+          measurement, not a missing feature.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div></div>
+{% endblock %}

@@ -1,0 +1,163 @@
+{#
+  The volatile half of /research/{id}. Polled by htmx every 10s.
+
+  This replaced `<meta http-equiv="refresh" content="20">`, which over an eight-hour
+  run reloaded a 160-line document about 1,440 times — resetting scroll position and
+  focus to <body> every twenty seconds, so the candidate list was unreadable by
+  keyboard while the run was in progress, and a screen reader re-announced the whole
+  document mid-sentence. WCAG 2.2.1 (Level A) needs a mechanism, not a notice; the
+  pause control is in research_detail.html.
+
+  Candidate cards are deliberately NOT in this fragment. New candidates appearing
+  under a reading cursor is exactly the reflow that stops people reading, so the count
+  goes into a stable banner and the operator chooses when to reload.
+
+  When the run reaches a terminal state the wrapper drops `hx-trigger` entirely, so
+  polling stops by construction — no client-side timer to clear.
+#}
+<div id="progress"
+     hx-get="/research/{{ r.id }}/progress"
+     {% if r.status == 'running' %}hx-trigger="every 10s [document.visibilityState==='visible']"{% endif %}
+     hx-swap="outerHTML">
+
+  {% set pct = (100 * r.done / r.units) if r.units else 0 %}
+
+  {#  Liveness first. `live_status()` checks the pid and the heartbeat rather than
+      trusting a column the dying worker would have had to write — the single best
+      piece of honesty in the codebase — and it was demoted to a dim suffix and a
+      `title=` on the detail page. It is the first question about a long local job. #}
+  <div class="card mb-3 {{ 'mark' if r.resumable }}">
+    <div class="row">
+      {% if r.status == 'done' %}<span class="pill verified">done</span>
+      {% elif r.status == 'running' %}<span class="pill accent">running</span>
+      {% elif r.status == 'stopped' %}<span class="pill inert">stopped</span>
+      {% elif r.status in ('died','stalled') %}<span class="pill alarm">{{ r.status }}</span>
+      {% else %}<span class="pill unmeasured">{{ r.status }}</span>{% endif %}
+
+      {% if r.status_why %}<span class="dim sm">{{ r.status_why }}</span>{% endif %}
+
+      <div class="spacer"></div>
+
+      {% if r.status == 'running' %}
+        <span class="dim sm mono">updating every 10s</span>
+        <form method="post" action="/research/{{ r.id }}/stop">
+          <input type="hidden" name="csrf" value="{{ csrf_token }}">
+          <button type="submit" class="danger">Stop</button>
+        </form>
+      {% endif %}
+      {% if r.resumable %}
+        <form method="post" action="/research/{{ r.id }}/resume">
+          <input type="hidden" name="csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="hours" value="8">
+          <button type="submit">Resume (completed units are skipped)</button>
+        </form>
+      {% endif %}
+    </div>
+    {% if r.resumable %}
+      <p class="note">{{ r.units - r.done - r.errored }} of {{ r.units }} units never ran.</p>
+    {% endif %}
+  </div>
+
+  {#  A real denominator, never a bare spinner. `candidates` is deliberately NOT a
+      big number: a finding count from an unmeasured layer, rendered at 1.5× body in a
+      card above the fold, is the anti-metric the plan bans. It sits at cell size and
+      the by-lens / by-model tables carry the same information at a granularity where
+      it means something. #}
+  <div class="cards">
+    <div class="card">
+      <span class="k">units</span>
+      <span class="v">{{ r.done }}<span class="dim sm">/{{ r.units }}</span></span>
+      <div class="bar mt-1"
+           role="presentation"><span style="--pct:{{ pct }}%"></span></div>
+    </div>
+    <div class="card"><span class="k">machine time</span>
+      <span class="v">{{ '%.0f'|format(r.seconds/60) }}<span class="dim sm">m</span></span></div>
+    <div class="card"><span class="k">errors</span>
+      <span class="v">{{ r.errored }}</span>
+      {% if r.errored %}<div class="note"><span class="pill alarm">instrument</span>
+        a unit that errored produced no evidence either way</div>{% endif %}</div>
+    {#  A duration, not a timestamp. The stored deadline is naive local while the rows
+        around it are UTC, so rendering it raw asked the reader to reconcile two clocks
+        with nothing on screen saying so — and the actual decision here is "let it
+        finish or stop it", which a bare timestamp does not answer. #}
+    <div class="card"><span class="k">budget</span>
+      <span class="v mono fs-cell">{{ r.deadline|until }}</span>
+      <div class="note">{{ r.started_at|elapsed }} elapsed{% if r.deadline %} ·
+        ends {{ r.deadline|local(with_date=False) }}{% endif %}</div></div>
+  </div>
+
+  <div class="two mt-4">
+    <div>
+      <h2 class="h-sec">By lens</h2>
+      <div class="tbl">
+        <table>
+          <caption class="sr-only">Units and candidates per lens</caption>
+          <thead><tr><th scope="col">Lens</th><th scope="col" class="r">Done</th>
+            <th scope="col" class="r">Found</th><th scope="col" class="r">Min</th></tr></thead>
+          <tbody>{% for l in r.by_lens %}
+            <tr><th scope="row" class="mono sm">{{ l.lens }}</th>
+              <td class="num r">{{ l.done }}/{{ l.units }}</td>
+              <td class="num r">{{ l.findings or 0 }}</td>
+              <td class="num r">{{ l.minutes }}</td></tr>
+          {% endfor %}</tbody>
+        </table>
+      </div>
+    </div>
+    <div>
+      <h2 class="h-sec">By model: disagreement is the point</h2>
+      <div class="tbl">
+        <table>
+          <caption class="sr-only">Units and candidates per model</caption>
+          <thead><tr><th scope="col">Model</th><th scope="col" class="r">Done</th>
+            <th scope="col" class="r">Found</th><th scope="col" class="r">Min</th></tr></thead>
+          <tbody>{% for m in r.by_model %}
+            <tr><th scope="row" class="mono sm">{{ m.model }}</th>
+              <td class="num r">{{ m.done }}</td>
+              <td class="num r">{{ m.findings or 0 }}</td>
+              <td class="num r">{{ m.minutes }}</td></tr>
+          {% endfor %}</tbody>
+        </table>
+      </div>
+      <p class="note">A model finding nothing where another finds something is why more
+        than one reads the repo.</p>
+    </div>
+  </div>
+
+  <h2 class="h-sec">In flight
+    {%- if r.units > r.running|length %}
+    <span class="dim">(showing {{ r.running|length }} of {{ r.units }} units)</span>{% endif %}</h2>
+  <div class="tbl">
+    <table>
+      <caption class="sr-only">Units currently running, then errors, then the rest</caption>
+      <thead><tr><th scope="col">Subsystem</th><th scope="col">Lens</th>
+        <th scope="col">Model</th><th scope="col">Status</th>
+        <th scope="col" class="r">s</th><th scope="col" class="r">n</th>
+        <th scope="col">Error</th></tr></thead>
+      <tbody>{% for u in r.running %}
+        <tr><th scope="row" class="mono sm">{{ u.subsystem|visible }}</th>
+          <td class="mono sm">{{ u.lens }}</td>
+          <td class="mono sm">{{ u.model }}</td>
+          <td>
+            {% if u.status == 'done' %}<span class="pill verified">done</span>
+            {% elif u.status == 'error' %}<span class="pill alarm">error</span>
+            {% elif u.status == 'running' %}<span class="pill accent">running</span>
+            {% else %}<span class="pill unmeasured">{{ u.status }}</span>{% endif %}
+          </td>
+          <td class="num r">{{ '%.0f'|format(u.seconds) }}</td>
+          <td class="num r">{{ u.n_findings }}</td>
+          <td class="dim sm">{{ u.error|visible }}</td></tr>
+      {% else %}
+        <tr><td colspan="7" class="dim">No units yet.</td></tr>
+      {% endfor %}</tbody>
+    </table>
+  </div>
+
+  {#  The count of candidates lives here so the poll can surface new ones without
+      moving the cards themselves. Reloading is the operator's choice. #}
+  <div class="row mt-4" aria-live="polite">
+    <span class="dim sm"><b>{{ r.n_findings }}</b> candidate(s) so far.</span>
+    {% if r.status == 'running' %}
+      <a href="/research/{{ r.id }}" class="sm">Reload to see them</a>
+    {% endif %}
+  </div>
+</div>

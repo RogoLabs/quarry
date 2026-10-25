@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}{{ code }} · Quarry{% endblock %}
+{% block body %}
+{#  A themed page rather than FastAPI's default JSONResponse. The likeliest error in
+    the product is the single-family refusal on /research/start, and returning a raw
+    {"detail": ...} object there lost the form, the model selection and the theme. #}
+<div class="empty-state">
+  <div class="m-mid">
+    <h1>{{ code }}</h1>
+    <p class="prose mt-2">{{ detail|visible }}</p>
+    <p class="row mt-4">
+      <a href="/runs">Runs</a><span class="dim">·</span>
+      <a href="/triage">Triage</a><span class="dim">·</span>
+      <a href="/validation">Validation</a><span class="dim">·</span>
+      <a href="/advisories">Advisories</a><span class="dim">·</span>
+      <a href="/research">Deep review</a><span class="dim">·</span>
+      <a href="/egress">Egress</a>
+    </p>
+  </div>
+</div>
+{% endblock %}

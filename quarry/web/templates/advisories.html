@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% set nav = 'advisories' %}
+{% block title %}Advisories{% if run %} · {{ run.target }}{% endif %} · Quarry{% endblock %}
+{% block body %}
+<div class="page"><div class="wrap">
+  <h1>Advisories</h1>
+  <p class="sub">{% if run %}run {{ run.id }} · {{ run.target }} ·
+    <a href="/advisories">every run</a>{% else %}every run{% endif %}</p>
+  <p class="prose mb-6">Markdown drafts written by <code>quarry report</code>, one per
+    finding whose latest dynamic verdict is confirmed with a baseline. They are drafts:
+    read each one before it goes to a maintainer.</p>
+
+  <div class="tbl">
+    <table>
+      <caption class="sr-only">Advisory drafts, newest first</caption>
+      <thead><tr>
+        <th scope="col" class="r">#</th><th scope="col">Run</th>
+        <th scope="col">Finding</th><th scope="col">Verdict</th>
+        <th scope="col">File</th><th scope="col">Written</th>
+      </tr></thead>
+      <tbody>
+      {% for a in rows %}
+        <tr>
+          <td class="r"><a href="/advisories/{{ a.id }}">{{ a.id }}</a></td>
+          <td class="nowrap"><a href="/runs/{{ a.run_id }}">{{ a.run_id }}</a>
+            <span class="dim sm">{{ a.target|visible }}</span></td>
+          <td class="mono sm">{{ (a.finding_path or a.finding_id)|tail_path(40)|visible }}{% if a.symbol %}
+            <span class="dim">{{ a.symbol|visible }}</span>{% endif %}</td>
+          <td>{% if a.verdict == 'confirmed' %}<span class="pill verified">confirmed</span>
+              {% elif a.verdict %}<span class="pill inert">{{ a.verdict }}</span>
+              {% else %}<span class="pill unmeasured">no verdict row</span>{% endif %}
+              {% if a.model %}<span class="dim sm">{{ a.model|visible }}</span>{% endif %}</td>
+          <td class="mono sm nowrap"><a href="/advisories/{{ a.id }}">{{ a.path.rsplit('/', 1)[-1]|visible }}</a></td>
+          <td class="mono sm dim nowrap">{{ a.created_at|local }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6" class="dim">No drafts recorded{% if run %} for this
+          run{% endif %}. <code>quarry report &lt;run&gt;</code> writes one for each
+          confirmed verdict that has a baseline comparison.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div></div>
+{% endblock %}

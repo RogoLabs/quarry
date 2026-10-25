@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "quarry",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": [
+        "-m",
+        "uvicorn",
+        "quarry.web.app:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8099",
+        "--reload",
+        "--reload-dir",
+        "quarry"
+      ],
+      "port": 8099,
+      "url": "http://127.0.0.1:8099"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+work/
+*.sparseimage
+.DS_Store
+.claude/worktrees/
+*.egg-info/

@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% set nav = 'validation' %}
+{% block title %}Validation{% if run %} · {{ run.target }}{% endif %} · Quarry{% endblock %}
+{% block body %}
+<div class="page"><div class="wrap">
+  <h1>Validation</h1>
+  <p class="sub">{% if run %}run {{ run.id }} · {{ run.target }} ·
+    <a href="/validation{% if state %}?state={{ state }}{% endif %}">every run</a>{% else %}every run{% endif %}</p>
+  <p class="prose mb-6">Each row is the latest verdict one seat and lens gave a finding,
+    from probes run against the target in Docker. A probe that reproduced but has no
+    recorded baseline is stored as needs review, not confirmed, so needs review is the
+    common state.</p>
+
+  {% set q_run = ('run=' ~ run.id ~ '&') if run else '' %}
+  <nav class="seg" aria-label="Filter by verdict">
+    <a href="/validation{% if run %}?run={{ run.id }}{% endif %}"
+       class="{{ 'on' if not state }}" {% if not state %}aria-current="true"{% endif %}>all
+      <span class="num">{{ counts.total }}</span></a>
+    {% for s in states %}
+    <a href="/validation?{{ q_run }}state={{ s }}"
+       class="{{ 'on' if state == s }}" {% if state == s %}aria-current="true"{% endif %}>{{ s }}
+      <span class="num">{{ counts[s] }}</span></a>
+    {% endfor %}
+  </nav>
+
+  <div class="tbl mt-3">
+    <table>
+      <caption class="sr-only">Latest verdicts{% if state %} in state {{ state }}{% endif %},
+        newest first</caption>
+      <thead><tr>
+        <th scope="col">Verdict</th><th scope="col">Finding</th>
+        <th scope="col">Run</th><th scope="col">Seat · lens</th>
+        <th scope="col">Reason</th><th scope="col">When</th>
+      </tr></thead>
+      <tbody>
+      {% for v in rows %}
+        <tr>
+          <td>
+            {% if v.verdict == 'confirmed' %}<span class="pill verified">confirmed</span>
+            {% elif v.verdict == 'needs-review' %}<span class="pill incomplete">needs review</span>
+            {% elif v.verdict == 'rejected' %}<span class="pill killed">rejected</span>
+            {% else %}<span class="pill inert">{{ v.verdict }}</span>{% endif %}
+          </td>
+          {#  The finding's path opens its evidence: the one action on this row, so it
+              sits in the second column rather than past the horizontal scroll. #}
+          <td class="mono sm">{% if v.occurrence_id %}<a href="/evidence/{{ v.occurrence_id }}">{{ (v.path or v.finding_id)|tail_path(40)|visible }}</a>{% else %}{{ (v.path or v.finding_id)|tail_path(40)|visible }}{% endif %}{% if v.symbol %}
+            <span class="dim">{{ v.symbol|visible }}</span>{% endif %}
+            {% if v.cwe %}<span class="pill inert">{{ v.cwe|visible }}</span>{% endif %}
+            {% if v.summary %}<div class="dim wrap-normal">{{ v.summary|string|truncate(160)|visible }}</div>{% endif %}</td>
+          <td class="nowrap"><a href="/runs/{{ v.run_id }}">{{ v.run_id }}</a>
+            <span class="dim sm">{{ v.target|visible }}</span></td>
+          <td class="mono sm nowrap">{{ v.seat|visible }} · {{ v.model|visible }}
+            <div class="dim">executed {{ v.executed_score }}</div></td>
+          <td class="dim sm wrap-normal minw-reason">{{ (v.reason or '')|visible }}</td>
+          <td class="mono sm dim nowrap">{{ v.created_at|local }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6" class="dim">{% if state %}No latest verdict is
+          {{ state }}{% if run %} in this run{% endif %}.{% else %}No verdicts
+          yet. <code>quarry validate &lt;run&gt;</code> probes live findings against the
+          running target and writes them here.{% endif %}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if rows|length < shown_total %}
+  <p class="note">Showing the newest {{ rows|length }} of {{ shown_total }}.</p>
+  {% endif %}
+</div></div>
+{% endblock %}

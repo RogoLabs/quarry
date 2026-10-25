@@ -1,0 +1,114 @@
+{#
+  The shell. No per-page stylesheet; see static/app.css and static/theme.css.
+
+  Two things here are load-bearing and easy to break:
+
+  1. Dark is the brand default, stamped by the pre-paint script below when no
+     choice is stored. The stylesheet itself keeps light on bare :root and dark
+     under the media query, so if the script fails the page follows the OS rather
+     than showing the wrong theme forever. "system" is stored explicitly, because
+     the absence of a choice now means dark.
+
+  2. The theme script is inline, in <head>, and NOT deferred. It runs during head
+     parsing, before first paint. htmx and Alpine are deferred because they are not
+     paint-critical; this one is.
+#}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block title %}Quarry{% endblock %}</title>
+<script>(function(){var d=document.documentElement,t;
+try{t=localStorage.getItem('quarry-theme')}catch(e){}
+if(t==='light'||t==='dark')d.dataset.theme=t;else if(t!=='system')d.dataset.theme='dark'})()</script>
+<link rel="icon" href="{{ asset('favicon.svg') }}" type="image/svg+xml">
+<link rel="stylesheet" href="{{ asset('theme.css') }}">
+<link rel="stylesheet" href="{{ asset('app.css') }}">
+<script src="{{ asset('htmx.min.js') }}" defer></script>
+<script src="{{ asset('alpine.min.js') }}" defer></script>
+{% block head %}{% endblock %}
+</head>
+<body data-route="{{ nav|default('') }}">
+<a class="skip" href="#main">Skip to content</a>
+<div class="app">
+  <header class="top">
+    <span class="brand">
+      <a class="word" href="/runs">Quarry</a>
+      <a class="by" href="https://rogolabs.net" rel="noopener noreferrer">by Rogo<span class="labs">Labs</span></a>
+    </span>
+    {#  Pipeline order: where a run starts, then what each stage produced. #}
+    <nav aria-label="Sections">
+      <a href="/runs" {% if nav=='runs' %}class="on" aria-current="page"{% endif %}>Runs</a>
+      <a href="/triage" {% if nav=='triage' %}class="on" aria-current="page"{% endif %}>Triage</a>
+      <a href="/validation" {% if nav=='validation' %}class="on" aria-current="page"{% endif %}>Validation</a>
+      <a href="/advisories" {% if nav=='advisories' %}class="on" aria-current="page"{% endif %}>Advisories</a>
+      <a href="/research" {% if nav=='research' %}class="on" aria-current="page"{% endif %}>Deep review</a>
+      <a href="/egress" {% if nav=='egress' %}class="on" aria-current="page"{% endif %}>Egress</a>
+    </nav>
+    {% block topmeta %}<div class="spacer"></div>{% endblock %}
+
+    {#  A counter, not a badge: a figure that can change is information, and it
+        links to its own set like every other number in this product. #}
+    <a class="meta plain egress-count" href="/egress"
+       title="Everything this machine has sent. The ledger, not a claim about it.">
+      <span>out <b>{{ egress_out }}</b></span>
+      <span class="dim">{{ egress_hosts }} dest</span>
+    </a>
+
+    <button class="ghost theme-btn" id="themeToggle" type="button"
+            aria-label="Theme: dark">
+      <span id="themeGlyph" aria-hidden="true">&#9790;</span>
+    </button>
+    {#  One short status line for screen readers, rather than a live region over the
+        whole button. #}
+    <span class="sr-only" id="themeStatus" role="status"></span>
+  </header>
+
+  <main id="main" tabindex="-1">
+    {% block body %}{% endblock %}
+  </main>
+</div>
+
+<script>
+/* Three states: dark -> light -> system -> dark. Dark is the default and is the
+   absence of the key; "system" is stored, so a cleared localStorage lands on the
+   brand default rather than on a state the user did not pick. */
+(function () {
+  var K = 'quarry-theme',
+      root = document.documentElement,
+      btn = document.getElementById('themeToggle'),
+      glyph = document.getElementById('themeGlyph'),
+      status = document.getElementById('themeStatus'),
+      mq = window.matchMedia('(prefers-color-scheme: dark)');
+
+  function mode() {
+    var t = null;
+    try { t = localStorage.getItem(K) } catch (e) {}
+    return t === 'light' || t === 'system' ? t : 'dark';
+  }
+  function paint(announce) {
+    var m = mode(), dark = m === 'dark' || (m === 'system' && mq.matches);
+    glyph.textContent = m === 'system' ? '◐' : (dark ? '☾' : '☼');
+    var label = 'Theme: ' + (m === 'system'
+      ? 'follow system (' + (dark ? 'dark' : 'light') + ')' : m);
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+    if (announce) status.textContent = label;
+  }
+  btn.addEventListener('click', function () {
+    var next = { dark: 'light', light: 'system', system: 'dark' }[mode()];
+    try {
+      if (next === 'dark') localStorage.removeItem(K);
+      else localStorage.setItem(K, next);
+    } catch (e) {}
+    if (next === 'system') delete root.dataset.theme; else root.dataset.theme = next;
+    paint(true);
+  });
+  /* In system mode, macOS flipping at sunset must update the glyph too. */
+  mq.addEventListener('change', function () { paint(false) });
+  paint(false);
+})();
+</script>
+</body>
+</html>

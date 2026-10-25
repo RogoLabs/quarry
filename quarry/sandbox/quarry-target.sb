@@ -1,0 +1,58 @@
+;; quarry-target.sb — containment for Layer 3, where the TARGET itself is executed.
+;;
+;; Tier 1 (quarry-tier1.sb) runs scanners that only READ target bytes, so it denies
+;; the network outright. Layer 3 is different: to confirm a finding we stand the target
+;; up and probe it, which means the target process must accept a loopback connection
+;; from the local probe. That is the only capability this profile adds over Tier 1.
+;;
+;; The safety property that must hold: loopback in, nothing out. A target that can
+;; reach the public network is a target that can exfiltrate, and it would also make
+;; egress the browser-style blind spot the egress ledger cannot record. So non-loopback
+;; network stays denied at the OS, exactly as in Tier 1.
+;;
+;; Here the target's own code runs, so the launchd gap described in quarry-tier1.sb is
+;; reachable by construction: a target can message launchd directly. It cannot submit
+;; a job (`job-creation`), reach any named service, or read outside the run volume.
+;;
+;; Parameters: RUNDIR (the mounted per-run sparse image), HOSTHOME.
+(version 1)
+(allow default)
+
+;; 1. Network: loopback only. Bind a local port, accept local connections, talk to
+;;    local ports. Everything else (any remote host) is denied, so the probe can reach
+;;    the target and the target can reach nothing off the machine.
+(deny network*)
+(allow network-bind     (local ip "localhost:*"))
+(allow network-inbound  (local ip "localhost:*"))
+(allow network-outbound (remote ip "localhost:*"))
+
+;; 2. No named system service: no clipboard, no LaunchServices, no cfprefsd, no
+;;    keychain. MEASURED: python and node servers bind, serve and answer a loopback
+;;    probe with zero services allowed. Signals stay inside this sandbox.
+(deny mach-lookup)
+(deny job-creation)
+(deny user-preference-read user-preference-write)
+(deny  signal)
+(allow signal (target same-sandbox))
+(deny process-exec (literal "/bin/launchctl"))
+
+;; 3. The host filesystem is not readable. The run volume is. /private/tmp,
+;;    /private/var/folders and /Volumes: see quarry-tier1.sb section 4.
+(deny  file-read* (subpath "/Users")
+                  (subpath "/private/tmp")
+                  (subpath "/private/var/folders")
+                  (subpath "/Volumes"))
+(allow file-read* (subpath (param "RUNDIR")))
+(allow file-read-metadata (path-ancestors (param "RUNDIR")))
+
+;; 4. Belt and braces: name the crown jewels so a future (allow) cannot silently re-expose them.
+(deny file-read*  (subpath (string-append (param "HOSTHOME") "/.ssh"))
+                  (subpath (string-append (param "HOSTHOME") "/.aws"))
+                  (subpath (string-append (param "HOSTHOME") "/.gnupg"))
+                  (subpath (string-append (param "HOSTHOME") "/.config"))
+                  (subpath (string-append (param "HOSTHOME") "/Library/Keychains")))
+
+;; 5. Write only inside the run volume.
+(deny  file-write*)
+(allow file-write* (subpath (param "RUNDIR"))
+                   (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr"))

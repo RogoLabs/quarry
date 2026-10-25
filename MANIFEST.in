@@ -1,0 +1,8 @@
+# Belt and braces for the sdist: package-data covers the wheel, this covers `sdist`.
+# The dashboard cannot start without these — quarry/web/app.py constructs
+# StaticFiles(directory=.../static) at import, and StaticFiles raises on a missing
+# directory. tests/test_packaging.py asserts both are present in a built wheel.
+recursive-include quarry/web/templates *.html
+recursive-include quarry/web/static *.js *.css *.svg *.woff2 *.txt *.md
+include quarry/*.sql
+include quarry/sandbox/*.sb

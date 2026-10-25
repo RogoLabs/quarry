@@ -1,0 +1,247 @@
+{% extends "base.html" %}
+{% set nav = 'runs' %}
+{% block title %}Run {{ run.id }} · {{ run.target }}{% endblock %}
+{% block body %}
+<div class="page"><div class="wrap">
+  <h1>{{ run.target }}</h1>
+  <p class="sub">run {{ run.id }} · {{ (run.git_sha or '')[:12] }} ·
+    {{ run.license_spdx or 'no license' }}{% if not run.license_osi %}
+      <span class="pill incomplete">not OSI, CodeQL gated off</span>{% endif %}
+    · {{ run.started_at|local }}</p>
+
+  {#  The pipeline, left to right, each stage's count linking to its set. #}
+  <nav class="pipeline" aria-label="Pipeline for run {{ run.id }}">
+    <ol>
+    {% for st in pipeline %}
+      <li><a href="{{ st.href }}">
+        <span class="pn">{{ st.name }}</span>
+        <span class="pv">{{ st.n }}</span>
+        <span class="pu">{{ st.unit }}</span></a></li>
+    {% endfor %}
+    </ol>
+  </nav>
+
+  {#  Four stat cards, all links. A card is a promise of a drill-down; cards that do
+      not drill down teach the operator that numbers here are decoration, and that
+      lesson transfers to the funnel two inches below.
+
+      Be exact about where each one goes. "live" and "producers" open triage, which
+      is their set. "raw occurrences" also opens triage, which shows only the live
+      part of it; there is no single page listing every raw occurrence. "suppressed"
+      opens `?suppressed=all`: every occurrence that is not live, across all stages,
+      by the same kill/defer/merge rule `live_occurrences` uses, so its row count
+      matches the card. It used to link to `?stage=&action=kill`, which rendered
+      nothing, under a comment claiming every card was a working link.
+
+      `suppressed` carries no kill colour: suppression is the deterministic layer
+      working, and red would frame it as damage. It is a count, not a warning.    #}
+  <div class="cards">
+    <a class="card" href="/triage?run={{ run.id }}">
+      <span class="k">raw occurrences</span>
+      <span class="v">{{ run.total }}</span></a>
+    <a class="card" href="/triage?run={{ run.id }}">
+      <span class="k">live after funnel</span>
+      <span class="v">{{ run.live }}</span></a>
+    <a class="card" href="/triage?run={{ run.id }}">
+      <span class="k">producers to triage</span>
+      <span class="v">{{ run.producers }}</span></a>
+    <a class="card" href="/runs/{{ run.id }}?suppressed=all">
+      <span class="k">suppressed</span>
+      <span class="v">{{ run.total - run.live }}</span></a>
+  </div>
+
+  {#  Validation, as three links. A confirmed verdict is the one thing on this page
+      worth looking at first, so only it gets the highlight edge, and only when it is
+      not zero. Each count is the number of latest-verdict slots (one per finding,
+      seat and lens) in that state. #}
+  <h2 class="h-sec">Validation: latest verdict per finding and lens</h2>
+  <div class="vcard {{ 'hl' if vc.confirmed }}">
+    <a href="/validation?run={{ run.id }}&amp;state=confirmed" class="vstat">
+      <span class="pill verified">confirmed</span><span class="v">{{ vc.confirmed }}</span></a>
+    <a href="/validation?run={{ run.id }}&amp;state=needs-review" class="vstat">
+      <span class="pill incomplete">needs review</span><span class="v">{{ vc['needs-review'] }}</span></a>
+    <a href="/validation?run={{ run.id }}&amp;state=rejected" class="vstat">
+      <span class="pill killed">rejected</span><span class="v">{{ vc.rejected }}</span></a>
+    <p class="note">{% if vc.total %}{{ vc.total }} verdict(s) in this run.
+      <a href="/validation?run={{ run.id }}">All of them</a>. A probe with no recorded
+      baseline is held as needs review, so that state is the common one.{% else %}No
+      verdicts yet. <code>quarry validate {{ run.id }}</code> probes the live findings
+      against the running target.{% endif %}</p>
+  </div>
+
+  <h2 class="h-sec" id="funnel">The funnel: every number is a link to the set it killed</h2>
+
+  {#  A real <table>. It was a <div> of <div>s holding <span>s, so a screen reader
+      read the header row once as five loose words and then eight rows of bare
+      numbers with no column association whatsoever — "1 path-class 319 · · 297" — on
+      the screen the entire product rests on.
+
+      Each action cell links to ITS OWN action. All four used to emit one identical
+      href, and `queries.suppressed()` excluded `boost`, so clicking a boost count
+      opened "Suppressed at X — 0 shown" over an empty table. Two of eleven stages. #}
+  <div class="funnel">
+    <table>
+      <caption class="sr-only">Funnel stages for run {{ run.id }}, with the count of
+        occurrences each stage killed, deferred, merged or boosted, and how many
+        remained after it</caption>
+      <thead>
+        <tr>
+          <th scope="col" class="r">#</th>
+          <th scope="col">Stage</th>
+          <th scope="col" class="n">Kill</th>
+          <th scope="col" class="n">Defer</th>
+          <th scope="col" class="n">Merge</th>
+          <th scope="col" class="n">Boost</th>
+          <th scope="col" class="n">Remaining</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% set ns = namespace(rem=run.total) %}
+      {% for s in stages %}
+        {#  Read `s.remaining` when the manifest carries it. Recomputing it as
+            rem - kill - defer - merge silently disagrees with `live_occurrences`,
+            which excludes only action='kill' — so under `funnel --top-k` the funnel's
+            last row and the "live after funnel" card diverge, and deferred findings
+            appear in a queue this table says they left. #}
+        {% if s.remaining is defined and s.remaining is not none %}
+          {% set ns.rem = s.remaining %}
+        {% else %}
+          {% set ns.rem = ns.rem - s.kill - s.defer - s.merge %}
+        {% endif %}
+        <tr class="{{ 'heuristic' if s.heuristic }}">
+          <td class="i">{{ loop.index }}</td>
+          <th scope="row" class="nm">{{ s.stage }}
+            {%- if s.heuristic %} <span class="pill incomplete">recall risk</span>{% endif %}</th>
+          {% for act in ['kill','defer','merge','boost'] %}
+            {% if s[act] %}
+              <td class="n"><a href="/runs/{{ run.id }}?stage={{ s.stage|urlencode }}&amp;action={{ act }}"
+                >{{ s[act] }}</a></td>
+            {% else %}<td class="z">·</td>{% endif %}
+          {% endfor %}
+          <td class="rem">{{ ns.rem }}</td>
+        </tr>
+      {% endfor %}
+      {% if not stages %}
+        <tr><td class="i"></td>
+          <td colspan="6" class="dim">Funnel not run yet. <code>quarry funnel {{ run.id }}</code></td></tr>
+      {% endif %}
+      </tbody>
+    </table>
+  </div>
+  <div class="legend">
+    <span><b class="l-killed">kill</b> = evidence says no</span>
+    <span><b class="l-defer">defer</b> = a rate limiter ran out, not evidence</span>
+    <span><b class="l-merge">merge</b> = same finding, another tool</span>
+    <span><b class="l-boost">boost</b> = score raised, nothing removed</span>
+    <span>nothing is ever deleted</span>
+  </div>
+
+  {% if stage or all_suppressed %}
+  {#  The heading names the action taken. It was hardcoded to "Suppressed at", which
+      was simply false for a boost — and it now states the true total rather than
+      presenting a LIMIT-capped tail as a complete record. #}
+  {% if all_suppressed %}
+  <h2 class="h-sec">Not live, every stage: showing {{ suppressed|length }}
+    {%- if suppressed_total > suppressed|length %} of {{ suppressed_total }}{% endif %}</h2>
+  {% else %}
+  <h2 class="h-sec">{{ ACTION_NOUN.get(action, 'Suppressed') }} at “{{ stage }}”:
+    showing {{ suppressed|length }}{% if suppressed_total > suppressed|length %}
+      of {{ suppressed_total }}{% endif %}</h2>
+  {% endif %}
+  {# .tall: this is the one table that can carry 300 rows, so it gets a bounded
+     height — which gives it a scrollport of its own and makes the sticky header
+     actually stick. #}
+  <div class="tbl tall">
+    <table>
+      <caption class="sr-only">{% if all_suppressed %}Occurrences that are not live,
+        with the event holding each one out{% else %}Occurrences
+        {{ ACTION_NOUN.get(action, 'suppressed')|lower }} at stage {{ stage }}{% endif %}</caption>
+      <thead><tr><th scope="col">Action</th><th scope="col">Producer</th>
+        <th scope="col">Location</th><th scope="col">Reason</th>
+        <th scope="col"><span class="sr-only">Evidence</span></th></tr></thead>
+      <tbody>
+      {% for s in suppressed %}
+        <tr>
+          <td>
+            {% if s.action == 'kill' %}<span class="pill killed">kill</span>
+            {% elif s.action == 'defer' %}<span class="pill incomplete">defer</span>
+            {% elif s.action == 'merge' %}<span class="pill inert">merge</span>
+            {% elif s.action == 'boost' %}<span class="pill accent">boost</span>
+            {% else %}<span class="pill inert">{{ s.action }}</span>{% endif %}
+            {% if all_suppressed %}<span class="dim sm">{{ s.stage }}</span>{% endif %}
+          </td>
+          <td class="mono sm">{{ s.producer_id|visible }}</td>
+          <td class="mono sm">{{ s.path|visible }}{% if s.start_line %}:{{ s.start_line }}{% endif %}</td>
+          <td class="dim">
+            {%- if not s.deterministic %}<span class="pill incomplete">heuristic</span> {% endif %}{{ s.reason|visible }}</td>
+          <td><a href="/evidence/{{ s.occurrence_id }}" hx-get="/evidence/{{ s.occurrence_id }}"
+                 hx-target="#peek" hx-swap="innerHTML">code</a></td>
+        </tr>
+      {% endfor %}
+      {% if not suppressed %}
+        <tr><td colspan="5" class="dim">{% if all_suppressed %}Every occurrence in this
+          run is live.{% else %}No occurrences took the
+          “{{ action or 'suppressing' }}” action at this stage.{% endif %}</td></tr>
+      {% endif %}
+      </tbody>
+    </table>
+  </div>
+  <div id="peek" class="stack mt-3"></div>
+  {% endif %}
+
+  <h2 class="h-sec" id="quarantine">Quarantined at ingest: moved aside, never loaded, never deleted</h2>
+  <div class="tbl">
+    <table>
+      <caption class="sr-only">Files quarantined during ingest</caption>
+      <thead><tr><th scope="col">Kind</th><th scope="col">Path</th>
+        <th scope="col">Detail</th></tr></thead>
+      <tbody>
+      {% for qz in quarantine %}
+        {#  Containment worked. The row existing IS the signal, so it does not also
+            need an alarm colour. #}
+        <tr><td><span class="pill inert">{{ qz.kind }}</span></td>
+            <td class="mono sm">{{ qz.original_path|visible }}</td>
+            <td class="mono sm dim">{{ qz.detail|visible }}</td></tr>
+      {% else %}
+        <tr><td colspan="3" class="dim">Nothing quarantined: no symlinks, no
+          target-supplied scanner config.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {#  Moved ABOVE the suppressed set in reading order? No — it stays here, because it
+      is per-run evidence and the funnel is what you came for. What changed: it has an
+      empty state (a headers-only table was indistinguishable from "not wired up"), it
+      marks which rows are global rather than this run's, and it states its totals
+      instead of silently truncating at twelve. The all-time view is /egress.       #}
+  <h2 class="h-sec">Egress: “completely local” has to be auditable to mean anything</h2>
+  <div class="tbl">
+    <table>
+      <caption class="sr-only">Network egress recorded for this run and globally</caption>
+      <thead><tr><th scope="col">Scope</th><th scope="col">Stage</th>
+        <th scope="col">Destination</th><th scope="col" class="r">Out</th>
+        <th scope="col">Note</th><th scope="col">When</th></tr></thead>
+      <tbody>
+      {% for e in led.rows[:12] %}
+        <tr><td><span class="pill inert">{{ e.scope }}</span></td>
+            <td class="mono sm">{{ e.stage }}</td>
+            <td class="mono sm">{{ e.destination }}</td>
+            <td class="num r sm">{{ e.bytes_out or 0 }}</td>
+            <td class="dim sm">{{ e.note }}</td>
+            <td class="mono sm dim nowrap">{{ e.created_at|local }}</td></tr>
+      {% else %}
+        <tr><td colspan="6" class="dim">Nothing recorded: no database sync, no clone,
+          no metadata fetch has run on this machine yet.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if led.rows %}
+  <p class="note">{{ led.n_events }} event(s) across {{ led.n_destinations }}
+    destination(s) all-time; {{ led.rows[:12]|length }} of the {{ led.rows|length }}
+    for this run and global sync shown here.
+    <a href="/egress">The whole ledger</a>, with byte totals and no limit.</p>
+  {% endif %}
+</div></div>
+{% endblock %}

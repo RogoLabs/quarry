@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img"
+     aria-label="Quarry">
+  <!-- RogoLabs slate tile with a geometric Q: a ring and a short diagonal tail.
+       Shapes only, no <text>, because a favicon cannot load a font. The tile is
+       dark in both themes, so the mark reads in a light or a dark tab strip. -->
+  <rect width="32" height="32" rx="7" fill="#0F172A"/>
+  <circle cx="15" cy="15" r="7.5" fill="none" stroke="#60A5FA" stroke-width="3.5"/>
+  <path d="M18.5 18.5 L24.5 24.5" stroke="#60A5FA" stroke-width="3.5"
+        stroke-linecap="round"/>
+</svg>

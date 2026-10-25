@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% set nav = 'research' %}
+{% block title %}Deep review{% endblock %}
+{% block body %}
+<div class="page"><div class="wrap">
+  <h1>Deep review</h1>
+  <p class="sub">local inference only; the cost is time, not money</p>
+  <p class="prose mb-6">Several model families read the
+    repository independently through profile-selected lenses, then refute each other.
+    Work is committed per unit, so stopping costs one unit rather than the run.</p>
+
+  <div class="card">
+    {#  The two-family rule is enforced client-side BEFORE submit as well as on the
+        server. The Alpine `fams` set declared here used to be dead code — nothing read
+        it — so the only feedback was a raw JSON 400 that lost the form, the model
+        selection and the theme. #}
+    <form method="post" action="/research/start"
+          x-data="{
+            fams: new Set(),
+            sync() {
+              this.fams = new Set([...$el.querySelectorAll('input[name=models]:checked')]
+                                    .map(i => i.dataset.family));
+            }
+          }"
+          x-init="sync()">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <div class="grid3">
+        <div>
+          <label for="run_id">Repository</label>
+          <select name="run_id" id="run_id" required>
+            {% for r in ingested %}
+              <option value="{{ r.id }}">{{ r.target }} @{{ (r.git_sha or '')[:8] }}</option>
+            {% else %}
+              <option disabled selected>no ingested runs: run `quarry ingest owner/repo` first</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label for="note">Note (optional)</label>
+          <input type="text" name="note" id="note" placeholder="what are you looking for?">
+        </div>
+        <div>
+          <label for="hours">Stop after (hours)</label>
+          <input type="number" name="hours" id="hours" value="8" min="0" step="0.5">
+        </div>
+      </div>
+
+      <fieldset class="fams-set mt-5">
+      <legend>Models, at least two families</legend>
+      <div class="fams">
+        {% for m in models %}
+        <label class="mrow">
+          <input type="checkbox" name="models" value="{{ m }}"
+                 data-family="{{ family_of[m] }}" x-on:change="sync()"
+                 {{ 'checked' if m in ['qwen3-coder:30b','gpt-oss:20b','devstral:24b'] }}>
+          <span class="n">{{ m }}</span>
+          <span class="fam">{{ family_of[m] }}</span>
+        </label>
+        {% endfor %}
+      </div>
+      </fieldset>
+      <p class="note">Refutation is cross-family by construction. Same-family review is
+        the configuration measured to degrade findings by 37.6%, so a single-family
+        selection is refused rather than silently downgraded.</p>
+
+      <div class="row mt-4">
+        <button type="submit" x-bind:disabled="fams.size < 2">Start deep review</button>
+        <span class="note" x-show="fams.size < 2" x-cloak>
+          <span class="pill incomplete">blocked</span>
+          <span x-text="fams.size === 0
+            ? 'Select models from at least two families.'
+            : 'Only one family selected. Add a model from another.'"></span>
+        </span>
+      </div>
+    </form>
+  </div>
+
+  <h2 class="h-sec">Runs</h2>
+  <div class="tbl">
+    <table>
+      <caption class="sr-only">Deep-review runs, newest first</caption>
+      <thead><tr>
+        <th scope="col" class="r">#</th><th scope="col">Target</th><th scope="col">Status</th>
+        <th scope="col">Progress</th><th scope="col" class="r">Units</th>
+        <th scope="col" class="r">Candidates</th><th scope="col" class="r">Time</th>
+        <th scope="col">Started</th><th scope="col"><span class="sr-only">Actions</span></th>
+      </tr></thead>
+      <tbody>
+      {% for r in runs %}
+        {% set pct = (100 * r.done / r.units) if r.units else 0 %}
+        <tr>
+          <td class="r"><a href="/research/{{ r.id }}">{{ r.id }}</a></td>
+          <td>{{ r.target }}</td>
+          <td>
+            {% if r.status == 'done' %}<span class="pill verified">done</span>
+            {% elif r.status == 'running' %}<span class="pill accent">running</span>
+            {% elif r.status == 'stopped' %}<span class="pill inert">stopped</span>
+            {% elif r.status in ('died','stalled') %}<span class="pill alarm">{{ r.status }}</span>
+            {% else %}<span class="pill unmeasured">{{ r.status }}</span>{% endif %}
+            {#  The reason is visible text, not a `title=`. It already was here; the
+                detail page was the regression. #}
+            {% if r.status_why %}<div class="dim xs mt-1">{{ r.status_why }}</div>{% endif %}
+          </td>
+          <td><div class="bar" role="presentation"><span style="--pct:{{ pct }}%"></span></div></td>
+          <td class="num r">{{ r.done }}/{{ r.units }}{% if r.errored %}
+            <span class="pill alarm">{{ r.errored }} err</span>{% endif %}</td>
+          <td class="num r">{{ r.findings }}</td>
+          <td class="num r">{{ '%.0f'|format(r.seconds/60) }}m</td>
+          <td class="mono sm dim">{{ r.started_at|local }}</td>
+          <td>{% if r.resumable %}
+            <form method="post" action="/research/{{ r.id }}/resume">
+              <input type="hidden" name="csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="hours" value="8">
+              <button type="submit" class="xs">Resume</button>
+            </form>{% endif %}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="9" class="dim">No deep reviews yet.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div></div>
+{% endblock %}

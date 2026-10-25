@@ -1,0 +1,186 @@
+{#
+  One finding. Rendered in TWO contexts: as an include inside triage.html's third
+  column, and as an htmx fragment swapped into run.html's #peek by the killed-set
+  view. That is why it carries no per-page stylesheet of its own and never may — ten of its
+  classes used to live only in triage.html, so the killed-set pane rendered source
+  code in proportional sans with indentation collapsed.
+
+  The title is an <h2>. It was an <h1>, which meant the document outline changed
+  shape as the operator pressed `j`, and injecting the fragment into run.html put a
+  second <h1> after four <h2>s.
+#}
+<div class="dhead">
+  <h2>{{ (detail.message or detail.rule_id)|visible }}</h2>
+  <div class="loc">{{ detail.path|visible }}{% if detail.start_line %}:{{ detail.start_line }}{% endif %}</div>
+  <div class="dtags">
+    <span class="pill inert">{{ detail.tool }}</span>
+    <span class="pill inert">{{ detail.rule_id|visible }}</span>
+    {% if detail.cwe %}<span class="pill inert">{{ detail.cwe|visible }}</span>{% endif %}
+    <span class="pill inert">score {{ '%.0f'|format(detail.score) }}</span>
+    {% if detail.issue_id %}<span class="pill verified">cross-tool cluster</span>{% endif %}
+    {% if detail.redacted %}<span class="pill alarm">secret redacted</span>{% endif %}
+
+    {#  The tool's own severity, rendered as a claim and refused a colour.
+
+        `inert` is hardcoded rather than interpolated. It used to read
+        `class="pill {{ 'neutral' }}"` — a Jinja expression evaluating to a constant,
+        i.e. the vestigial socket a severity-conditional class had plugged into.
+        Reintroducing severity colour should require writing new code, not editing
+        one word inside an expression already shaped to receive it.
+
+        Claimed severity predicts nothing here: critical 0/11, high 3%, medium 0/26.
+        Colour is pre-attentive and survives every disclaimer printed beside it — if
+        the rows are red, the operator triages red. #}
+    <span class="pill inert">claims {{ detail.severity }}</span>
+    <span class="claim">the tool's own claim, never a sort key</span>
+  </div>
+</div>
+
+<div class="dbody scrollable">
+
+  {% if detail.redacted %}
+  <div class="sec">
+    <h3>Secret material</h3>
+    <p class="msg">Stored as prefix <code>{{ detail.secret_prefix|visible }}…</code>
+      plus SHA-256 <code>{{ (detail.secret_sha or '')[:24] }}…</code>.
+      The plaintext is never written to the database, and the evidence window below was
+      redacted at the same boundary it was extracted.</p>
+  </div>
+  {% endif %}
+
+  <div class="sec">
+    <h3>Evidence
+      {% if detail.evidence %}<span class="dim">
+        · lines {{ detail.evidence.start_line }} to {{ detail.evidence.end_line }},
+        from the content-addressed blob, not the clone</span>{% endif %}
+    </h3>
+    {% if detail.evidence %}
+      {#  tabindex="0" and role="region": the pane had neither and contains no focusable
+          descendants, so of a ±40-line window only what fitted was reachable without a
+          mouse — a WCAG 2.1.1 failure on the one artifact the product exists to show. #}
+      <div class="code" id="codepane" tabindex="0" role="region"
+           aria-label="Evidence, lines {{ detail.evidence.start_line }} to {{ detail.evidence.end_line }} of {{ detail.path|visible }}">
+        {#  role="presentation": the gutter is decoration, so a screen reader should
+            read this as a code block, not announce "table, 2 columns, 80 rows" eighty
+            times. The region label above carries the line range, and <mark> on the
+            flagged line carries the emphasis. #}
+        <table role="presentation">
+          <tbody>
+          {% for line in detail.evidence.lines %}
+          {% set n = detail.evidence.start_line + loop.index0 %}
+          <tr class="{{ 'hit' if n == detail.start_line }}"{% if n == detail.start_line %} id="hitline"{% endif %}>
+            <td class="ln" aria-hidden="true">{{ n }}</td>
+            {#  <mark> on the flagged line: a second channel independent of hue, plus a
+                screen-reader announcement, for free. The old treatment was a tint at
+                1.11:1 that contributed nothing. #}
+            <td>{% if n == detail.start_line %}<mark>{{ line|visible }}</mark>{% else %}{{ line|visible }}{% endif %}</td>
+          </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="dim">No evidence window was captured for this finding.</p>
+    {% endif %}
+  </div>
+
+  {#  Dynamic validation. One block per seat and lens, latest verdict only, across
+      runs (a verdict carries forward on finding_id). The rationale is probe evidence
+      gathered from the target, so every field is target-controlled: rendered as code,
+      through |visible, never as markup. #}
+  <div class="sec">
+    <h3>Validation
+      {% if detail.verdicts %}<span class="dim">· latest verdict per seat and lens</span>{% endif %}</h3>
+    {% for v in detail.verdicts %}
+    <div class="verdict v-{{ v.verdict }}">
+      <div class="vhead">
+        {% if v.verdict == 'confirmed' %}<span class="pill verified">confirmed</span>
+        {% elif v.verdict == 'needs-review' %}<span class="pill incomplete">needs review</span>
+        {% elif v.verdict == 'rejected' %}<span class="pill killed">rejected</span>
+        {% else %}<span class="pill inert">{{ v.verdict }}</span>{% endif %}
+        <span class="pill inert">{{ v.seat|visible }}</span>
+        <span class="pill inert">lens {{ v.model|visible }}</span>
+        <span class="vmeta">executed {{ v.executed_score }} · evidence {{ v.evidence_score }}
+          · run <a href="/validation?run={{ v.run_id }}">{{ v.run_id }}</a>
+          · {{ v.created_at|local }}</span>
+      </div>
+      {% if v.reason %}<p class="msg">{{ v.reason|visible }}</p>{% endif %}
+      {% if v.fields %}
+        <dl class="rationale">
+          {% for k in ['summary', 'request', 'observed', 'baseline', 'differs_from_baseline', 'determinism'] %}
+            {% if k in v.fields %}
+            <dt>{{ k|replace('_', ' ') }}</dt>
+            <dd><pre class="vcode">{{ v.fields[k]|string|visible }}</pre></dd>
+            {% endif %}
+          {% endfor %}
+        </dl>
+      {% elif v.raw_rationale %}
+        <pre class="vcode">{{ v.raw_rationale|visible }}</pre>
+      {% endif %}
+    </div>
+    {% else %}
+    <p class="dim fs-cell">No verdict yet. <code>quarry validate {{ detail.run_id }}</code> probes
+      candidates against the running target.</p>
+    {% endfor %}
+  </div>
+
+  <div class="sec">
+    <h3>Provenance: every point of the score traces to a stage</h3>
+    <div class="tbl">
+      <table class="prov">
+        <caption class="sr-only">Funnel events for this occurrence</caption>
+        <thead><tr><th scope="col">Stage</th><th scope="col">Action</th>
+          <th scope="col" class="r">Δ</th><th scope="col">Reason</th></tr></thead>
+        <tbody>
+        {% for p in detail.provenance %}
+        <tr>
+          <td class="ink">{{ p.stage }}</td>
+          <td>
+            {#  `defer` is NOT `kill`. It was rendered in the same red as a kill, one
+                line from a legend saying it means "a rate limiter ran out, not
+                evidence" — the palette asserting an equivalence the schema was built
+                to refuse. A defer is unfinished work that may still be a real
+                finding; a merge is bookkeeping with no recall loss. #}
+            {% if p.action == 'kill' %}<span class="pill killed">kill</span>
+            {% elif p.action == 'defer' %}<span class="pill incomplete">defer</span>
+            {% elif p.action == 'merge' %}<span class="pill inert">merge</span>
+            {% elif p.action == 'boost' %}<span class="pill accent">boost</span>
+            {% elif p.action == 'resurrect' %}<span class="pill verified">resurrect</span>
+            {% else %}<span class="pill inert">{{ p.action }}</span>{% endif %}
+          </td>
+          <td class="delta">{{ '%+.0f'|format(p.score_delta) if p.score_delta else '' }}</td>
+          <td class="wrap-normal dim">
+            {% if not p.deterministic %}<span class="pill incomplete">recall risk</span> {% endif %}{{ p.reason|visible }}</td>
+        </tr>
+        {% endfor %}
+        {% if not detail.provenance %}
+        <tr><td colspan="4" class="dim">The funnel has not been run for this occurrence.</td></tr>
+        {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+/* Centre the pane on the flagged line. A ±40-line window puts the hit in the middle
+   of the blob but at the bottom of a short viewport, which reads as "no highlight".
+
+   `max-height` and `overflow-y` used to be assigned here as inline styles. Inline
+   styles beat every cascade layer, so once .code was styled in app.css those two
+   assignments would have silently overridden the stylesheet. They live in CSS now and
+   only the scroll position is set from script.
+
+   Re-runs on htmx settle so the killed-set peek centres too, not just the include. */
+(function () {
+  function centre() {
+    var hit = document.getElementById('hitline'),
+        pane = document.getElementById('codepane');
+    if (!hit || !pane || !pane.clientHeight) return;
+    pane.scrollTop = Math.max(
+      0, hit.offsetTop - pane.clientHeight / 2 + hit.offsetHeight / 2);
+  }
+  centre();
+  document.body.addEventListener('htmx:afterSettle', centre);
+})();
+</script>

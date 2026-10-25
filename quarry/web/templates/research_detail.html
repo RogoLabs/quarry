@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% set nav = 'research' %}
+{% block title %}Deep review {{ r.id }} · {{ r.target }}{% endblock %}
+{% block body %}
+<div class="page"><div class="wrap">
+  <h1>{{ r.target }}</h1>
+  <p class="sub">deep review {{ r.id }} · {{ (r.git_sha or '')[:12] }} ·
+    {{ r.models|join(', ') }} · started {{ r.started_at|local }}</p>
+
+  {# The volatile regions. Everything that changes while a run is in flight lives in
+     this fragment and is swapped in place; nothing below it moves. #}
+  {% include "_research_progress.html" %}
+
+  <h2 class="h-sec">What was selected, and what was not</h2>
+  <div class="card">
+    <div class="mono pre-wrap ink">{{ r.profile.summary|visible }}</div>
+    <div class="row mt-3">
+      <span class="lens">Lenses run:</span>
+      {% for l in r.lenses %}<span class="pill verified">{{ l }}</span>{% endfor %}
+    </div>
+
+    {% if r.profile.skipped_lenses %}
+    {#  These were `title=` tooltips — unreachable by keyboard, unreachable on touch,
+        and non-conformant with WCAG 1.4.13 — on content the template itself calls
+        "information, not silence". A lens that did not run is a measurement, so the
+        fact that excluded it is rendered as text. #}
+    <div class="mt-3">
+      <span class="lens">Skipped, and why:</span>
+      <ul class="whylist">
+        {% for s in r.profile.skipped_lenses %}
+          <li><span class="lens-name">{{ s.lens }}</span>: {{ s.why }}</li>
+        {% endfor %}
+      </ul>
+      <p class="note">A lens that did not run is information, not silence.</p>
+    </div>
+    {% endif %}
+  </div>
+
+  <h2 class="h-sec">Candidates: quote-verified first, then survivors of refutation
+    {%- if r.n_findings > r.findings|length %}
+    <span class="dim">(showing {{ r.findings|length }} of {{ r.n_findings }})</span>{% endif %}</h2>
+  {% for f in r.findings %}
+    {% set refuted = f.n_refuted > 0 and f.n_survived == 0 %}
+    <div class="finding {{ 'refuted' if refuted else ('verified' if f.quote_verified else '') }}">
+      <div class="chips">
+        {#  Colour spent on machine verification, which is the correct thing for colour
+            to encode. A quote that is not in the source means the model fabricated it —
+            an instrument failure, so `alarm`. Being refuted is a real negative result,
+            so `killed`, not an alarm. #}
+        {% if f.quote_verified %}<span class="pill verified">quote verified</span>
+        {% else %}<span class="pill alarm">quote NOT in source</span>{% endif %}
+
+        {#  The model's own severity, labelled as a claim exactly like the scanner's.
+            It used to render bare and unlabelled between `quote verified` and the lens
+            name, as though it were a fact of the same kind — the LESS trustworthy
+            claim getting the MORE confident presentation. #}
+        <span class="pill inert">claims {{ f.severity }}</span>
+        <span class="pill inert">{{ f.lens }}</span>
+        <span class="pill inert">{{ f.model }}</span>
+        {% if f.n_survived %}<span class="pill verified">survived ×{{ f.n_survived }}</span>{% endif %}
+        {% if f.n_refuted %}<span class="pill killed">refuted ×{{ f.n_refuted }}</span>{% endif %}
+        {% if f.refuter_errors %}<span class="pill alarm">{{ f.refuter_errors }} refuter error</span>{% endif %}
+      </div>
+
+      {#  A refuted candidate COLLAPSES; it is not dimmed.
+
+          The old treatment was `opacity:.6` on the whole card, which composited the
+          refuter's own verdict down to 2.50:1 — the tool rendered its strongest
+          counter-evidence as the hardest thing on the screen to read, and did so on
+          the authority of a refuter whose false-kill rate is unmeasured.
+
+          Collapsing says the reader chose not to read this and can choose otherwise.
+          Dimming says the tool decided it was not worth reading. Same density win, no
+          editorial claim, and the contents stay at full contrast.                  #}
+      {% if refuted %}
+        <details class="collapse">
+          <summary>Refuted: {{ f.title|visible }}
+            <span class="dim">· killed by {{ f.refutations|map(attribute='model')|join(', ') }}</span>
+          </summary>
+          {% with f=f %}{% include "_candidate_body.html" %}{% endwith %}
+        </details>
+      {% else %}
+        <h3>{{ f.title|visible }}</h3>
+        {% with f=f %}{% include "_candidate_body.html" %}{% endwith %}
+      {% endif %}
+    </div>
+  {% else %}
+    <div class="card dim">No candidates yet.{% if r.status == 'running' %} Still reading.{% endif %}</div>
+  {% endfor %}
+</div></div>
+{% endblock %}

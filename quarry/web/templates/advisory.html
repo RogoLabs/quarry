@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% set nav = 'advisories' %}
+{% block title %}Advisory {{ a.id }} · {{ a.target }} · Quarry{% endblock %}
+{% block body %}
+<div class="page"><div class="wrap">
+  <h1>Advisory draft {{ a.id }}</h1>
+  <p class="sub"><a href="/runs/{{ a.run_id }}">run {{ a.run_id }}</a> · {{ a.target|visible }}
+    · {{ (a.git_sha or '')[:12] }} · written {{ a.created_at|local }}</p>
+
+  {#  The one thing to look at on this page. The draft is generated from probe
+      evidence and target-controlled strings, and a person sends it under their own
+      name. #}
+  <div class="banner hl" role="note">
+    <b>Review before sending.</b> This is a draft. Check every claim against the
+    evidence, confirm the severity yourself, and send it only to the project's own
+    security contact.
+    {% if a.occurrence_id %}<a href="/evidence/{{ a.occurrence_id }}">Open the evidence</a>.{% endif %}
+  </div>
+
+  <dl class="facts mt-4">
+    <dt>Finding</dt><dd class="mono sm">{{ (a.finding_path or a.finding_id)|visible }}{% if a.symbol %} · {{ a.symbol|visible }}{% endif %}</dd>
+    <dt>Verdict</dt><dd>{% if a.verdict == 'confirmed' %}<span class="pill verified">confirmed</span>{% elif a.verdict %}<span class="pill inert">{{ a.verdict }}</span>{% else %}<span class="pill unmeasured">no verdict row</span>{% endif %}
+      {% if a.seat %}<span class="dim sm">{{ a.seat|visible }} · lens {{ a.model|visible }}</span>{% endif %}</dd>
+    <dt>File</dt><dd class="mono sm">{{ a.path|visible }}</dd>
+    <dt>SHA-256</dt><dd class="mono sm">{{ a.sha256 }}
+      {% if f.ok %}{% if f.sha256 == a.sha256 %}<span class="pill verified">matches the file</span>
+      {% else %}<span class="pill alarm">file changed since it was written</span>{% endif %}{% endif %}</dd>
+  </dl>
+
+  {% if f.ok %}
+  {#  Escaped preformatted text. Never Markdown rendered to HTML: the draft carries
+      target-controlled strings and this page shows them as they are. #}
+  <div class="row mt-4" x-data="{ copied: false }">
+    <h2 class="as-text">Draft <span class="dim sm">{{ f.bytes }} bytes, Markdown source</span></h2>
+    <div class="spacer"></div>
+    <button type="button"
+            x-on:click="navigator.clipboard.writeText(document.getElementById('advtext').textContent).then(() => { copied = true; setTimeout(() => copied = false, 2000) })">
+      Copy Markdown</button>
+    <span class="sr-only" role="status" x-text="copied ? 'Copied to clipboard' : ''"></span>
+    <span class="note" x-show="copied" x-cloak aria-hidden="true">copied</span>
+  </div>
+  <pre class="advtext mt-2" id="advtext" tabindex="0" role="region"
+       aria-label="Advisory draft, Markdown source">{{ f.text|visible }}</pre>
+  {% else %}
+  <div class="card mt-4 mark"><p class="dim">{{ f.why }}</p></div>
+  {% endif %}
+</div></div>
+{% endblock %}

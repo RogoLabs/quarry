@@ -1,0 +1,262 @@
+{% extends "base.html" %}
+{% set nav = 'triage' %}
+{% block title %}Triage · {{ run.target }}{% endblock %}
+
+{% block topmeta %}
+<div class="spacer"></div>
+<div class="meta">
+  <span><a href="/runs/{{ run.id }}">{{ run.target }}</a>
+    <span class="dim">@{{ (run.git_sha or '')[:8] }}</span></span>
+  <span><b>{{ run.live }}</b> live <span class="dim">of {{ run.total }}</span></span>
+  <span><b>{{ run.producers }}</b> producers</span>
+  <span class="dim">sorted by band, never severity</span>
+</div>
+{% endblock %}
+
+{% block body %}
+{# The document needs an h1 that does not move. The finding title in _detail.html is
+   an h2, so the outline stops changing shape as the operator presses `j`. #}
+<h1 class="sr-only">Triage: {{ run.target }}</h1>
+
+{# Below 720px the console refuses rather than reflowing: `D` on a phone is one tap
+   from a corpus-wide write, and the dispose controls are not in the DOM at all. #}
+<div class="too-small">
+  <div class="m-tight center">
+    <h2 class="as-text">Quarry is a keyboard console</h2>
+    <p class="dim sm">It needs a window at least 720px wide. This run has
+      <b>{{ run.live }}</b> live of {{ run.total }} across {{ run.producers }} producers.
+      <a href="/runs/{{ run.id }}">Audit the funnel</a> instead.</p>
+  </div>
+</div>
+
+<div class="shell" x-data="triageKeys()" @keydown.window="key($event)">
+
+  <!-- ---------------- column 1: producers ---------------- -->
+  <div class="col scrollable" role="region" aria-label="Producers, the unit of decision">
+    <div class="colhead">
+      <h2>Producers</h2>
+      <span class="dim sm">the unit of decision</span>
+      <div class="spacer"></div>
+      {% if band %}<a href="/triage?run={{ run.id }}{% if verdict %}&verdict={{ verdict|urlencode }}{% endif %}" class="pill inert">clear band</a>{% endif %}
+      <button class="ghost xs" type="button" x-ref="helpBtn" x-on:click="openHelp()"
+              aria-haspopup="dialog" aria-label="Keyboard shortcuts"><kbd>?</kbd></button>
+    </div>
+
+    {#  The verdict filter. Each count is the number of latest-verdict slots in this
+        run in that state, and each one narrows the console to the findings behind it. #}
+    <nav class="vfilter" aria-label="Filter by verdict">
+      <span class="lbl">verdict</span>
+      <a href="/triage?run={{ run.id }}{% if band %}&band={{ band|urlencode }}{% endif %}"
+         class="{{ 'on' if not verdict }}" {% if not verdict %}aria-current="true"{% endif %}>any</a>
+      {% for s in verdict_states %}
+      <a href="/triage?run={{ run.id }}&verdict={{ s }}{% if band %}&band={{ band|urlencode }}{% endif %}"
+         class="{{ 'on' if verdict == s }}" {% if verdict == s %}aria-current="true"{% endif %}>{{ s }} <span class="num">{{ verdict_counts[s] }}</span></a>
+      {% endfor %}
+    </nav>
+
+    {% if undo %}
+    {# Pinned until the next disposition, not a toast. A toast that carries the only
+       undo affordance is a race between reading speed and a timer. #}
+    <div class="undo" role="status">
+      <span class="what">dismissed <b>{{ undo|visible }}</b></span>
+      <form method="post" action="/producers/{{ undo|urlencode }}/restore">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="run_id" value="{{ run.id }}">
+        <button type="submit">Restore <kbd>u</kbd></button>
+      </form>
+      <span class="dim">reverses your dismissal only; the funnel's own kills stand</span>
+    </div>
+    {% endif %}
+
+    {% set bands = {'known-good':'has produced a confirmed finding before',
+                    'unmeasured':'never adjudicated, cheapest to measure first',
+                    'known-bad':'adjudicated 5+ times, never confirmed'} %}
+    {% set ns = namespace(cur='') %}
+    {% for g in groups %}
+      {% if g.band != ns.cur %}
+        {% set ns.cur = g.band %}
+        {# The band header is a link, which activates the `band` filter. #}
+        <div class="band">
+          <a class="plain dim" href="/triage?run={{ run.id }}&band={{ g.band }}{% if verdict %}&verdict={{ verdict|urlencode }}{% endif %}">{{ g.band }}</a>
+          <span class="hint">{{ bands[g.band] }}</span>
+        </div>
+      {% endif %}
+      <a class="prow {{ 'sel' if g.producer_id == selected }}"
+         {% if g.producer_id == selected %}aria-current="true"{% endif %}
+         title="{{ g.producer_id|visible }}"
+         href="{{ base }}&producer={{ g.producer_id|urlencode }}">
+        <span>
+          <span class="tool">{{ g.tool }}</span>
+          <span class="rule">{{ g.rule_id|rule_id|visible }}</span>
+        </span>
+        <span class="right">
+          <span class="cnt">{{ g.n_live }}</span>
+          {% if g.corroborated %}<span class="pill verified">×{{ g.corroborated }} corrob</span>{% endif %}
+          {% if g.n_adjudicated %}
+            <span class="pill {{ 'verified' if g.n_confirmed else 'killed' }}">{{ g.precision }}</span>
+          {% endif %}
+        </span>
+      </a>
+    {% endfor %}
+    {% if not groups %}
+      {% if verdict %}
+      <p class="dim pad">No live finding in this run has a latest verdict of
+        <b>{{ verdict|visible }}</b>. <a href="/validation?run={{ run.id }}">See every verdict</a>.</p>
+      {% else %}
+      <p class="dim pad">Nothing live. Every finding was suppressed.
+        <a href="/runs/{{ run.id }}">Audit the funnel</a>.</p>
+      {% endif %}
+    {% endif %}
+  </div>
+
+  <!-- ---------------- column 2: occurrences ---------------- -->
+  <div class="col scrollable" role="region" aria-label="Occurrences">
+    <div class="colhead">
+      <h2>Occurrences</h2>
+      <span class="dim sm">
+        {%- if n_occ_total > occurrences|length -%}
+          {{ occurrences|length }} of {{ n_occ_total }}
+        {%- else -%}
+          {{ occurrences|length }}
+        {%- endif -%}
+      </span>
+    </div>
+    {% for o in occurrences %}
+      <a class="orow {{ 'sel' if detail and o.id == detail.id }}"
+         {% if detail and o.id == detail.id %}aria-current="true"{% endif %}
+         title="{{ o.path|visible }}{% if o.start_line %}:{{ o.start_line }}{% endif %}"
+         href="{{ base }}&producer={{ selected|urlencode }}&occ={{ o.id }}">
+        <span class="p">{{ (o.path ~ (":" ~ o.start_line if o.start_line else ""))|tail_path|visible }}</span>
+        <span class="s">score {{ '%.0f'|format(o.score) }}{% if o.issue_id %} · clustered{% endif %}{% if o.redacted %} · redacted{% endif %}</span>
+      </a>
+    {% endfor %}
+    {% if selected and not occurrences %}
+      <p class="dim pad">This producer has no live occurrences
+        in this run{% if verdict %} with that verdict{% endif %}.</p>
+    {% endif %}
+  </div>
+
+  <!-- ---------------- column 3: detail ---------------- -->
+  <div class="col detail" role="region" aria-label="Finding detail">
+    {% if detail %}
+      {% include "_detail.html" %}
+      <form class="actions" method="post"
+            action="/producers/{{ detail.producer_id|urlencode }}/dismiss">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="run_id" value="{{ run.id }}">
+        <button type="submit" name="scope" value="repo" class="danger"
+                aria-describedby="dispose-note">
+          Dismiss for this repo <kbd>d</kbd></button>
+        {# Corpus-wide is NOT a shifted pair with `d`: a slipped shift key would change
+           the blast radius from one run to every future run against every repository.
+           `D` is unbound in the handler; this needs a deliberate click. #}
+        <button type="submit" name="scope" value="corpus" class="danger">
+          Dismiss everywhere</button>
+        <span class="note" id="dispose-note">Reversible: writes a ledger event, deletes
+          nothing. <kbd>u</kbd> undoes the last one.</span>
+      </form>
+    {% else %}
+      <div class="dbody dim">Select a producer.</div>
+    {% endif %}
+  </div>
+
+  {# The shortcut sheet is a modal dialog: focus moves into it, Tab stays inside it,
+     Escape closes it, and focus returns to the button that opened it. It is
+     generated from the same map the handler dispatches on. #}
+  <div class="keysheet" x-show="help" x-cloak x-on:click="closeHelp()">
+    <div class="keysheet-card" role="dialog" aria-modal="true"
+         aria-labelledby="keysheet-title" x-on:click.stop>
+      <div class="row">
+        <h2 id="keysheet-title">Keyboard</h2>
+        <div class="spacer"></div>
+        <button type="button" class="ghost xs" x-ref="helpClose"
+                x-on:click="closeHelp()">Close <kbd>Esc</kbd></button>
+      </div>
+      <table>
+        <tbody>
+          <template x-for="b in BINDINGS" :key="b[0]">
+            <tr><td class="r shrink"><kbd x-text="b[0]"></kbd></td>
+                <td x-text="b[1]"></td></tr>
+          </template>
+        </tbody>
+      </table>
+      <p class="note">Dismiss everywhere has no key on purpose. It is corpus-wide, and
+        one slipped shift key should not change the blast radius.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+function triageKeys() {
+  return {
+    help: false,
+    /* One map. The sheet and the dispatch read the same object, so a binding cannot
+       exist in one and not the other. `D` is deliberately absent. */
+    BINDINGS: [
+      ['j', 'next occurrence'],
+      ['k', 'previous occurrence'],
+      ['J', 'next producer'],
+      ['K', 'previous producer'],
+      ['d', 'dismiss this producer for this repo'],
+      ['u', 'undo the last dismissal'],
+      ['?', 'this list'],
+      ['Esc', 'close this list'],
+    ],
+
+    openHelp() {
+      this.help = true;
+      this.$nextTick(() => this.$refs.helpClose.focus());
+    },
+    closeHelp() {
+      this.help = false;
+      this.$nextTick(() => this.$refs.helpBtn.focus());
+    },
+
+    key(e) {
+      /* Modifier chords are the browser's, not ours. Cmd-D arrived as key 'd' with
+         metaKey set and dismissed a producer behind the bookmark dialog. */
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+      /* The dialog first: Escape and Tab must work while focus is on its own close
+         button, which the guard below would otherwise swallow. */
+      if (this.help) {
+        if (e.key === 'Escape' || e.key === '?') { this.closeHelp(); e.preventDefault(); }
+        else if (e.key === 'Tab') { this.$refs.helpClose.focus(); e.preventDefault(); }
+        return;
+      }
+
+      /* `closest`, not `matches`: a focused <button> passed the old guard, so
+         pressing `d` with focus on any button dismissed a producer. */
+      if (e.target.closest('input,textarea,select,button,[contenteditable]')) return;
+
+      if (e.key === '?') { this.openHelp(); e.preventDefault(); return; }
+
+      const step = (sel, delta) => {
+        const rows = [...document.querySelectorAll(sel)];
+        const i = rows.findIndex(r => r.classList.contains('sel'));
+        const next = rows[i + delta];
+        if (!next) return false;
+        /* Keep the keyboard cursor in the viewport. */
+        next.scrollIntoView({ block: 'nearest' });
+        next.click();
+        return true;
+      };
+
+      if (e.key === 'j' && step('.orow', +1)) e.preventDefault();
+      else if (e.key === 'k' && step('.orow', -1)) e.preventDefault();
+      else if (e.key === 'J' && step('.prow', +1)) e.preventDefault();
+      else if (e.key === 'K' && step('.prow', -1)) e.preventDefault();
+      else if (e.key === 'd') {
+        const b = document.querySelector('form.actions [value=repo]');
+        if (b) { b.click(); e.preventDefault(); }
+      }
+      else if (e.key === 'u') {
+        const b = document.querySelector('.undo button[type=submit]');
+        if (b) { b.click(); e.preventDefault(); }
+      }
+    },
+  };
+}
+</script>
+
+{% endblock %}

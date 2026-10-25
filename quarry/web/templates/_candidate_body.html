@@ -1,0 +1,26 @@
+{#
+  The body of one deep-review candidate. Extracted so the refuted variant can wrap it
+  in <details> without duplicating it — the alternative was two copies that would
+  drift, which is the defect this whole pass exists to remove.
+
+  Every field here is model output about attacker-supplied code, so each one goes
+  through |visible: a bidi override in a quoted line must show as ‹U+202E›, not
+  reorder the line it claims to quote.
+#}
+<div class="loc">{{ f.file|visible }} · {{ f.subsystem|visible }}</div>
+{% if f.quote %}<pre tabindex="0" role="region"
+  aria-label="Quoted source from {{ f.file|visible }}">{{ f.quote|visible }}</pre>{% endif %}
+<div class="why"><b>Claim.</b> {{ f.reasoning|visible }}</div>
+<div class="why"><b>Attacker control.</b> {{ f.attacker_control|visible }}</div>
+{% if f.self_critique %}
+  <div class="crit"><b>Its own strongest objection.</b> {{ f.self_critique|visible }}</div>
+{% endif %}
+{% if f.refutations %}
+<div class="ref">
+  {% for x in f.refutations %}
+    <div>{{ x.model }} → <b>{{ x.verdict|visible }}</b>{% if x.discarded %}
+      <span class="pill incomplete">discarded: {{ x.discarded|visible }}</span>{% endif %}
+      : {{ (x.reason or '')|visible }}</div>
+  {% endfor %}
+</div>
+{% endif %}
