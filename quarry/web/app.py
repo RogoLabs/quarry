@@ -65,7 +65,7 @@ SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
     "Content-Security-Policy": "frame-ancestors 'none'",
     "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "no-referrer",
+    "Referrer-Policy": "same-origin",
 }
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -135,12 +135,12 @@ def row_id(n: int) -> int:
 def same_origin(request: Request) -> bool:
     """Did this request come from a page this server served?
 
-    Origin is checked first. `Referrer-Policy: no-referrer` (set above) makes browsers
-    send `Origin: null` on same-origin form POSTs, per the Fetch spec's origin
-    serialisation, so `null` is treated as absent and the decision falls to
-    Sec-Fetch-Site, which the referrer policy does not affect. Referer is the last
-    resort for clients that send neither. A request carrying none of the three is
-    refused.
+    Origin is checked first. `Referrer-Policy: same-origin` (set above) keeps a real
+    Origin and Referer on the dashboard's own form POSTs while sending nothing to other
+    sites. `no-referrer` made browsers send `Origin: null` here, which locked out
+    Safari before 16.4: it sends no Sec-Fetch-Site either, so nothing proved the
+    request was ours. `null` is still treated as absent, and the decision falls to
+    Sec-Fetch-Site, then Referer. A request carrying none of the three is refused.
     """
     served = f"{request.url.scheme}://{request.headers.get('host', '')}".lower()
     origin = request.headers.get("origin")

@@ -68,6 +68,28 @@ def test_detect_dockerfile_and_none(tmp_path):
     assert spec is not None and spec.kind == "dockerfile"
 
 
+def test_find_compose_prefers_root_then_known_subdirs(tmp_path):
+    from quarry.dynamic.runtime_docker import find_compose
+    # A test tree ships its own stack; it must not win.
+    (tmp_path / "test-http" / "docker").mkdir(parents=True)
+    (tmp_path / "test-http" / "docker" / "docker-compose.yml").write_text("services: {}\n")
+    assert find_compose(tmp_path) is None
+    (tmp_path / "docker").mkdir()
+    (tmp_path / "docker" / "docker-compose.yml").write_text("services:\n  api:\n    image: x\n")
+    assert find_compose(tmp_path) == tmp_path / "docker" / "docker-compose.yml"
+    (tmp_path / "compose.yaml").write_text("services:\n  api:\n    image: x\n")
+    assert find_compose(tmp_path) == tmp_path / "compose.yaml"   # root wins
+
+
+def test_detect_finds_compose_under_docker_subdir(tmp_path):
+    (tmp_path / "docker").mkdir()
+    (tmp_path / "docker" / "docker-compose.yml").write_text(
+        "services:\n  web:\n    image: x\n    ports: ['8080:5000']\n")
+    spec = DockerRuntime().detect(tmp_path)
+    assert spec is not None and spec.kind == "compose"
+    assert spec.base_url == "http://web:5000"
+
+
 # ------------------------------------------------------------------ live (docker)
 
 docker = pytest.mark.skipif(not rt.docker_available(), reason="docker daemon not available")

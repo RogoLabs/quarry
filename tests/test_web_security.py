@@ -69,8 +69,8 @@ def test_every_state_changing_route_refuses_a_cross_site_post(seeded):
 
 def test_the_dashboards_own_forms_still_work(seeded):
     """Same Origin plus the token from the page is accepted. Also the
-    `Origin: null` case: `Referrer-Policy: no-referrer` makes browsers send that on
-    same-origin form POSTs, so Sec-Fetch-Site has to carry the decision there."""
+    `Origin: null` case, which privacy settings can still produce, so Sec-Fetch-Site
+    has to carry the decision there."""
     client, _ = seeded
     assert _post(client, "/producers/bandit:B101/dismiss",
                  {"run_id": 1}).status_code == 303
@@ -88,6 +88,18 @@ def test_the_dashboards_own_forms_still_work(seeded):
     r = client.post("/producers/bandit:B101/restore",
                     data={"run_id": 1, "csrf": token},
                     headers={"Referer": ORIGIN + "/triage"}, follow_redirects=False)
+    assert r.status_code == 303
+
+
+def test_a_browser_without_fetch_metadata_can_still_post(seeded):
+    """Safari before 16.4 sends no Sec-Fetch-Site. With `Referrer-Policy: same-origin`
+    it sends a real Origin and Referer on our own forms, and that has to be enough."""
+    client, _ = seeded
+    _post(client, "/producers/bandit:B101/dismiss", {"run_id": 1})
+    r = client.post("/producers/bandit:B101/restore",
+                    data={"run_id": 1, "csrf": client.app.state.csrf_token},
+                    headers={"Origin": ORIGIN, "Referer": ORIGIN + "/triage"},
+                    follow_redirects=False)
     assert r.status_code == 303
 
 
@@ -170,7 +182,7 @@ def test_every_response_refuses_framing_and_sniffing(seeded):
         assert r.headers["x-frame-options"] == "DENY", url
         assert "frame-ancestors 'none'" in r.headers["content-security-policy"], url
         assert r.headers["x-content-type-options"] == "nosniff", url
-        assert r.headers["referrer-policy"] == "no-referrer", url
+        assert r.headers["referrer-policy"] == "same-origin", url
     bad = client.get("/triage", headers={"Host": "attacker.example"})
     assert bad.headers["x-frame-options"] == "DENY"
 

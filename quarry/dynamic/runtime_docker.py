@@ -50,11 +50,40 @@ def docker_available() -> bool:
         return False
 
 
-def find_compose(src: Path) -> Path | None:
+# Where a compose file lives, in priority order. Many projects (cve-services among them)
+# keep it under docker/ or deploy/ rather than at the root. We look at the root first,
+# then these known homes, then a shallow bounded search, so discovery is deterministic
+# and never wanders into a test or vendor tree that ships its own throwaway stack.
+COMPOSE_SUBDIRS = ("docker", "deploy", "deployment", "compose", "infra", "build")
+_COMPOSE_SKIP = {".git", "node_modules", "vendor", "test", "tests", "test-http",
+                 "test-examples", "examples", "example", "fixtures", "__pycache__"}
+
+
+def _compose_in(d: Path) -> Path | None:
     for name in COMPOSE_NAMES:
-        p = src / name
+        p = d / name
         if p.is_file():
             return p
+    return None
+
+
+def find_compose(src: Path) -> Path | None:
+    if hit := _compose_in(src):
+        return hit
+    for sub in COMPOSE_SUBDIRS:
+        if (d := src / sub).is_dir() and (hit := _compose_in(d)):
+            return hit
+    # Last resort: the shallowest compose file anywhere outside the skip set, chosen by
+    # a stable sort so the same repo always resolves to the same file.
+    candidates: list[tuple[int, str]] = []
+    for p in src.rglob("*"):
+        if p.name in COMPOSE_NAMES and p.is_file():
+            rel = p.relative_to(src)
+            if _COMPOSE_SKIP.isdisjoint(rel.parts):
+                candidates.append((len(rel.parts), str(rel)))
+    if candidates:
+        candidates.sort()
+        return src / candidates[0][1]
     return None
 
 
@@ -173,7 +202,10 @@ class DockerRuntime:
             raise DockerError("compose file vanished between detect and start")
         doc = yaml.safe_load(base.read_text()) or {}
         service, port = _entrypoint(doc)
-        hardened = src / "quarry-compose.hardened.yml"
+        # The hardened file sits beside the original, not at the clone root, so compose's
+        # project directory stays the compose file's own directory and relative build
+        # contexts and volumes resolve the way the author meant them to.
+        hardened = base.parent / "quarry-compose.hardened.yml"
         hardened.write_text(yaml.safe_dump(harden_compose(doc), sort_keys=False))
 
         project = self._project(rundir)
