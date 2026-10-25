@@ -22,6 +22,7 @@ Two design rules carried over from the panel, because they survive the change:
 """
 from __future__ import annotations
 
+import functools
 import glob
 import json
 import re
@@ -382,6 +383,35 @@ def _recover(d: dict) -> str:
     return resp
 
 
+@functools.lru_cache(maxsize=None)
+def supports_thinking(model: str) -> bool:
+    """True when ollama reports the `thinking` capability for this model.
+
+    MEASURED (qwen3.6:27b, api/generate, num_ctx 65536, num_predict 2200, the findings
+    phase's own budget): the model spent all 2200 output tokens on an 8847-character
+    reasoning trace and returned `response: ""` with `done_reason: "length"` — the JSON
+    answer never started, so the unit produced nothing but an error. The same call with
+    `think: false` returned valid findings in 404 tokens with `done_reason: "stop"`. A
+    thinking model counts its reasoning against the same output budget as the answer, so
+    a bounded num_predict truncates it before the schema is satisfied; `_recover`'s read
+    of the `thinking` field cannot help once that field is itself cut off mid-token.
+
+    This gate is load-bearing, not an optimisation: ollama rejects the `think` option
+    for a model that does not advertise the capability (devstral:24b, qwen3-coder:30b),
+    so `think: false` may only be sent to a model this returns True for.
+    """
+    try:
+        p = subprocess.run(["ollama", "show", model],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    out = p.stdout.lower()
+    if "capabilities" not in out:
+        return False
+    tail = out.split("capabilities", 1)[1]
+    return re.search(r"(?:^|\s)thinking(?:\s|$)", tail) is not None
+
+
 def call(model: str, prompt: str, schema: dict | None, *, num_ctx: int = 65536,
          num_predict: int = 2048, timeout: int = 1800) -> tuple[str, dict]:
     """One ollama call. Grammar-constrained when a schema is given, and
@@ -393,6 +423,11 @@ def call(model: str, prompt: str, schema: dict | None, *, num_ctx: int = 65536,
         "options": {"temperature": 0, "top_k": 1, "seed": 42,
                     "num_ctx": num_ctx, "num_predict": num_predict},
     }
+    # Thinking models burn num_predict on a reasoning trace and truncate before the JSON
+    # answer (done_reason=length). Ask them for the structured answer directly; the gate
+    # matters because ollama 400s if `think` is sent to a non-thinking model.
+    if supports_thinking(model):
+        body["think"] = False
     if schema:
         body["format"] = schema
     p = subprocess.run([*CURL_LOOPBACK, "--max-time", str(timeout), OLLAMA,

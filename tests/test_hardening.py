@@ -151,7 +151,9 @@ def test_ollama_curl_ignores_curlrc_and_proxies(monkeypatch):
     monkeypatch.setattr(E.subprocess, "run", _fake_run(
         seen, json.dumps({"response": '{"findings": []}', "done_reason": "stop"})))
     E.call("qwen3-coder:30b", "prompt", None)
-    argv = seen[0]
+    # call() may probe `ollama show <model>` for the thinking capability first; the curl
+    # hygiene we are asserting is on the generate request, so find that call.
+    argv = next(a for a in seen if a and a[0] == "curl")
     assert argv[:2] == ["curl", "-q"], "-q only works as the FIRST argument"
     i = argv.index("--noproxy")
     assert argv[i + 1] == "*"
