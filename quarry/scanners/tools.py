@@ -154,15 +154,36 @@ class Zizmor(Scanner):
         return sarif_records(doc, src, self.name) if doc else []
 
 
+# osv-scanner aborts the whole offline scan (exit 127, no output) if any ecosystem it
+# detects has no downloadable OSV database. The GIT ecosystem (a commit-pinned
+# dependency, e.g. a `git+ssh://...#<sha>` entry in a lockfile) has none, so a single
+# such dependency would suppress every npm/PyPI/etc. finding beside it. OSV publishes no
+# offline GIT database, so there is nothing to sync: filter the ecosystem out by config
+# and scan the rest. MEASURED on cve-services, whose lockfile pins one git dependency.
+OSV_CONFIG_TOML = (
+    "[[PackageOverrides]]\n"
+    'ecosystem = "GIT"\n'
+    "ignore = true\n"
+    'reason = "offline scan: OSV publishes no downloadable GIT-ecosystem database"\n'
+)
+OSV_CONFIG_NAME = "osv-config.toml"
+
+
 class OSVScanner(Scanner):
     """SCA. `--offline-vulnerabilities` keeps it inside Tier 1; `--no-resolve` stops it
     leaking manifests to package registries (Seat 5's measurement)."""
     name = "osv-scanner"
     binary = "osv-scanner"
 
+    def run(self, rundir: Path, src: Path, *, timeout: int = 1800) -> "ScanOutcome":
+        # Written into the per-run out/ dir, which is readable inside Tier 1; see argv.
+        (rundir / "out" / OSV_CONFIG_NAME).write_text(OSV_CONFIG_TOML)
+        return super().run(rundir, src, timeout=timeout)
+
     def argv(self, src: Path, out: Path) -> list[str]:
         return [self.binary, "scan", "source", "--recursive",
                 "--offline-vulnerabilities", "--no-resolve",
+                "--config", str(out.parent / OSV_CONFIG_NAME),
                 "--format", "json", "--output", str(out), str(src)]
 
     def nothing_to_scan(self, returncode: int, out: Path, stderr: bytes) -> str:

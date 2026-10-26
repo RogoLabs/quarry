@@ -28,7 +28,7 @@ build-backend = "setuptools.build_meta"
 include = ["quarry*"]
 
 [tool.setuptools.package-data]
-quarry = ["*.sql", "sandbox/*.sb", "web/templates/*.html", "web/static/*"]
+quarry = ["*.sql", "sandbox/*.sb", "web/templates/*.html", "web/static/*", "vulndb_seeds/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

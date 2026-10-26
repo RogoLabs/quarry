@@ -6,3 +6,4 @@ recursive-include quarry/web/templates *.html
 recursive-include quarry/web/static *.js *.css *.svg *.woff2 *.txt *.md
 include quarry/*.sql
 include quarry/sandbox/*.sb
+include quarry/vulndb_seeds/*

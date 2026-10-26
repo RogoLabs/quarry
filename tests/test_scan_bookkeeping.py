@@ -144,3 +144,47 @@ def test_osv_without_manifests_is_a_clean_empty_scan(tmp_path):
     assert not osv.nothing_to_scan(128, out, b"some other failure")
     out.write_text("{}")
     assert not osv.nothing_to_scan(128, out, b"No package sources found")
+
+
+def test_osv_filters_the_offline_uncoverable_git_ecosystem(tmp_path):
+    """A lockfile can pin a git dependency (git+ssh://...#<sha>), which osv-scanner puts
+    in the GIT ecosystem. OSV has no offline GIT database, and osv-scanner aborts the
+    whole offline scan (exit 127) when one ecosystem's db will not load, taking the npm
+    findings with it. The scanner ships a config that ignores GIT, and writes it where
+    Tier 1 can read it."""
+    from quarry.scanners.tools import OSVScanner, OSV_CONFIG_NAME, OSV_CONFIG_TOML
+    assert 'ecosystem = "GIT"' in OSV_CONFIG_TOML and "ignore = true" in OSV_CONFIG_TOML
+
+    osv = OSVScanner()
+    out = tmp_path / "out" / "osv-scanner.json"
+    out.parent.mkdir(parents=True)
+    argv = osv.argv(tmp_path / "src", out)
+    assert "--config" in argv
+    assert argv[argv.index("--config") + 1] == str(out.parent / OSV_CONFIG_NAME)
+
+
+def test_osv_run_stages_the_git_ignore_config(tmp_path, monkeypatch):
+    """run() must write the config into the per-run out/ dir before the sandboxed scan,
+    because that path is what Tier 1 can read and what argv points `--config` at."""
+    from quarry.scanners import base
+    from quarry.scanners.tools import OSVScanner, OSV_CONFIG_NAME, OSV_CONFIG_TOML
+    (tmp_path / "out").mkdir()
+    # Stop before the real scan; we only assert the config was staged first.
+    monkeypatch.setattr(base.Scanner, "run",
+                        lambda self, rundir, src, *, timeout=1800: "stubbed")
+    assert OSVScanner().run(tmp_path, tmp_path / "src") == "stubbed"
+    assert (tmp_path / "out" / OSV_CONFIG_NAME).read_text() == OSV_CONFIG_TOML
+
+
+def test_osv_seeds_register_every_ecosystem():
+    """OSV only downloads a database for an ecosystem it resolves a package in. An empty
+    manifest (or, for npm, one with no resolved URL) registers nothing, so its database
+    is never fetched and the first real target in that language fails with exit 127. Each
+    seed must declare a real package; npm additionally needs the resolved URL."""
+    from quarry.vulndb import SEEDS_DIR
+    seeds = {f.name: f.read_text() for f in SEEDS_DIR.iterdir() if f.is_file()}
+    # The lockfiles that were previously empty and so never triggered a download.
+    assert '"node_modules/' in seeds["package-lock.json"]
+    assert '"resolved"' in seeds["package-lock.json"]          # npm registers only with it
+    assert "specs:\n    rake" in seeds["Gemfile.lock"]
+    assert '"name"' in seeds["composer.lock"]

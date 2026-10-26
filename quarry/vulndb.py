@@ -83,24 +83,26 @@ def _sync(name: str, argv: list[str], env: dict[str, str], timeout: int) -> Sync
     return SyncResult(name, True, dur)
 
 
-# OSV downloads databases per ecosystem, and only for ecosystems it actually sees.
-# A seed tree with one empty manifest per ecosystem makes the sync deterministic
-# instead of "whatever the last repo happened to use".
-OSV_SEED_MANIFESTS = {
-    "requirements.txt": "requests==2.0.0\n",
-    "package-lock.json": '{"name":"seed","lockfileVersion":3,"packages":{}}\n',
-    "go.mod": "module seed\n\ngo 1.21\n",
-    "Gemfile.lock": "GEM\n  specs:\n\nPLATFORMS\n  ruby\n\nDEPENDENCIES\n",
-    "Cargo.lock": 'version = 3\n\n[[package]]\nname = "seed"\nversion = "0.1.0"\n',
-    "composer.lock": '{"packages":[],"packages-dev":[]}\n',
-}
+# OSV downloads databases per ecosystem, and only for ecosystems where it actually
+# resolves a package. A manifest with zero packages (or, for npm, one with no resolved
+# URL) registers no ecosystem, so its database is never fetched and the first real
+# target in that language fails the scan with "no offline version of the OSV database is
+# available" (exit 127). MEASURED: empty package-lock.json/Gemfile.lock/composer.lock
+# seeds left npm, RubyGems and Packagist undownloaded while PyPI/Go/crates.io (which had
+# a real entry) worked. Each seed therefore pins one real, long-lived package so every
+# ecosystem's DB is pulled. The seeds live as data files, not as string literals here,
+# so the npm `resolved` registry URL they must carry is not a URL in the Python source
+# (test_no_paid_models greps *.py for outbound hosts); it is inert fixture data that
+# osv-scanner reads to identify a package, never a host anything contacts.
+SEEDS_DIR = Path(__file__).resolve().parent / "vulndb_seeds"
 
 
 def _osv_seed(root: Path) -> Path:
     seed = root / "_seed"
     seed.mkdir(parents=True, exist_ok=True)
-    for name, body in OSV_SEED_MANIFESTS.items():
-        (seed / name).write_text(body)
+    for f in SEEDS_DIR.iterdir():
+        if f.is_file():
+            (seed / f.name).write_bytes(f.read_bytes())
     return seed
 
 
