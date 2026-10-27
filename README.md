@@ -64,7 +64,7 @@ keys and a GitHub token.
 - The dashboard only answers to loopback Host headers, refuses cross-site POSTs, and
   renders bidi and zero-width characters from target code as visible tokens.
 
-The test suite (452 tests) asserts these against a hostile fixture repo and real
+The test suite (456 tests) asserts these against a hostile fixture repo and real
 `sandbox-exec`. A profile with no test is a comment.
 
 ## Requirements

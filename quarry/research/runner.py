@@ -234,30 +234,57 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
                  deadline, progress: Progress) -> dict:
     """Every finding is refuted by every model from a DIFFERENT family. Same-family
     review is the configuration measured to degrade findings by 37.6%, so a finding
-    with no cross-family refuter available is left unrefuted rather than self-reviewed."""
+    with no cross-family refuter available is left unrefuted rather than self-reviewed.
+
+    The work is grouped by refuter MODEL, not by finding. Ollama holds one of these
+    30B-class models in memory at a time, so refuting finding-by-finding — each finding
+    calling the two models of other families in turn — evicts and reloads a model on
+    almost every call. MEASURED on cve-services: that ordering reloaded a model ~3400
+    times and crawled at minutes per finding, which would have taken days for 1708
+    findings. Loading each model once and refuting every finding it is eligible for does
+    the same work in a few hours. Within a model, quote-verified findings go first, so a
+    deadline that cuts the pass short still spends the model on the strongest findings.
+    Each finding's row is written the moment a refuter answers (the connection is in
+    autocommit), so an interrupted pass resumes at the (finding, model) pair rather than
+    restarting the whole run."""
     out = {"refuted": 0, "survived": 0}
-    rows = con.execute(
-        """SELECT * FROM research_findings WHERE research_id=? AND refutations='[]'
-           ORDER BY quote_verified DESC, id""", (rid,)).fetchall()
-    if rows:
-        progress(f"refuting {len(rows)} finding(s) cross-family")
-    for r in rows:
+    pending = con.execute(
+        "SELECT COUNT(*) FROM research_findings WHERE research_id=? AND refutations='[]'",
+        (rid,)).fetchone()[0]
+    if pending:
+        progress(f"refuting {pending} finding(s) cross-family")
+    for m in models:
         if deadline and datetime.now() >= deadline:
             break
-        refuters = [m for m in models if E.family(m) != r["family"]]
-        if not refuters:
+        mfam = E.family(m)
+        # Findings this model may refute: a different family, and not one it has already
+        # answered. A finding partway through the pass carries the other family's verdict
+        # in its refutations, so the "already answered by m" filter is on the model's
+        # presence there. Done in Python to keep a model name with a SQL-LIKE wildcard
+        # (an underscore) from matching the wrong rows.
+        rows = con.execute(
+            """SELECT * FROM research_findings
+               WHERE research_id=? AND family != ?
+               ORDER BY quote_verified DESC, id""", (rid, mfam)).fetchall()
+        rows = [r for r in rows
+                if not any(x.get("model") == m for x in json.loads(r["refutations"]))]
+        if not rows:
             continue
-        sub = subs.get(r["subsystem"])
-        if sub is None:
-            continue
-        f = E.Finding(lens=r["lens"], model=r["model"], title=r["title"],
-                      file=r["file"] or "", quote=r["quote"] or "",
-                      severity=r["severity"] or "info", reasoning=r["reasoning"] or "",
-                      attacker_control=r["attacker_control"] or "",
-                      why_it_might_be_wrong=r["self_critique"] or "",
-                      quote_verified=bool(r["quote_verified"]))
-        text = sub.render()
-        for m in refuters:
+        progress(f"  {m}: refuting {len(rows)} finding(s)")
+        for r in rows:
+            if deadline and datetime.now() >= deadline:
+                break
+            sub = subs.get(r["subsystem"])
+            if sub is None:
+                continue
+            f = E.Finding(lens=r["lens"], model=r["model"], title=r["title"],
+                          file=r["file"] or "", quote=r["quote"] or "",
+                          severity=r["severity"] or "info", reasoning=r["reasoning"] or "",
+                          attacker_control=r["attacker_control"] or "",
+                          why_it_might_be_wrong=r["self_critique"] or "",
+                          quote_verified=bool(r["quote_verified"]),
+                          refutations=json.loads(r["refutations"]))
+            text = sub.render()
             try:
                 raw, _ = E.call(m, E.refute_prompt(text, f), E.REFUTE_SCHEMA,
                                 num_ctx=65536, num_predict=700)
@@ -265,11 +292,14 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
             except Exception as e:                      # noqa: BLE001
                 f.refutations.append({"model": m, "verdict": "error",
                                       "reason": str(e)[:200]})
-        con.execute(
-            """UPDATE research_findings SET refutations=?, n_refuted=?, n_survived=?,
-               refuter_errors=? WHERE id=?""",
-            (json.dumps(f.refutations, default=str), f.refuted, f.survived,
-             f.refuter_errors, r["id"]))
-        out["refuted"] += f.refuted
-        out["survived"] += f.survived
+            con.execute(
+                """UPDATE research_findings SET refutations=?, n_refuted=?, n_survived=?,
+                   refuter_errors=? WHERE id=?""",
+                (json.dumps(f.refutations, default=str), f.refuted, f.survived,
+                 f.refuter_errors, r["id"]))
+    totals = con.execute(
+        """SELECT COALESCE(SUM(n_refuted), 0) AS refuted,
+                  COALESCE(SUM(n_survived), 0) AS survived
+           FROM research_findings WHERE research_id=?""", (rid,)).fetchone()
+    out["refuted"], out["survived"] = totals["refuted"], totals["survived"]
     return out
