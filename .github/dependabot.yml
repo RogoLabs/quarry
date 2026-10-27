@@ -1,0 +1,52 @@
+# The lockfiles under quarry/vulndb_seeds/ are not dependencies of Quarry. They are
+# fixtures: one real, resolvable package per ecosystem, pinned to an old version on
+# purpose so that `quarry db sync` makes OSV download that ecosystem's offline database.
+# An empty manifest registers no ecosystem, so without these seeds the first real target
+# in that language fails the scan (see quarry/vulndb.py). Nothing here is installed or
+# executed; the versions are deliberately stale.
+#
+# Dependabot otherwise reads these as production dependencies and files security and
+# version PRs against them (it already bumped requests 2.0.0 -> 2.33.0 in #1). A bump to
+# a version OSV cannot resolve would silently defeat the seed. So every ecosystem present
+# in the seed directory is declared here and ignored wholesale: a bare `dependency-name`
+# covering all versions suppresses both version and security updates for that block, and a
+# block is scoped to its ecosystem and directory, so the real dependencies in the root
+# pyproject.toml are untouched and still get alerts.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/quarry/vulndb_seeds"
+    schedule:
+      interval: "weekly"
+    ignore:
+      - dependency-name: "*"
+  - package-ecosystem: "npm"
+    directory: "/quarry/vulndb_seeds"
+    schedule:
+      interval: "weekly"
+    ignore:
+      - dependency-name: "*"
+  - package-ecosystem: "bundler"
+    directory: "/quarry/vulndb_seeds"
+    schedule:
+      interval: "weekly"
+    ignore:
+      - dependency-name: "*"
+  - package-ecosystem: "composer"
+    directory: "/quarry/vulndb_seeds"
+    schedule:
+      interval: "weekly"
+    ignore:
+      - dependency-name: "*"
+  - package-ecosystem: "gomod"
+    directory: "/quarry/vulndb_seeds"
+    schedule:
+      interval: "weekly"
+    ignore:
+      - dependency-name: "*"
+  - package-ecosystem: "cargo"
+    directory: "/quarry/vulndb_seeds"
+    schedule:
+      interval: "weekly"
+    ignore:
+      - dependency-name: "*"
