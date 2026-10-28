@@ -395,6 +395,135 @@ def build_reports(con: sqlite3.Connection, run_id: int, src: Path, *,
     return [d.path for d in draft_reports(con, run_id, src, out_dir=out_dir)]
 
 
+# ------------------------------------------------------------ Layer 2 -> report bridge
+
+@dataclass(frozen=True)
+class ResearchDigest:
+    """The single Markdown digest of Layer 2 survivors written for a run: where, how many
+    findings it holds, and the hash of the exact bytes, so `quarry report` can record it."""
+    path: Path
+    n_findings: int
+    sha256: str
+
+
+_VERDICT_WORD = {"survives": "defended", "refuted": "refuted",
+                 "uncertain": "uncertain", "error": "error"}
+
+
+def _render_research_finding(d: dict[str, Any]) -> str:
+    """One deep-review finding as a Markdown section. Every target-derived string is made
+    inert: the quote is verbatim source, so it goes in a fence it cannot close; the model's
+    prose may echo target strings, so it is escaped to one inert paragraph; names and paths
+    go in code spans. The refuters' reasons are model prose and are treated the same."""
+    where = _code(d["file"] + (f":{int(d['line'])}" if d.get("line") else "")
+                  if d.get("file") else "(no file recorded)")
+    lines = [
+        f"### {_text(d['title']) or 'Untitled finding'}",
+        "",
+        f"- Subsystem: {_code(d['subsystem'])}",
+        f"- Lens: {_code(d['lens'])}",
+        f"- Location: {where}",
+        f"- Found by: {_code(d['model'])} (family {_code(d['family'])})",
+        f"- Severity (model-claimed, not computed): {_text(d['severity'] or 'unstated')}",
+        f"- Cross-family vote: {int(d['n_survived'])} defended, "
+        f"{int(d['n_refuted'])} refuted",
+        "",
+        "Claimed code:",
+        "",
+        _code_block(d["quote"] or "(no quote recorded)"),
+        "",
+        "Reasoning:",
+        "",
+        _text(d["reasoning"]) or "(none recorded)",
+        "",
+        "Attacker control:",
+        "",
+        _text(d["attacker_control"]) or "(none recorded)",
+    ]
+    critique = _text(d.get("self_critique") or "")
+    if critique:
+        lines += ["", "The model's own caveat:", "", critique]
+    refs = []
+    try:
+        refs = json.loads(d.get("refutations") or "[]")
+    except ValueError:
+        refs = []
+    if refs:
+        lines += ["", "Cross-family review:"]
+        for r in refs:
+            if r.get("discarded"):
+                continue
+            word = _VERDICT_WORD.get(r.get("verdict", ""), _text(r.get("verdict", "?")))
+            reason = _text(r.get("reason") or r.get("rationale") or "")
+            lines.append(f"- {_code(r.get('model', '?'))}: {word}."
+                         + (f" {reason}" if reason else ""))
+    return "\n".join(lines)
+
+
+def draft_research_digest(con: sqlite3.Connection, run_id: int, *,
+                          out_dir: Path) -> ResearchDigest | None:
+    """Write one Markdown digest of this run's Layer 2 deep-review survivors.
+
+    A survivor is a finding whose quote verified against the source and that at least one
+    cross-family model still defended after being told to kill it (`n_survived > 0`). This
+    is the same order the dashboard ranks by, with a conservative bar, so the digest and the
+    dashboard agree.
+
+    These are model-found candidates for human triage. They were NOT confirmed dynamically:
+    no probe stood the target up and reproduced them, which is what the advisory drafts in
+    the same directory record. The digest says so in its own words, because a human may read
+    it next to those advisories. Returns None when the run has no such survivor."""
+    rows = con.execute(
+        """SELECT rf.id, rf.subsystem, rf.lens, rf.model, rf.family, rf.title,
+                  rf.file, rf.quote, rf.severity, rf.reasoning,
+                  rf.attacker_control, rf.self_critique, rf.refutations,
+                  rf.n_refuted, rf.n_survived, r.target
+             FROM research_findings rf
+             JOIN research_runs rr ON rr.id = rf.research_id
+             JOIN runs r          ON r.id = rr.run_id
+            WHERE rr.run_id = ? AND rf.quote_verified = 1 AND rf.n_survived > 0
+            ORDER BY rf.quote_verified DESC, rf.n_survived DESC, rf.n_refuted ASC,
+                     rf.subsystem, rf.id""", (run_id,)).fetchall()
+    if not rows:
+        return None
+
+    target = rows[0]["target"]
+    body = [
+        f"# Deep-review candidates for {_text(target.split('/')[-1])}",
+        "",
+        f"Quarry's Layer 2 multi-model review (run {int(run_id)}) produced "
+        f"{len(rows)} finding(s) that cleared the cross-family gate: the quote verified "
+        f"against the source, and at least one model from a different family defended the "
+        f"claim after being instructed to refute it.",
+        "",
+        "These are candidates for human triage, not confirmed vulnerabilities. No probe "
+        "stood the target up and reproduced them. Treat each as a lead to read, confirm, "
+        "and only then report. Severity is the finding model's own label, never a computed "
+        "score. Any confirmed-dynamic advisories for this run are separate files in this "
+        "directory.",
+        "",
+        f"- Target: {_code(target)}",
+        f"- Survivors: {len(rows)}",
+        "",
+        "---",
+        "",
+    ]
+    body.append(("\n\n---\n\n").join(_render_research_finding(dict(r)) for r in rows))
+    body.append("")
+    body.append("---")
+    body.append("")
+    body.append(f"Found with Quarry (Layer 2, run {int(run_id)}). A triage list to review, "
+                "not a published advisory.")
+    text = ("\n".join(body)).encode("utf-8")
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{run_id}-deep-review-candidates.md"
+    path.write_bytes(text)
+    return ResearchDigest(path=path, n_findings=len(rows),
+                          sha256=hashlib.sha256(text).hexdigest())
+
+
 def draft_reports(con: sqlite3.Connection, run_id: int, src: Path, *,
                   out_dir: Path) -> list[Draft]:
     """Write a Markdown advisory for every finding whose latest dynamic verdict in the run

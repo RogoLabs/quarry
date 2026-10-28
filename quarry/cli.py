@@ -428,24 +428,36 @@ def report(run_id: int = typer.Argument(..., help="a validated run"),
     project's security contact, or paste it into GitHub's Report a vulnerability (GHSA) form."""
     from pathlib import Path
     from .ingest import RunVolume
-    from .disclosure import draft_reports
+    from .disclosure import draft_reports, draft_research_digest
 
     paths, connection = _open()
     vol = RunVolume.attach_existing(run_id, paths.runs)
     out_dir = Path(out) if out else Path(paths.runs).parent / "reports" / str(run_id)
     drafts = draft_reports(connection, run_id, vol.src, out_dir=out_dir)
-    if not drafts:
-        con_out.print("[yellow]no confirmed verdicts to report for this run[/]")
+    # Layer 2 survivors reach the report too, even when Layer 3 confirmed nothing. They are
+    # candidates for triage, clearly separated from the confirmed-dynamic advisories above.
+    digest = draft_research_digest(connection, run_id, out_dir=out_dir)
+
+    if not drafts and digest is None:
+        con_out.print("[yellow]no confirmed verdicts and no deep-review survivors to "
+                      "report for this run[/]")
         return
-    # One row per file written, so the dashboard can list the drafts and tell when a
-    # file on disk no longer matches what was written.
+    # One row per confirmed-verdict file, so the dashboard can list the drafts and tell
+    # when a file on disk no longer matches what was written.
     with db.tx(connection):
         for d in drafts:
             db.advisory(connection, run_id, d.finding_id, str(d.path.resolve()),
                         d.sha256, verdict_id=d.verdict_id)
-    con_out.print(f"[bold]{len(drafts)} advisory draft(s)[/] in {_e(out_dir)}:")
-    for d in drafts:
-        con_out.print(f"  {_e(d.path.name)}")
+    if drafts:
+        con_out.print(f"[bold]{len(drafts)} confirmed-dynamic advisory draft(s)[/] in "
+                      f"{_e(out_dir)}:")
+        for d in drafts:
+            con_out.print(f"  {_e(d.path.name)}")
+    else:
+        con_out.print(f"[dim]no confirmed-dynamic verdicts[/] in {_e(out_dir)}")
+    if digest is not None:
+        con_out.print(f"[bold]{digest.n_findings} deep-review candidate(s)[/] (Layer 2, "
+                      f"not dynamically confirmed): {_e(digest.path.name)}")
     con_out.print("[dim]review before sending (review-before-send); these are drafts.[/]")
 
 

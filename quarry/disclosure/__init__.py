@@ -10,4 +10,5 @@ whether it is emailed to a maintainer's security contact or pasted into a GHSA d
 from .report import (  # noqa: F401
     DisclosureContext, Draft, render_report, build_reports, draft_reports,
     SecurityContact, extract_security_contacts, guess_ecosystem,
+    ResearchDigest, draft_research_digest,
 )

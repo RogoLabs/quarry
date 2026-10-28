@@ -15,7 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from quarry import db                                                   # noqa: E402
 from quarry.disclosure import (                                         # noqa: E402
     DisclosureContext, render_report, build_reports,
-    SecurityContact, extract_security_contacts, guess_ecosystem)
+    SecurityContact, extract_security_contacts, guess_ecosystem,
+    draft_research_digest, ResearchDigest)
 
 ACME = (SecurityContact("email", "security@acme.example", "SECURITY.md"),)
 
@@ -309,3 +310,94 @@ def test_build_reports_skips_confirmed_without_stored_baseline(tmp_path):
     _confirm(con, "f2", rationale=json.dumps({**old, "baseline": "HTTP 200",
                                               "differs_from_baseline": False}))
     assert build_reports(con, 1, src, out_dir=tmp_path / "reports") == []
+
+
+# ---- Layer 2 -> report bridge: the deep-review digest ------------------------------
+# A deep run writes research_findings that `validate` and `report` never read. The bridge
+# lets `report` emit a triage digest of the survivors so the night's real output is not
+# stranded in the dashboard. A survivor is quote-verified AND defended by a cross-family
+# model (n_survived > 0); everything below is that filter, the labelling, and taint safety.
+
+def _research_db(tmp_path, findings):
+    """A db with one run, one research run, and the given research_findings rows. Each item
+    in `findings` overrides columns on a sensible default survivor."""
+    p = tmp_path / "quarry.db"
+    db.init(p)
+    con = db.connect(p)
+    with db.tx(con):
+        con.execute("""INSERT INTO runs (id,target,clone_url,git_sha)
+                       VALUES (1,'acme/widgets','https://github.com/acme/widgets','deadbee')""")
+        con.execute("""INSERT INTO research_runs (id,run_id,status,models,lenses,profile)
+                       VALUES (1,1,'done','[]','[]','{}')""")
+        for f in findings:
+            row = dict(research_id=1, subsystem="src/api", lens="broken-authz-idor",
+                       model="devstral:24b", family="mistral", title="A finding",
+                       file="app/api.py", quote="x = 1", quote_verified=1,
+                       severity="high", reasoning="because", attacker_control="GET it",
+                       self_critique="maybe", refutations="[]", n_refuted=0, n_survived=1)
+            row.update(f)
+            cols = ",".join(row)
+            con.execute(
+                f"INSERT INTO research_findings ({cols}) VALUES "
+                f"({','.join('?' * len(row))})", tuple(row.values()))
+    return con
+
+
+def test_research_digest_includes_quote_verified_survivor(tmp_path):
+    con = _research_db(tmp_path, [dict(
+        title="Unauthenticated read of order data", file="app/orders.py",
+        model="granite4.2:30b", family="granite4.2", n_survived=1, n_refuted=1,
+        refutations=json.dumps([
+            {"model": "qwen3.6:27b", "verdict": "survives", "reason": "the route has no guard"},
+            {"model": "devstral:24b", "verdict": "refuted", "reason": "a check runs upstream"}]))])
+    dg = draft_research_digest(con, 1, out_dir=tmp_path / "reports")
+    assert isinstance(dg, ResearchDigest) and dg.n_findings == 1
+    text = dg.path.read_text()
+    assert "Unauthenticated read of order data" in text
+    assert "app/orders.py" in text
+    assert "granite4.2:30b" in text
+    # the two refuter voices both appear, with their plain-language verdict words
+    assert "qwen3.6:27b" in text and "devstral:24b" in text
+    assert "defended" in text and "refuted" in text
+    # and it is labelled a candidate, never a confirmation
+    assert "not confirmed" in text.lower() or "not a published advisory" in text.lower()
+    assert "candidates" in text.lower()
+
+
+def test_research_digest_excludes_unverified_and_undefended(tmp_path):
+    con = _research_db(tmp_path, [
+        dict(title="defended-and-verified", quote_verified=1, n_survived=1),   # in
+        dict(title="not-verified", quote_verified=0, n_survived=1),            # out
+        dict(title="nobody-defended", quote_verified=1, n_survived=0),         # out
+    ])
+    dg = draft_research_digest(con, 1, out_dir=tmp_path / "reports")
+    assert dg is not None and dg.n_findings == 1
+    text = dg.path.read_text()
+    assert "defended-and-verified" in text
+    assert "not-verified" not in text
+    assert "nobody-defended" not in text
+
+
+def test_research_digest_none_when_no_survivors(tmp_path):
+    con = _research_db(tmp_path, [dict(quote_verified=1, n_survived=0)])
+    assert draft_research_digest(con, 1, out_dir=tmp_path / "reports") is None
+    # and no file is written for an empty digest
+    assert not (tmp_path / "reports" / "1-deep-review-candidates.md").exists()
+
+
+def test_research_digest_neutralizes_markdown_injection(tmp_path):
+    # Finding text is model output derived from target source; it must not be able to forge
+    # a heading, a link, or a code fence in a document a human is about to read.
+    con = _research_db(tmp_path, [dict(
+        title="# PWNED heading",
+        reasoning="see [click me](http://evil.example) and `backtick`",
+        quote="``` not a fence\nrm -rf /\n```")])
+    dg = draft_research_digest(con, 1, out_dir=tmp_path / "reports")
+    text = dg.path.read_text()
+    # the forged heading is escaped, so no line begins with "# PWNED"
+    assert not any(line.startswith("# PWNED") for line in text.splitlines())
+    assert "\\# PWNED" in text
+    # the link brackets are escaped, so no live Markdown link survives
+    assert "[click me](http://evil.example)" not in text
+    # the quote's fence cannot close the code block it sits in
+    assert "```` not a fence" in text or "\n````\n" in text
