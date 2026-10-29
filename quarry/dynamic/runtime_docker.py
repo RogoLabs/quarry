@@ -34,6 +34,14 @@ ISOLATED_NET = "quarry_isolated"
 # A minimal, pinned image used only as an ephemeral sidecar on the isolated network
 # (health-gating and, later, probes). Pulled during provisioning.
 SIDECAR_IMAGE = "curlimages/curl:8.11.1"
+# Forced into every service's environment. On the internal network a hub lookup cannot
+# succeed, so these only tell the client not to try. MEASURED (ML-Gateway, run 2): five
+# models whose weights were baked into the image at build time, but each from_pretrained
+# first retried two hub HEADs five times on a failed DNS lookup: 3m59s before uvicorn
+# bound, past the 120s health budget. Weights a build did not bake still fail to load;
+# that is the target's provisioning gap, not something the runtime may paper over.
+OFFLINE_ENV = {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+               "HF_DATASETS_OFFLINE": "1"}
 
 
 class DockerError(RuntimeError):
@@ -116,10 +124,26 @@ def _strip_host_mounts(svc: dict) -> None:
         svc.pop("volumes", None)
 
 
+def _force_offline_env(svc: dict) -> None:
+    """Set OFFLINE_ENV in a service, in whichever syntax it already uses (mapping or
+    KEY=VALUE list), replacing any value the author gave those keys."""
+    env = svc.get("environment")
+    if isinstance(env, list):
+        kept = [e for e in env
+                if str(e).split("=", 1)[0] not in OFFLINE_ENV]
+        svc["environment"] = kept + [f"{k}={v}" for k, v in OFFLINE_ENV.items()]
+    else:
+        merged = dict(env) if isinstance(env, dict) else {}
+        merged.update(OFFLINE_ENV)
+        svc["environment"] = merged
+
+
 def harden_compose(doc: dict, *, network: str = ISOLATED_NET) -> dict:
     """Return a copy of a parsed compose document with the runtime egress guarantees
     forced on: one internal-only network for every service, no host port publishing, no
-    host networking, no host bind-mounts that escape the project."""
+    host networking, no host bind-mounts that escape the project. Package-hub clients
+    are told they are offline, so they fail fast instead of retrying a lookup that the
+    network guarantees cannot succeed."""
     out = json.loads(json.dumps(doc))   # deep copy of plain data
     services = out.get("services")
     if not isinstance(services, dict):
@@ -134,6 +158,7 @@ def harden_compose(doc: dict, *, network: str = ISOLATED_NET) -> dict:
         svc.pop("extra_hosts", None)            # no host-gateway back-channel
         svc["networks"] = [network]            # only the isolated network
         _strip_host_mounts(svc)
+        _force_offline_env(svc)
     # Replace the network topology wholesale: one internal network, nothing else.
     out["networks"] = {network: {"internal": True, "driver": "bridge"}}
     return out
@@ -210,20 +235,46 @@ class DockerRuntime:
 
         project = self._project(rundir)
         net = f"{project}_{ISOLATED_NET}"
-        # Provisioning: build/pull may touch the network. The contained run that follows
-        # cannot, because every service is on the internal network.
-        self._compose(project, hardened, "up", "-d", "--build", timeout=self.up_timeout)
-        self._pull_sidecar()
-
-        base_url = f"http://{service}:{port}"
-        self._await_health(net, base_url)
 
         def stop() -> None:
             self._compose(project, hardened, "down", "-v", "--remove-orphans",
                           timeout=120, check=False)
 
+        # Provisioning: build/pull may touch the network. The contained run that follows
+        # cannot, because every service is on the internal network. A stack that fails
+        # to come up is torn down here: the caller only gets `stop` on success, and a
+        # `restart: always` target left behind keeps running (run 2's did, for 9 hours).
+        base_url = f"http://{service}:{port}"
+        try:
+            self._compose(project, hardened, "up", "-d", "--build",
+                          timeout=self.up_timeout)
+            self._pull_sidecar()
+            self._await_health(net, base_url)
+        except BaseException as e:
+            log = self._save_logs(project, hardened, rundir)
+            stop()
+            if isinstance(e, DockerError) and log is not None:
+                raise DockerError(f"{e}; container logs: {log}") from e
+            raise
+
         return RunningTarget(base_url=base_url, stop=stop, network=net,
                              service=service, port=port)
+
+    def _save_logs(self, project: str, file: Path, rundir: Path) -> Path | None:
+        """Write every service's logs into the run's logs/ before teardown removes them,
+        so a target that never came up says why. Best-effort: None if nothing to save."""
+        try:
+            r = self._compose(project, file, "logs", "--no-color", "--timestamps",
+                              timeout=60, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        text = (r.stdout or "") + (r.stderr or "")
+        if not text.strip():
+            return None
+        out = rundir / "logs" / "validate-compose.log"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text)
+        return out
 
     def _compose(self, project: str, file: Path, *args: str,
                  timeout: int, check: bool = True) -> subprocess.CompletedProcess:

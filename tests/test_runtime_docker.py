@@ -53,6 +53,48 @@ def test_harden_handles_long_syntax_bind_mounts():
     assert {"type": "volume", "source": "pgdata", "target": "/var/lib/pg"} in vols
 
 
+def test_harden_forces_hub_clients_offline_in_either_env_syntax():
+    doc = {"services": {
+        "mapped": {"image": "a", "environment": {"PYTHONUNBUFFERED": "TRUE",
+                                                 "HF_HUB_OFFLINE": "0"}},
+        "listed": {"image": "b", "environment": ["PYTHONUNBUFFERED=TRUE",
+                                                 "TRANSFORMERS_OFFLINE=0", "PASSTHRU"]},
+        "bare": {"image": "c"},
+    }}
+    out = harden_compose(doc)["services"]
+    assert out["mapped"]["environment"] == {"PYTHONUNBUFFERED": "TRUE", **rt.OFFLINE_ENV}
+    assert out["listed"]["environment"] == [
+        "PYTHONUNBUFFERED=TRUE", "PASSTHRU",
+        *(f"{k}={v}" for k, v in rt.OFFLINE_ENV.items())]   # author's "=0" replaced
+    assert out["bare"]["environment"] == rt.OFFLINE_ENV
+    assert doc["services"]["mapped"]["environment"]["HF_HUB_OFFLINE"] == "0"  # not mutated
+
+
+def test_start_tears_down_and_keeps_logs_when_target_never_gets_healthy(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "docker-compose.yml").write_text(
+        "services:\n  api:\n    image: x\n    restart: always\n    ports: ['8000:8000']\n")
+    calls: list[tuple[str, ...]] = []
+
+    def fake_compose(self, project, file, *args, timeout, check=True):
+        calls.append(args)
+        out = "api-1  | Retrying in 8s [Retry 5/5].\n" if args[0] == "logs" else ""
+        return rt.subprocess.CompletedProcess(args, 0, stdout=out, stderr="")
+
+    def never_healthy(self, net, base_url):
+        raise rt.DockerError(f"target did not become healthy at {base_url} (last='000')")
+
+    monkeypatch.setattr(DockerRuntime, "_compose", fake_compose)
+    monkeypatch.setattr(DockerRuntime, "_pull_sidecar", lambda self: None)
+    monkeypatch.setattr(DockerRuntime, "_await_health", never_healthy)
+    runtime = DockerRuntime()
+    with pytest.raises(rt.DockerError, match="container logs: .*validate-compose.log"):
+        runtime.start(runtime.detect(src), tmp_path)
+    assert [c[0] for c in calls] == ["up", "logs", "down"]     # logs saved, then torn down
+    assert "Retry 5/5" in (tmp_path / "logs" / "validate-compose.log").read_text()
+
+
 def test_detect_compose_and_entrypoint(tmp_path):
     (tmp_path / "docker-compose.yml").write_text(
         "services:\n  api:\n    image: x\n    ports: ['9000:3000']\n")
