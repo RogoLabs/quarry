@@ -76,6 +76,10 @@ class Scanner:
         nothing cannot hand back the previous scan's results."""
         return [out]
 
+    def workdir(self, rundir: Path, src: Path) -> Path:
+        """The child's cwd. Must be inside the run volume or the profile denies getcwd()."""
+        return rundir / "out"
+
     def nothing_to_scan(self, returncode: int, out: Path, stderr: bytes) -> str:
         """Non-empty when the tool exited non-zero only because the target has
         nothing it can read. Without this, an absent output file reads as refused output."""
@@ -96,7 +100,8 @@ class Scanner:
         for stale in self.outputs(out):
             stale.unlink(missing_ok=True)
         argv = [binpath, *self.argv(src, out)[1:]]
-        res = tier1(rundir, argv, name=self.name, cwd=rundir / "out", timeout=timeout)
+        res = tier1(rundir, argv, name=self.name, cwd=self.workdir(rundir, src),
+                    timeout=timeout)
         # A negative code is a signal; tier1 reports its own timeout as -9. Either way
         # the output is partial, and partial output parses as a clean result.
         if res.returncode < 0:

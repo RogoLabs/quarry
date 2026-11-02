@@ -730,3 +730,62 @@ def test_an_unhandled_exception_renders_a_page_that_says_what_broke(seeded):
     h = c.get("/__test_boom", headers={"hx-request": "true"})
     assert h.status_code == 500 and "simulated failure" in h.text, \
         "an htmx swap must not silently do nothing"
+
+
+def _live(con) -> int:
+    return con.execute("SELECT COUNT(*) c FROM live_occurrences WHERE run_id=1").fetchone()["c"]
+
+
+def _assert_cells_match_their_sets(client, con):
+    rows = q.funnel_stages(con, 1)
+    for s in rows:
+        for act in q.FUNNEL_ACTIONS:
+            if s[act]:
+                assert q.suppressed_total(con, 1, s["stage"], act) == s[act], \
+                    f"{act} {s[act]} at {s['stage']} links to a set of a different size"
+        if s.get("arrived"):
+            assert q.arrived_total(con, 1) == s["arrived"]
+            assert len(q.arrived(con, 1)) == s["arrived"]
+    assert rows[-1]["remaining"] == _live(con), \
+        "the table must end where the live card does"
+    return rows
+
+
+def test_every_funnel_cell_equals_the_set_it_links_to(seeded):
+    """The table was read from the manifest snapshot while each cell linked to the
+    ledger. cross-tool-cluster wrote `pass` events but counted them as boosts, so
+    "boost 3" opened an empty set."""
+    client, con = seeded
+    rows = _assert_cells_match_their_sets(client, con)
+    cluster = next(s for s in rows if s["stage"] == "cross-tool-cluster")
+    assert cluster["boost"] == 0
+    assert con.execute("SELECT COUNT(*) c FROM funnel_events WHERE "
+                       "stage='cross-tool-cluster' AND action='pass'").fetchone()["c"] == 2
+
+
+def test_occurrences_that_arrive_after_the_funnel_get_their_own_row(seeded):
+    """Run 1 on the operator's DB: 1,717 occurrences (Layer 2 survivors and a re-scan)
+    reached the run after the funnel, so the table ended at 266 under a live card
+    of 1,983."""
+    client, con = seeded
+    add(con, "deep-review", "authz", "src/late.py", 7)
+    rows = _assert_cells_match_their_sets(client, con)
+    assert rows[-1]["stage"] == q.ARRIVED_AFTER_FUNNEL and rows[-1]["arrived"] == 1
+    page = client.get("/runs/1").text
+    assert "+1 not funnelled" in page and "?arrived=1" in page
+    listed = client.get("/runs/1?arrived=1").text
+    assert "Arrived after the funnel" in listed and "src/late.py" in listed
+
+
+def test_operator_dismissals_show_in_the_funnel_table(seeded):
+    """A dismissal is written after the snapshot, so it never reached the table."""
+    client, con = seeded
+    before = _live(con)
+    _post(client, "/producers/bandit:B101/dismiss", data={"run_id": 1, "scope": "repo"})
+    rows = _assert_cells_match_their_sets(client, con)
+    op = next(s for s in rows if s["stage"] == "operator")
+    assert op["kill"] == before - _live(con) > 0
+
+    _post(client, "/producers/bandit:B101/restore", data={"run_id": 1})
+    rows = _assert_cells_match_their_sets(client, con)
+    assert next(s for s in rows if s["stage"] == "operator")["restored"] == op["kill"]

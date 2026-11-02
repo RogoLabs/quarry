@@ -40,7 +40,7 @@
       <span class="k">raw occurrences</span>
       <span class="v">{{ run.total }}</span></a>
     <a class="card" href="/triage?run={{ run.id }}">
-      <span class="k">live after funnel</span>
+      <span class="k">live</span>
       <span class="v">{{ run.live }}</span></a>
     <a class="card" href="/triage?run={{ run.id }}">
       <span class="k">producers to triage</span>
@@ -101,23 +101,34 @@
         {#  Read `s.remaining` when the manifest carries it. Recomputing it as
             rem - kill - defer - merge silently disagrees with `live_occurrences`,
             which excludes only action='kill' — so under `funnel --top-k` the funnel's
-            last row and the "live after funnel" card diverge, and deferred findings
+            last row and the "live" card diverge, and deferred findings
             appear in a queue this table says they left. #}
         {% if s.remaining is defined and s.remaining is not none %}
           {% set ns.rem = s.remaining %}
+        {% elif s.arrived %}
+          {% set ns.rem = ns.rem + s.arrived %}
         {% else %}
           {% set ns.rem = ns.rem - s.kill - s.defer - s.merge %}
         {% endif %}
         <tr class="{{ 'heuristic' if s.heuristic }}">
           <td class="i">{{ loop.index }}</td>
           <th scope="row" class="nm">{{ s.stage }}
-            {%- if s.heuristic %} <span class="pill incomplete">recall risk</span>{% endif %}</th>
+            {%- if s.heuristic %} <span class="pill incomplete">recall risk</span>{% endif %}
+            {%- if s.restored %} <span class="dim sm">{{ s.restored }} restored</span>{% endif %}</th>
+          {% if s.arrived %}
+            {#  Not an action: these occurrences never met a stage. Layer 2 survivors
+                and re-scans land here, and without this row the table ended hundreds
+                short of the "live" card above it. #}
+            <td colspan="4" class="n"><a href="/runs/{{ run.id }}?arrived=1"
+              >+{{ s.arrived }} not funnelled</a></td>
+          {% else %}
           {% for act in ['kill','defer','merge','boost'] %}
             {% if s[act] %}
               <td class="n"><a href="/runs/{{ run.id }}?stage={{ s.stage|urlencode }}&amp;action={{ act }}"
                 >{{ s[act] }}</a></td>
             {% else %}<td class="z">·</td>{% endif %}
           {% endfor %}
+          {% endif %}
           <td class="rem">{{ ns.rem }}</td>
         </tr>
       {% endfor %}
@@ -136,12 +147,15 @@
     <span>nothing is ever deleted</span>
   </div>
 
-  {% if stage or all_suppressed %}
+  {% if stage or all_suppressed or arrived %}
   {#  The heading names the action taken. It was hardcoded to "Suppressed at", which
       was simply false for a boost — and it now states the true total rather than
       presenting a LIMIT-capped tail as a complete record. #}
   {% if all_suppressed %}
   <h2 class="h-sec">Not live, every stage: showing {{ suppressed|length }}
+    {%- if suppressed_total > suppressed|length %} of {{ suppressed_total }}{% endif %}</h2>
+  {% elif arrived %}
+  <h2 class="h-sec">Arrived after the funnel, never funnelled: showing {{ suppressed|length }}
     {%- if suppressed_total > suppressed|length %} of {{ suppressed_total }}{% endif %}</h2>
   {% else %}
   <h2 class="h-sec">{{ ACTION_NOUN.get(action, 'Suppressed') }} at “{{ stage }}”:
@@ -154,7 +168,8 @@
   <div class="tbl tall">
     <table>
       <caption class="sr-only">{% if all_suppressed %}Occurrences that are not live,
-        with the event holding each one out{% else %}Occurrences
+        with the event holding each one out{% elif arrived %}Occurrences that reached
+        the run after the funnel ran{% else %}Occurrences
         {{ ACTION_NOUN.get(action, 'suppressed')|lower }} at stage {{ stage }}{% endif %}</caption>
       <thead><tr><th scope="col">Action</th><th scope="col">Producer</th>
         <th scope="col">Location</th><th scope="col">Reason</th>
@@ -167,6 +182,7 @@
             {% elif s.action == 'defer' %}<span class="pill incomplete">defer</span>
             {% elif s.action == 'merge' %}<span class="pill inert">merge</span>
             {% elif s.action == 'boost' %}<span class="pill accent">boost</span>
+            {% elif s.action == 'arrived' %}<span class="pill incomplete">not funnelled</span>
             {% else %}<span class="pill inert">{{ s.action }}</span>{% endif %}
             {% if all_suppressed %}<span class="dim sm">{{ s.stage }}</span>{% endif %}
           </td>
@@ -180,7 +196,8 @@
       {% endfor %}
       {% if not suppressed %}
         <tr><td colspan="5" class="dim">{% if all_suppressed %}Every occurrence in this
-          run is live.{% else %}No occurrences took the
+          run is live.{% elif arrived %}Every occurrence in this run went through the
+          funnel.{% else %}No occurrences took the
           “{{ action or 'suppressing' }}” action at this stage.{% endif %}</td></tr>
       {% endif %}
       </tbody>

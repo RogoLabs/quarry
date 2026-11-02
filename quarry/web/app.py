@@ -727,10 +727,11 @@ def create_app() -> FastAPI:
 
     @app.get("/runs/{run_id}", response_class=HTMLResponse)
     def run_detail(request: Request, run_id: int, stage: str | None = None,
-                   action: str | None = None, suppressed: str | None = None):
+                   action: str | None = None, suppressed: str | None = None,
+                   arrived: str | None = None):
         """`?stage=X[&action=Y]` opens one funnel cell's set. `?suppressed=all` opens
         every occurrence that is not live, which is the set the "suppressed" card
-        counts."""
+        counts. `?arrived=1` opens the occurrences no funnel stage has seen."""
         with opened() as c:
             summary = q.run_summary(c, row_id(run_id))
             if not summary:
@@ -738,6 +739,9 @@ def create_app() -> FastAPI:
             if stage:
                 rows = q.suppressed(c, run_id, stage, action)
                 total = q.suppressed_total(c, run_id, stage, action)
+            elif arrived:
+                rows = q.arrived(c, run_id)
+                total = q.arrived_total(c, run_id)
             elif suppressed:
                 rows = q.not_live(c, run_id)
                 total = summary["total"] - summary["live"]
@@ -748,7 +752,8 @@ def create_app() -> FastAPI:
                 "stages": q.funnel_stages(c, run_id),
                 "stage": stage,
                 "action": action,
-                "all_suppressed": bool(suppressed) and not stage,
+                "all_suppressed": bool(suppressed) and not stage and not arrived,
+                "arrived": bool(arrived) and not stage,
                 "suppressed": rows,
                 "suppressed_total": total,
                 "quarantine": [dict(r) for r in c.execute(

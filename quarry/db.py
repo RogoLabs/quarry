@@ -102,14 +102,19 @@ def upsert_producer(con: sqlite3.Connection, tool: str, rule_id: str, **meta: An
 
 def bump_producer_counts(con: sqlite3.Connection) -> None:
     """Recompute the cross-repo precision ledger. Cheap enough to run after each ingest,
-    and being derived rather than incremented means it cannot drift."""
+    and being derived rather than incremented means it cannot drift.
+
+    Only confirmed and rejected count as adjudicated. A needs-review verdict means the
+    probe got no signal; counting it made a producer probed five times with no answer
+    read as 0 of 5 confirmed, which ranks it down and bands it known-bad."""
     con.execute("""
         UPDATE producers SET
           n_occurrences = COALESCE((SELECT COUNT(*) FROM occurrences o
                                     WHERE o.producer_id = producers.id), 0),
           n_adjudicated = COALESCE((SELECT COUNT(DISTINCT v.finding_id) FROM verdicts v
                                     JOIN findings f ON f.id = v.finding_id
-                                    WHERE f.producer_id = producers.id), 0),
+                                    WHERE f.producer_id = producers.id
+                                      AND v.verdict IN ('confirmed', 'rejected')), 0),
           n_confirmed   = COALESCE((SELECT COUNT(DISTINCT v.finding_id) FROM verdicts v
                                     JOIN findings f ON f.id = v.finding_id
                                     WHERE f.producer_id = producers.id

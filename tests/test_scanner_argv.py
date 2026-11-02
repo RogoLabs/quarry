@@ -24,3 +24,33 @@ def test_zizmor_neither_discovers_target_config_nor_honours_ignores():
     argv = tools.Zizmor().argv(SRC, OUT)
     assert "--no-config" in argv and "--no-ignores" in argv
     assert argv[-1] == str(SRC)
+
+
+# Checkov names every uri after the directory it was handed: `-d <rundir>/src` gave
+# `src/<path>`, a path that is not in the clone, so every Checkov finding lost its
+# evidence window and was killed by quote-verify (21 of 21 on runs 1 and 2).
+def test_checkov_scans_from_inside_the_clone():
+    ck = tools.Checkov()
+    argv = ck.argv(SRC, OUT)
+    assert argv[argv.index("-d") + 1] == "."
+    assert ck.workdir(Path("/vol"), SRC) == SRC
+
+
+def test_checkov_paths_are_relative_to_the_clone(tmp_path):
+    import pytest
+    ck = tools.Checkov()
+    if not ck.available():
+        pytest.skip("checkov not installed")
+    src = tmp_path / "src"
+    dockerfile = 'FROM python:3.12\nRUN pip install flask\nCMD ["python"]\n'
+    # A repo-root src/ is the case a prefix-strip would get wrong.
+    for rel in ("Dockerfile", "docker/Dockerfile", "src/Dockerfile"):
+        (src / rel).parent.mkdir(parents=True, exist_ok=True)
+        (src / rel).write_text(dockerfile)
+
+    outcome = ck.run(tmp_path, src, timeout=300)
+
+    assert outcome.ok, outcome.error
+    paths = {r.path for r in outcome.records}
+    assert paths == {"Dockerfile", "docker/Dockerfile", "src/Dockerfile"}
+    assert all((src / p).is_file() for p in paths)

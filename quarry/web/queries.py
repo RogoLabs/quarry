@@ -15,6 +15,7 @@ import datetime as _dt
 import gzip
 import json
 import sqlite3
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -168,14 +169,27 @@ def provenance(con: sqlite3.Connection, oid: int) -> list[dict[str, Any]]:
         "FROM funnel_events WHERE occurrence_id=? ORDER BY id", (oid,))]
 
 
+#: The run-page row for occurrences no funnel stage has seen. Not a ledger stage.
+ARRIVED_AFTER_FUNNEL = "arrived after the funnel"
+
+
 def funnel_stages(con: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]:
     """Per-stage counts for /runs/:id. Every number here links to its own set —
     that is a build constraint, not a nicety (Seat 4).
 
-    Read from the run manifest when it is present, so stages that suppressed nothing
-    still appear with zeroes rather than disappearing.
+    Counts come from the ledger, the same rows each cell's link opens. They came from
+    the manifest snapshot, which disagreed with its own links twice: cross-tool-cluster
+    reported a boost it never wrote, and operator dismissals, written after the
+    snapshot, never appeared. The manifest still supplies the stage order, the stages
+    that wrote no rows (so they show as zeroes rather than vanish) and each stage's
+    `remaining` at the time it ran.
+
+    Occurrences that reached the run after the funnel (Layer 2 survivors, a re-scan)
+    get their own row, and the last row's `remaining` is the live count, so the table
+    ends where the "live" card does.
     """
     import json as _json
+    snapshot: list[dict[str, Any]] = []
     row = con.execute("SELECT manifest FROM runs WHERE id=?", (run_id,)).fetchone()
     if row and row["manifest"]:
         try:
@@ -183,24 +197,68 @@ def funnel_stages(con: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]:
         except (ValueError, TypeError):
             f = None
         if f and f.get("stages"):
-            return f["stages"]
+            snapshot = [s for s in f["stages"] if isinstance(s, dict) and s.get("stage")]
 
-    order = con.execute("""
-        SELECT stage, MIN(id) AS first_id FROM funnel_events
+    counts: dict[str, dict[str, int]] = defaultdict(dict)
+    for r in con.execute(
+            "SELECT stage, action, COUNT(*) n FROM funnel_events WHERE run_id=? "
+            "AND occurrence_id IS NOT NULL GROUP BY stage, action", (run_id,)):
+        counts[r["stage"]][r["action"]] = r["n"]
+    ledger = con.execute("""
+        SELECT stage, MIN(id) AS first_id, MIN(deterministic) AS d FROM funnel_events
         WHERE run_id=? GROUP BY stage ORDER BY first_id""", (run_id,)).fetchall()
-    out = []
-    for row in order:
-        stage = row["stage"]
-        counts = {r["action"]: r["n"] for r in con.execute(
-            "SELECT action, COUNT(*) n FROM funnel_events WHERE run_id=? AND stage=? "
-            "AND occurrence_id IS NOT NULL GROUP BY action", (run_id, stage))}
-        heuristic = con.execute(
-            "SELECT MIN(deterministic) d FROM funnel_events WHERE run_id=? AND stage=?",
-            (run_id, stage)).fetchone()["d"] == 0
-        out.append({"stage": stage, "heuristic": heuristic,
-                    "kill": counts.get("kill", 0), "defer": counts.get("defer", 0),
-                    "merge": counts.get("merge", 0), "boost": counts.get("boost", 0)})
-    return out
+
+    def stage_row(name: str, heuristic: bool, remaining: int | None) -> dict[str, Any]:
+        c = counts.get(name, {})
+        return {"stage": name, "heuristic": heuristic, "remaining": remaining,
+                **{a: c.get(a, 0) for a in FUNNEL_ACTIONS},
+                "restored": c.get("resurrect", 0)}
+
+    heuristic = {r["stage"]: r["d"] == 0 for r in ledger}
+    out = [stage_row(s["stage"], bool(s.get("heuristic")) or heuristic.get(s["stage"], False),
+                     s.get("remaining"))
+           for s in snapshot]
+    seen = {s["stage"] for s in out}
+    # Stages written after the snapshot, or every stage on a run with no snapshot.
+    later = [stage_row(r["stage"], r["d"] == 0, None)
+             for r in ledger if r["stage"] not in seen]
+    funnel_ran = bool(out) or any(s["stage"] != "operator" for s in later)
+    if not funnel_ran:
+        return out + later
+
+    funnel_rows = out + [s for s in later if s["stage"] != "operator"]
+    after = [s for s in later if s["stage"] == "operator"]
+    if n := arrived_total(con, run_id):
+        prev = funnel_rows[-1]["remaining"] if funnel_rows else None
+        after.insert(0, {"stage": ARRIVED_AFTER_FUNNEL, "arrived": n, "heuristic": False,
+                         "remaining": None if prev is None else prev + n,
+                         **{a: 0 for a in FUNNEL_ACTIONS}, "restored": 0})
+    rows = funnel_rows + after
+    rows[-1]["remaining"] = con.execute(
+        "SELECT COUNT(*) c FROM live_occurrences WHERE run_id=?", (run_id,)).fetchone()["c"]
+    return rows
+
+
+_ARRIVED_SQL = """FROM occurrences o
+    WHERE o.run_id = ?
+      AND NOT EXISTS (SELECT 1 FROM funnel_events f
+                      WHERE f.occurrence_id = o.id AND f.stage != 'operator')"""
+
+
+def arrived_total(con: sqlite3.Connection, run_id: int) -> int:
+    """Occurrences of a run that no funnel stage has seen. An operator dismissal is
+    not a funnel stage, so a dismissed arrival still counts as one."""
+    return con.execute(f"SELECT COUNT(*) c {_ARRIVED_SQL}", (run_id,)).fetchone()["c"]
+
+
+def arrived(con: sqlite3.Connection, run_id: int, limit: int = 300) -> list[dict[str, Any]]:
+    """The set behind the "arrived after the funnel" row, shaped like `suppressed()`."""
+    return [dict(r) for r in con.execute(
+        f"""SELECT NULL AS id, NULL AS stage, 'arrived' AS action,
+                   'no funnel stage has seen this occurrence' AS reason,
+                   1 AS deterministic, 0 AS score_delta,
+                   o.id AS occurrence_id, o.path, o.start_line, o.blob_sha, o.producer_id
+            {_ARRIVED_SQL} ORDER BY o.id LIMIT ?""", (run_id, limit))]
 
 
 #: Actions a funnel stage can take. `boost` is not a suppression — it raises a score —

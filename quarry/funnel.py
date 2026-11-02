@@ -488,7 +488,9 @@ def _cross_tool_cluster(con, run_id, rows, src) -> StageResult:
                              f"{len(members) - 1} other finding(s) from "
                              f"{len(classes)} detector class(es)",
                       deterministic=True)
-        sr.boosted += len(members)   # clustered, not suppressed
+        # Counted as passed, matching the events above. It was counted as boosted, so
+        # the funnel table showed "boost 3" over a set of zero boost events.
+        sr.passed += len(members)
     return sr
 
 

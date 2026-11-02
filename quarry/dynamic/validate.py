@@ -283,6 +283,12 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
                 res.needs_review += v == "needs-review"
     finally:
         running.stop()
+        # The precision ledger is derived from verdicts, so refresh it here rather than
+        # leave it stale until the next scan. In `finally` so a run that errors part way
+        # still counts the verdicts it did write.
+        if res.verdicts:
+            with db.tx(con):
+                db.bump_producer_counts(con)
     return res
 
 

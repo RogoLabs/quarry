@@ -239,8 +239,17 @@ class Checkov(Scanner):
     name = "checkov"
     binary = "checkov"
 
+    # Handed `-d <rundir>/src`, checkov reports every uri as `src/<path>`: it prefixes
+    # the scan directory's own name. That path does not exist in the clone, so every
+    # finding lost its evidence window and quote-verify killed all of them (21 of 21
+    # on runs 1 and 2). From inside the clone with `-d .` the uris are plain relative
+    # paths. This opens no new config path: checkov already reads .checkov.y*ml from
+    # the -d directory, and ingest quarantines both. MEASURED with checkov in .venv.
+    def workdir(self, rundir: Path, src: Path) -> Path:
+        return src
+
     def argv(self, src: Path, out: Path) -> list[str]:
-        return [self.binary, "-d", str(src), "-o", "sarif",
+        return [self.binary, "-d", ".", "-o", "sarif",
                 "--output-file-path", str(out.parent),
                 "--download-external-modules", "false",
                 "--skip-download", "--compact", "--quiet"]

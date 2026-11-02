@@ -121,3 +121,21 @@ def test_kills_a_properly_protected_route_end_to_end(scanned):
     assert (res.confirmed, res.rejected, res.needs_review) == (0, 1, 0)
     row = dict(con.execute("SELECT * FROM verdicts WHERE finding_id='f-secret'").fetchone())
     assert row["verdict"] == "rejected" and row["executed_score"] == 50
+
+
+def _ledger(con):
+    r = con.execute("SELECT n_adjudicated, n_confirmed FROM producers WHERE id='t:authz'")
+    return tuple(r.fetchone())
+
+
+@pytest.mark.parametrize("served, ledger", [
+    ("200", (0, 0)),        # needs-review: the probe got no answer, so nothing adjudicated
+    ("403", (1, 0)),        # rejected
+])
+def test_validation_refreshes_the_precision_ledger(scanned, served, ledger):
+    # The fixture seeds (3, 2). Validation recomputes from verdicts, and only confirmed
+    # and rejected count: a needs-review used to read as an adjudicated non-confirmation,
+    # so five unanswered probes banded a producer known-bad.
+    con, rundir = scanned
+    run_validation(con, 1, rundir, FakeRuntime({"/secret": served}))
+    assert _ledger(con) == ledger
