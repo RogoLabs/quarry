@@ -85,9 +85,11 @@ The runtime strategy was a real fork: a sandbox-exec run command (narrow, fits t
 existing model) versus a container runtime (broader, new trust boundary). Resolved to
 the container runtime (`runtime_docker.py`), because compose/Dockerfile is the target
 author's own declared boot contract and the services worth probing need a real stack.
-The egress guarantee is re-established at the container layer by `harden_compose`:
-one `internal: true` network, no host port publishing, no host networking, no escaping
-host bind-mounts. A live test proves a sidecar reaches the target but not the internet.
+The egress guarantee is re-established at the container layer by `harden_compose`,
+which writes a fresh document from an allowlist rather than editing the author's: one
+`internal: true` network, no host port publishing, binds only inside the clone,
+dropped capabilities, network-less builds, and interpolation under a scrubbed
+environment. A live test proves a sidecar reaches the target but not the internet.
 The sandbox-exec run-command runtime remains a possible narrow add-on behind the same
 `TargetRuntime` interface, not the primary.
 

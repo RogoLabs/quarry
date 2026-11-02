@@ -128,7 +128,7 @@ def test_authz_probe_confirms_and_kills_against_a_live_target(tmp_path):
         "    command: ['python','/app/app.py']\n"
         "    volumes: ['./:/app']\n"
         "    ports: ['18081:8080']\n")
-    runtime = rt.DockerRuntime(health_timeout=90, uncontained_ok=True)
+    runtime = rt.DockerRuntime(health_timeout=90)
     running = runtime.start(runtime.detect(src), tmp_path)
     try:
         exec_fn = lambda argv: runtime.probe_exec(running, argv)

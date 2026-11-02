@@ -103,11 +103,11 @@ class TargetRuntime(Protocol):
     """Stands one target up and exposes a base URL that probes can reach.
 
     Implementations detect how a target boots (a declared run command, a Dockerfile, a
-    compose file) and are responsible for doing it inside the run volume with egress
-    denied. The Docker runtime does not run under quarry-target.sb and does not yet
-    deny egress during builds, so it refuses to start unless told the target is
-    trusted (runtime_docker.UNCONTAINED_WHY). `detect` returns None when it does not know how to run this target, with
-    the reason recorded by the caller, never a guess."""
+    compose file) and are responsible for doing it with egress denied. The Docker
+    runtime does not run under quarry-target.sb; it contains a target through the
+    compose document it writes (runtime_docker.harden_compose). `detect` returns None
+    when it does not know how to run this target, with the reason recorded by the
+    caller, never a guess."""
 
     def detect(self, src: Path) -> "RuntimeSpec | None": ...
     def start(self, spec: "RuntimeSpec", rundir: Path) -> "RunningTarget": ...
@@ -282,7 +282,17 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
         return res
 
     rmap = build_route_map(src)
-    running = runtime.start(spec, rundir)
+    try:
+        running = runtime.start(spec, rundir)
+    except Exception as e:
+        # A target that cannot be stood up under containment is a recorded gap, not a
+        # silent zero: the run page shows it beside the scanner warnings.
+        with db.tx(con):
+            db.set_health(con, run_id, "validate",
+                          {"runtime": [f"{spec.kind}: {type(e).__name__}: {e}"[:600]]})
+        raise
+    with db.tx(con):
+        db.set_health(con, run_id, "validate", {"runtime": []})
     try:
         def exec_fn(argv):
             return runtime.probe_exec(running, argv)

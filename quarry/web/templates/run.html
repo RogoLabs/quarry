@@ -79,8 +79,8 @@
       <a href="/validation?run={{ run.id }}">All of them</a>. A probe with no recorded
       baseline is held as needs review, so that state is the common one.{% else %}No
       verdicts yet. <code>quarry validate {{ run.id }} --dry-run</code> plans the probes;
-      a real run needs <code>--uncontained</code> until the Docker runtime contains a
-      hostile target.{% endif %}</p>
+      <code>quarry validate {{ run.id }}</code> builds the target with no network and
+      probes it.{% endif %}</p>
   </div>
 
   {#  Kept per tool in the manifest. It was printed to the terminal and dropped, so a

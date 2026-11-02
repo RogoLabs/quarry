@@ -21,7 +21,7 @@ quarry scan 1                   # seven scanners under sandbox-exec, no network,
 quarry funnel 1                 # thirteen ordered stages; nothing is deleted
 quarry killed 1                 # audit what the funnel suppressed, and why
 quarry validate 1 --dry-run     # plan which probes fit this codebase
-quarry validate 1 --uncontained # stand the target up in Docker and probe the survivors
+quarry validate 1               # stand the target up in Docker and probe the survivors
 quarry report 1                 # Markdown advisory drafts for confirmed findings
 quarry serve                    # dashboard on 127.0.0.1:8099
 ```
@@ -67,12 +67,16 @@ keys and a GitHub token.
 - Secrets are stored as a prefix plus SHA-256, including inside evidence windows.
 - The dashboard only answers to loopback Host headers, refuses cross-site POSTs, and
   renders bidi and zero-width characters from target code as visible tokens.
-- `validate` is the exception. Docker does not run under `sandbox-exec`, and the
-  compose hardening is not finished: image builds have network access and compose
-  can read your shell environment. A real `validate` run is refused unless you pass
-  `--uncontained`, which is only for a target you trust.
+- `validate` runs the target in Docker, not under `sandbox-exec`. Quarry never runs
+  the author's compose file. It refuses `include`, `extends.file` and any `env_file`
+  outside the clone, resolves the file with a scrubbed environment (nothing from your
+  shell is interpolated), and writes a new document from an allowlist of keys:
+  one internal-only network, no host ports, binds only inside the clone,
+  `cap_drop: ALL` with a short list added back, `no-new-privileges`, memory and pid
+  limits, and builds with `network: none`. Image pulls are the one step with network
+  access. A build that needs the network fails and is recorded on the run page.
 
-The test suite (498 tests) asserts these against a hostile fixture repo and real
+The test suite (516 tests) asserts these against a hostile fixture repo and real
 `sandbox-exec`. A profile with no test is a comment.
 
 ## Requirements

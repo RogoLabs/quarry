@@ -166,3 +166,21 @@ def test_validation_refreshes_the_precision_ledger(scanned, monkeypatch,
         _with_control(monkeypatch)
     run_validation(con, 1, rundir, FakeRuntime({"/secret": served}))
     assert _ledger(con) == ledger
+
+
+def test_a_target_that_will_not_come_up_is_recorded_on_the_run(scanned):
+    # A refused compose file or a build that needed the network used to surface only as
+    # a traceback. It is a health warning on the run now, and a later good run clears it.
+    con, rundir = scanned
+
+    class Refusing(FakeRuntime):
+        def start(self, spec, rundir):
+            raise RuntimeError("top-level include is not supported")
+
+    with pytest.raises(RuntimeError):
+        run_validation(con, 1, rundir, Refusing({}))
+    health = db.read_manifest(con, 1)["health"]["validate"]
+    assert health == {"runtime": ["compose: RuntimeError: top-level include is not supported"]}
+
+    run_validation(con, 1, rundir, FakeRuntime({"/secret": "200"}))
+    assert db.read_manifest(con, 1)["health"]["validate"] == {}
