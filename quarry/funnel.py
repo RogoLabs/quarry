@@ -501,14 +501,15 @@ def _rejected_carry_forward(con, run_id, rows, src) -> StageResult:
     sr = StageResult("rejected-carry-forward")
     # The latest verdict per finding, selected explicitly. `GROUP BY ... HAVING MAX(id)`
     # leaned on SQLite's bare-column rule, which nothing guarantees for a HAVING.
-    prior = {r["finding_id"]: r["verdict"] for r in con.execute(
-        """SELECT v.finding_id, v.verdict FROM verdicts v
+    prior = {r["finding_id"]: r for r in con.execute(
+        """SELECT v.finding_id, v.verdict, v.seat, v.reason, v.rationale FROM verdicts v
            JOIN (SELECT finding_id, MAX(id) AS id FROM verdicts
                  WHERE run_id != ? GROUP BY finding_id) latest ON latest.id = v.id""",
         (run_id,))}
     for r in rows:
-        v = prior.get(r["finding_id"])
-        if v == "rejected":
+        p = prior.get(r["finding_id"])
+        v = p["verdict"] if p else None
+        if v == "rejected" and _controlled_rejection(p):
             _kill(con, run_id, r, sr.stage,
                   "adjudicated `rejected` in an earlier run; symbol content unchanged")
             sr.killed += 1
@@ -518,6 +519,22 @@ def _rejected_carry_forward(con, run_id, rows, src) -> StageResult:
         else:
             sr.passed += 1
     return sr
+
+
+def _controlled_rejection(v) -> bool:
+    """A kill that outlives its run needs the strongest rejection Layer 3 makes: a
+    deterministic probe whose handled request behaved like a recorded control. A
+    statistical miss, or a rejection written before probes recorded controls, stays a
+    verdict on its own run and is not carried forward."""
+    import json as _json
+    if v["seat"] != "dynamic" or v["reason"] != "deterministic":
+        return False
+    try:
+        ev = _json.loads(v["rationale"] or "{}")
+    except (ValueError, TypeError):
+        return False
+    return (isinstance(ev, dict) and bool(ev.get("baseline"))
+            and ev.get("differs_from_baseline") is False and ev.get("handled") is True)
 
 
 # -- 9 -------------------------------------------------------------------------

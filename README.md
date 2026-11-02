@@ -21,7 +21,7 @@ quarry scan 1                   # seven scanners under sandbox-exec, no network,
 quarry funnel 1                 # twelve ordered stages; nothing is deleted
 quarry killed 1                 # audit what the funnel suppressed, and why
 quarry validate 1 --dry-run     # plan which probes fit this codebase
-quarry validate 1               # stand the target up in Docker and probe the survivors
+quarry validate 1 --uncontained # stand the target up in Docker and probe the survivors
 quarry report 1                 # Markdown advisory drafts for confirmed findings
 quarry serve                    # dashboard on 127.0.0.1:8099
 ```
@@ -31,9 +31,13 @@ The scanners are opengrep, bandit, gitleaks, zizmor, osv-scanner, trivy and chec
 names are refused.
 
 **Validation is conservative by design.** A probe result counts as confirmed only when it
-recorded a baseline request and the result differs from it. Anything else is stored as
-needs-review, and `quarry report` only drafts confirmed findings. Every draft ends with a
-reminder to review it before sending.
+recorded a baseline request and the result differs from it. It counts as rejected only
+when a handler answered (not 404 or 405) and the result matched a recorded control, and
+only a deterministic rejection of that kind carries forward to later runs. Anything else
+is stored as needs-review. Today the SQL injection probe records a baseline and the
+auth-timing probe records a control; the other probes record neither yet, so their
+results are all needs-review. `quarry report` only drafts confirmed findings, and every
+draft ends with a reminder to review it before sending.
 
 ## Why it is shaped this way
 
@@ -63,8 +67,12 @@ keys and a GitHub token.
 - Secrets are stored as a prefix plus SHA-256, including inside evidence windows.
 - The dashboard only answers to loopback Host headers, refuses cross-site POSTs, and
   renders bidi and zero-width characters from target code as visible tokens.
+- `validate` is the exception. Docker does not run under `sandbox-exec`, and the
+  compose hardening is not finished: image builds have network access and compose
+  can read your shell environment. A real `validate` run is refused unless you pass
+  `--uncontained`, which is only for a target you trust.
 
-The test suite (469 tests) asserts these against a hostile fixture repo and real
+The test suite (483 tests) asserts these against a hostile fixture repo and real
 `sandbox-exec`. A profile with no test is a comment.
 
 ## Requirements

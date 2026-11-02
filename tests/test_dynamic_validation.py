@@ -163,9 +163,25 @@ def test_rejected_probe_is_executed_but_not_confirmed(con):
     cand = Candidate("f-live", 10, "o/r", "app/x.py", 5, "t:auth", "CWE-862", "x")
     vid = validate.record_verdict(con, cand, 1,
                                   ProbeEvidence(False, "did not reproduce",
-                                                determinism="deterministic"))
+                                                determinism="deterministic", handled=True,
+                                                baseline="GET /x?q=1 -> 200",
+                                                differs_from_baseline=False))
     row = dict(con.execute("SELECT * FROM verdicts WHERE id=?", (vid,)).fetchone())
     assert row["verdict"] == "rejected" and row["executed_score"] == 50
+    assert json.loads(row["rationale"])["handled"] is True
+
+
+@pytest.mark.parametrize("ev", [
+    ProbeEvidence(False, "no control", determinism="deterministic"),
+    ProbeEvidence(False, "unhandled", determinism="deterministic", handled=False,
+                  baseline="GET /x -> 404", differs_from_baseline=False),
+    ProbeEvidence(False, "control not compared", determinism="statistical", handled=True,
+                  baseline="GET /x -> 200"),
+], ids=["no-control", "not-handled", "not-compared"])
+def test_a_rejection_needs_a_handled_control(ev):
+    """The bar a confirmation already had. A rejection kills the finding in every later
+    run, so a probe that never reached a handler must not produce one."""
+    assert validate.adjudicate_with_reason(ev) == ("needs-review", validate.NO_CONTROL)
 
 
 def test_plan_validation_is_honest_without_a_runtime(con, tmp_path):

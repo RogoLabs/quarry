@@ -387,11 +387,20 @@ def killed(run_id: int, stage: str = typer.Option("", help="filter to one stage"
 @app.command()
 def validate(run_id: int = typer.Argument(..., help="a scanned + funnelled run"),
              limit: int = typer.Option(50, help="max candidates to probe"),
-             dry_run: bool = typer.Option(False, help="profile and plan only; probe nothing")) -> None:
-    """Layer 3: stand the target up under containment and probe surviving findings into
-    confirmed-or-killed verdicts. Which probes run is chosen from what the codebase is."""
+             dry_run: bool = typer.Option(False, help="profile and plan only; probe nothing"),
+             uncontained: bool = typer.Option(
+                 False, help="run anyway: only for a target you trust with your shell "
+                             "environment and network")) -> None:
+    """Layer 3: stand the target up and probe surviving findings into
+    confirmed-or-killed verdicts. Which probes run is chosen from what the codebase is.
+    Refused without --dry-run until the Docker runtime contains a hostile target."""
     from .ingest import RunVolume
     from .dynamic import runtime_docker, plan_validation, run_validation
+
+    if not dry_run and not uncontained:
+        con_out.print(f"[red]refused[/]: {_e(runtime_docker.UNCONTAINED_WHY)}.\n"
+                      f"Use --dry-run to plan, or --uncontained for a target you trust.")
+        raise typer.Exit(2)
 
     paths, connection = _open()
     vol = RunVolume.attach_existing(run_id, paths.runs)
@@ -408,7 +417,7 @@ def validate(run_id: int = typer.Argument(..., help="a scanned + funnelled run")
             con_out.print(f"  [dim]skip  {_e(key)}: {_e(why)}[/]")
         return
 
-    runtime = runtime_docker.DockerRuntime()
+    runtime = runtime_docker.DockerRuntime(uncontained_ok=True)
     with con_out.status("standing the target up and probing…"):
         res = run_validation(connection, run_id, vol.mount, runtime, limit=limit)
     con_out.print(f"[bold]validation of run {run_id}[/]: "

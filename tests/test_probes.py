@@ -62,12 +62,14 @@ def test_probe_confirms_unauthenticated_reach():
     assert "no credentials" in ev.summary and adjudicate(ev) == HELD
 
 
-def test_probe_kills_when_properly_denied():
+def test_probe_holds_a_denial_without_a_control():
+    # Anonymous 401/403 says nothing about IDOR, which is cross-principal by definition,
+    # and the probe records no control. Held until it does (validate.NO_CONTROL).
     routes = routes_from_openapi(OPENAPI)
     ev = probe_broken_authz(RUNNING, CAND, routes,
                             _status_exec({"/secret": "401", "/protected/1": "403"}))
     assert ev.reproduced is False and ev.determinism == "deterministic"
-    assert adjudicate(ev) == "rejected"
+    assert adjudicate(ev) == "needs-review"
 
 
 def test_probe_needs_review_without_a_security_signal():
@@ -126,7 +128,7 @@ def test_authz_probe_confirms_and_kills_against_a_live_target(tmp_path):
         "    command: ['python','/app/app.py']\n"
         "    volumes: ['./:/app']\n"
         "    ports: ['18081:8080']\n")
-    runtime = rt.DockerRuntime(health_timeout=90)
+    runtime = rt.DockerRuntime(health_timeout=90, uncontained_ok=True)
     running = runtime.start(runtime.detect(src), tmp_path)
     try:
         exec_fn = lambda argv: runtime.probe_exec(running, argv)
@@ -138,9 +140,9 @@ def test_authz_probe_confirms_and_kills_against_a_live_target(tmp_path):
         ev = probe_broken_authz(running, CAND, secret, exec_fn)
         assert ev.reproduced is True and adjudicate(ev) == HELD, ev.summary
 
-        # /protected denies without a token -> killed, with evidence.
+        # /protected denies without a token -> held: no control recorded yet.
         protected = [r for r in routes if r.path == "/protected"]
         ev = probe_broken_authz(running, CAND, protected, exec_fn)
-        assert ev.reproduced is False and adjudicate(ev) == "rejected", ev.summary
+        assert ev.reproduced is False and adjudicate(ev) == "needs-review", ev.summary
     finally:
         running.stop()

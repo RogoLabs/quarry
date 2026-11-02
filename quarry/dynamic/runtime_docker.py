@@ -48,6 +48,20 @@ class DockerError(RuntimeError):
     pass
 
 
+class UncontainedRuntime(DockerError):
+    """Refused: the Docker runtime does not yet contain a hostile target."""
+
+
+#: Why `start` refuses by default. harden_compose is a denylist, so privileged, pid,
+#: cap_add, devices, env_file, include and secrets pass through; `up --build` runs
+#: Dockerfile RUN steps with full egress; and compose interpolates ${VAR} from the
+#: operator's own shell. A target can send a token out before any probe runs.
+UNCONTAINED_WHY = (
+    "the Docker runtime does not contain a hostile target yet: build steps run with "
+    "network access, compose interpolates ${VAR} from your shell environment, and "
+    "privileged/pid/cap_add/devices/env_file/include/secrets are not stripped")
+
+
 def docker_available() -> bool:
     if not shutil.which("docker"):
         return False
@@ -202,6 +216,9 @@ class DockerRuntime:
     project_prefix: str = "quarry"
     up_timeout: int = 300
     health_timeout: int = 120
+    # Off until the compose allowlist rebuild lands (docs/IMPROVEMENT-PLAN.md item 2).
+    # Set only for a target the operator trusts with their shell environment.
+    uncontained_ok: bool = False
 
     def detect(self, src: Path) -> RuntimeSpec | None:
         comp = find_compose(src)
@@ -219,6 +236,8 @@ class DockerRuntime:
         return f"{self.project_prefix}-{rundir.name}".lower().replace("_", "-")
 
     def start(self, spec: RuntimeSpec, rundir: Path) -> RunningTarget:
+        if not self.uncontained_ok:
+            raise UncontainedRuntime(UNCONTAINED_WHY)
         if spec.kind != "compose":
             raise DockerError(f"runtime kind {spec.kind!r} not implemented yet")
         src = rundir / "src"

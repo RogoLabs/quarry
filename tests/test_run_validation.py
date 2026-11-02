@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from quarry import db                                              # noqa: E402
 from quarry.dynamic import lenses, probes                          # noqa: E402
 from quarry.dynamic.validate import (                              # noqa: E402
-    NO_BASELINE, RuntimeSpec, RunningTarget, run_validation)
+    NO_BASELINE, NO_CONTROL, RuntimeSpec, RunningTarget, run_validation)
 
 SPEC = {"openapi": "3.0.0", "paths": {
     "/secret": {"get": {"security": [{"b": []}]}},
@@ -114,10 +114,33 @@ def test_confirms_an_open_protected_route_with_a_baseline(scanned, monkeypatch):
     assert row["verdict"] == "confirmed" and row["executed_score"] == 100
 
 
-def test_kills_a_properly_protected_route_end_to_end(scanned):
+def test_holds_a_denied_route_without_a_control(scanned):
+    # Anonymous denial was a rejection, which carried forward and killed the finding in
+    # every later run. The authz probe records no control, so it is held instead.
     con, rundir = scanned
     runtime = FakeRuntime({"/secret": "403"})          # declared protected, enforced
     res = run_validation(con, 1, rundir, runtime)
+    assert (res.confirmed, res.rejected, res.needs_review) == (0, 0, 1)
+    row = dict(con.execute("SELECT * FROM verdicts WHERE finding_id='f-secret'").fetchone())
+    assert row["verdict"] == "needs-review" and row["reason"] == NO_CONTROL
+
+
+def _with_control(monkeypatch):
+    """Stand in for the authz probe once it records a control: a denial measured
+    against an unprotected sibling that the same anonymous client could reach."""
+    def controlled(running, cand, routes, exec_fn):
+        ev = probes.probe_broken_authz(running, cand, routes, exec_fn)
+        return replace(ev, handled=True, differs_from_baseline=False,
+                       baseline="GET /health -> 200 (unprotected sibling)")
+    catalogue = tuple(replace(lens, run=controlled) if lens.key == "broken-authz-idor"
+                      else lens for lens in lenses.CATALOGUE)
+    monkeypatch.setattr(lenses, "CATALOGUE", catalogue)
+
+
+def test_kills_a_denied_route_measured_against_a_control(scanned, monkeypatch):
+    con, rundir = scanned
+    _with_control(monkeypatch)
+    res = run_validation(con, 1, rundir, FakeRuntime({"/secret": "403"}))
     assert (res.confirmed, res.rejected, res.needs_review) == (0, 1, 0)
     row = dict(con.execute("SELECT * FROM verdicts WHERE finding_id='f-secret'").fetchone())
     assert row["verdict"] == "rejected" and row["executed_score"] == 50
@@ -128,14 +151,18 @@ def _ledger(con):
     return tuple(r.fetchone())
 
 
-@pytest.mark.parametrize("served, ledger", [
-    ("200", (0, 0)),        # needs-review: the probe got no answer, so nothing adjudicated
-    ("403", (1, 0)),        # rejected
+@pytest.mark.parametrize("served, controlled, ledger", [
+    ("200", False, (0, 0)),     # needs-review: no baseline, so nothing adjudicated
+    ("403", False, (0, 0)),     # needs-review: no control
+    ("403", True, (1, 0)),      # rejected against a control
 ])
-def test_validation_refreshes_the_precision_ledger(scanned, served, ledger):
+def test_validation_refreshes_the_precision_ledger(scanned, monkeypatch,
+                                                   served, controlled, ledger):
     # The fixture seeds (3, 2). Validation recomputes from verdicts, and only confirmed
     # and rejected count: a needs-review used to read as an adjudicated non-confirmation,
     # so five unanswered probes banded a producer known-bad.
     con, rundir = scanned
+    if controlled:
+        _with_control(monkeypatch)
     run_validation(con, 1, rundir, FakeRuntime({"/secret": served}))
     assert _ledger(con) == ledger

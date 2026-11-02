@@ -16,6 +16,14 @@ from it (`differs_from_baseline is True`). A reproduction without that compariso
 recorded as needs-review with the reason "no baseline comparison recorded", and the
 disclosure step never drafts a needs-review finding. The probes populate the baseline
 fields one at a time; until a probe does, its reproductions wait for a human.
+
+A non-reproduction is not a rejection either, and the bar is the same. A rejected
+verdict kills the finding in every later run (funnel stage rejected-carry-forward), so
+it needs as much proof as a confirmation: the probe's requests were answered by a
+handler (`handled`, so not 404, 405 or nothing) and the attack input behaved like a
+recorded control (`baseline` set, `differs_from_baseline is False`). Without that it is
+needs-review with the reason "no control comparison recorded". Before this, a login
+route that answered 404 to both timing identifiers was rejected, and stayed rejected.
 """
 from __future__ import annotations
 
@@ -71,23 +79,34 @@ class ProbeEvidence:
     determinism: str = "unknown"  # "deterministic" | "statistical" | "unknown"
     artifact_sha: str | None = None  # evidence blob, captured through the taint boundary
     baseline: str = ""           # the control's result: same route, benign input / creds
-    differs_from_baseline: bool | None = None  # True only when measured against baseline
+    differs_from_baseline: bool | None = None  # True/False only when measured against baseline
+    handled: bool | None = None  # True only when a handler answered (not 404/405/nothing)
 
     @property
     def has_baseline_comparison(self) -> bool:
         return bool(self.baseline) and self.differs_from_baseline is True
 
+    @property
+    def has_negative_control(self) -> bool:
+        """The attack input was handled and behaved like the control did."""
+        return (bool(self.baseline) and self.differs_from_baseline is False
+                and self.handled is True)
+
 
 # The reason a reproduction without a control comparison is held back from "confirmed".
 NO_BASELINE = "no baseline comparison recorded"
+# The reason a non-reproduction without a handled control is held back from "rejected".
+NO_CONTROL = "no control comparison recorded"
 
 
 class TargetRuntime(Protocol):
-    """Stands one target up under quarry-target.sb and exposes a loopback base URL.
+    """Stands one target up and exposes a base URL that probes can reach.
 
     Implementations detect how a target boots (a declared run command, a Dockerfile, a
     compose file) and are responsible for doing it inside the run volume with egress
-    denied. `detect` returns None when it does not know how to run this target, with
+    denied. The Docker runtime does not run under quarry-target.sb and does not yet
+    deny egress during builds, so it refuses to start unless told the target is
+    trusted (runtime_docker.UNCONTAINED_WHY). `detect` returns None when it does not know how to run this target, with
     the reason recorded by the caller, never a guess."""
 
     def detect(self, src: Path) -> "RuntimeSpec | None": ...
@@ -162,21 +181,23 @@ def select_candidates(con: sqlite3.Connection, run_id: int, *,
 
 def adjudicate(evidence: ProbeEvidence) -> str:
     """Map measured evidence to a verdict value. A probe that reproduced the finding and
-    recorded a baseline it differs from is a confirmation; a probe that ran and did not
-    reproduce is a rejection; everything else, a reproduction with no baseline included,
-    stays needs-review. Layer 3 never confirms without both."""
+    recorded a baseline it differs from is a confirmation; a probe whose handled request
+    behaved like a recorded control is a rejection; everything else stays needs-review.
+    Layer 3 neither confirms nor rejects without a control."""
     return adjudicate_with_reason(evidence)[0]
 
 
 def adjudicate_with_reason(evidence: ProbeEvidence) -> tuple[str, str]:
     """The verdict and the reason stored beside it: the determinism of the signal, or
-    NO_BASELINE when a reproduction was held back for want of a control comparison."""
+    NO_BASELINE / NO_CONTROL when a measured result was held back for want of a control."""
     if evidence.reproduced:
         if evidence.has_baseline_comparison:
             return "confirmed", evidence.determinism
         return "needs-review", NO_BASELINE
     if evidence.determinism in ("deterministic", "statistical"):
-        return "rejected", evidence.determinism
+        if evidence.has_negative_control:
+            return "rejected", evidence.determinism
+        return "needs-review", NO_CONTROL
     return "needs-review", evidence.determinism
 
 
@@ -308,6 +329,7 @@ def record_verdict(con: sqlite3.Connection, candidate: Candidate, run_id: int,
         "observed": evidence.observed, "determinism": evidence.determinism,
         "baseline": evidence.baseline,
         "differs_from_baseline": evidence.differs_from_baseline,
+        "handled": evidence.handled,
     }, sort_keys=True)
     return db.verdict(
         con, candidate.finding_id, run_id, verdict=v, seat="dynamic", model=model,

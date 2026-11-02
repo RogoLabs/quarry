@@ -39,11 +39,14 @@ def _status(exec_fn, url: str) -> str:
     return code.strip() if rc == 0 else ""
 
 
-def _timing(exec_fn, url: str) -> float | None:
-    rc, out = exec_fn(["-s", "-o", "/dev/null", "-w", "%{time_total}",
+def _timing(exec_fn, url: str) -> tuple[str, float] | None:
+    """(status, seconds). The status is what makes a timing comparison mean anything:
+    two identifiers that both 404 time the router, not the auth check."""
+    rc, out = exec_fn(["-s", "-o", "/dev/null", "-w", "%{http_code} %{time_total}",
                        "--max-time", "5", url])
     try:
-        return float(out.strip()) if rc == 0 else None
+        code, t = out.split()
+        return (code, float(t)) if rc == 0 else None
     except ValueError:
         return None
 
@@ -192,11 +195,21 @@ def probe_auth_timing_oracle(running: RunningTarget, candidate: Candidate,
     present = f"{base}{sep}username=admin"
     absent = f"{base}{sep}username=zzqq-no-such-user-000"
 
-    ta = [t for t in (_timing(exec_fn, present) for _ in range(samples)) if t is not None]
-    tb = [t for t in (_timing(exec_fn, absent) for _ in range(samples)) if t is not None]
-    if len(ta) < 5 or len(tb) < 5:
+    sa = [x for x in (_timing(exec_fn, present) for _ in range(samples)) if x is not None]
+    sb = [x for x in (_timing(exec_fn, absent) for _ in range(samples)) if x is not None]
+    if len(sa) < 5 or len(sb) < 5:
         return ProbeEvidence(reproduced=False, determinism="unknown",
                              summary="could not collect enough timing samples")
+    codes = sorted({c for c, _ in sa} | {c for c, _ in sb})
+    if not set(codes) <= _REAL:
+        # A 404 or 405 to both identifiers times the router, not the auth check, so
+        # equal medians say nothing about the finding. This was a rejection, and the
+        # rejection carried forward to every later run.
+        return ProbeEvidence(
+            reproduced=False, determinism="unknown", handled=False,
+            summary=f"{auth.path} answered {codes} to GET; no auth handler was timed",
+            request=f"GET {present}  vs  GET {absent}", observed=f"HTTP {codes}")
+    ta, tb = [t for _, t in sa], [t for _, t in sb]
 
     ma, mb = statistics.median(ta), statistics.median(tb)
     # Noise is the within-class spread, not the combined spread: the whole point is to
@@ -212,10 +225,16 @@ def probe_auth_timing_oracle(running: RunningTarget, candidate: Candidate,
                     f"(median {ma * 1000:.1f} vs {mb * 1000:.1f}ms, n={len(ta)}/{len(tb)})",
             request=f"GET {present}  vs  GET {absent}",
             observed=f"Δmedian={delta * 1000:.1f}ms (noise≈{noise * 1000:.1f}ms)")
+    # The absent identifier is the control: the present one behaved like it.
     return ProbeEvidence(
-        reproduced=False, determinism="statistical",
+        reproduced=False, determinism="statistical", handled=True,
         summary=f"no timing separation on {auth.path}: Δmedian {delta * 1000:.1f}ms within "
-                f"noise (≈{noise * 1000:.1f}ms) over {len(ta)}/{len(tb)} samples")
+                f"noise (≈{noise * 1000:.1f}ms) over {len(ta)}/{len(tb)} samples",
+        request=f"GET {present}  vs  GET {absent}",
+        observed=f"median {ma * 1000:.1f}ms, HTTP {sorted({c for c, _ in sa})}",
+        baseline=f"absent identifier: median {mb * 1000:.1f}ms, "
+                 f"HTTP {sorted({c for c, _ in sb})}",
+        differs_from_baseline=False)
 
 
 def probe_injection_observable(running: RunningTarget, candidate: Candidate,
@@ -248,16 +267,22 @@ def probe_injection_observable(running: RunningTarget, candidate: Candidate,
                 encoded_hit = r.path
         elif cwe == "CWE-89":                                # SQL injection
             quoted_url = _inject(running, r, "1'")
-            base = _body(exec_fn, _inject(running, r, "1"))
+            plain_url = _inject(running, r, "1")
+            base = _body(exec_fn, plain_url)
             quoted = _body(exec_fn, quoted_url)
             exercised = exercised or bool(base or quoted)
             if _has_sql_error(quoted) and not _has_sql_error(base):
+                # The plain value is the control. An empty control response is no
+                # control: the route may simply have failed both ways.
                 return ProbeEvidence(
                     reproduced=True, determinism="deterministic",
                     summary=f"a single quote elicited a SQL error on {r.path} that a plain "
                             "value did not; input reaches an unparameterised query",
                     request=f"GET {quoted_url}",
-                    observed="SQL error signature in the response")
+                    observed="SQL error signature in the response",
+                    baseline=(f"GET {plain_url} -> {len(base)} bytes, no SQL error "
+                              "signature") if base else "",
+                    differs_from_baseline=True if base else None)
         elif cwe == "CWE-77":                                # command injection
             for vec in (";id", "|id", "$(id)"):
                 body = _body(exec_fn, _inject(running, r, vec))

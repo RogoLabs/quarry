@@ -43,13 +43,15 @@ def test_xss_confirmed_on_unencoded_reflection():
     assert ev.reproduced is True and adjudicate(ev) == HELD
 
 
-def test_xss_rejected_when_encoded():
+def test_xss_encoded_reflection_is_held_without_a_control():
+    # Encoded on this route says nothing about the finding's own sink, which may be
+    # another route in the file. Rejection needs a handled control (validate.NO_CONTROL).
     def resp(url):
         raw = url.split("/items/", 1)[-1]
         return "<html>" + raw.replace("<", "&lt;").replace(">", "&gt;") + "</html>"
     ev = probe_injection_observable(RUNNING, _cand("CWE-79"), ROUTE, _body_fn(resp))
     assert ev.reproduced is False and ev.determinism == "deterministic"
-    assert adjudicate(ev) == "rejected"
+    assert adjudicate(ev) == "needs-review"
 
 
 # ---- SQLi (CWE-89) ----
@@ -58,6 +60,16 @@ def test_sqli_confirmed_on_error_differential():
     def resp(url):
         tail = url.split("/items/", 1)[-1]
         return "OperationalError: unrecognized token near \"'\"" if tail.endswith("'") else "ok"
+    ev = probe_injection_observable(RUNNING, _cand("CWE-89"), ROUTE, _body_fn(resp))
+    # The plain-value request is the control, so this one confirms.
+    assert ev.reproduced is True and adjudicate(ev) == "confirmed"
+    assert ev.baseline.startswith("GET ") and ev.differs_from_baseline is True
+
+
+def test_sqli_held_when_the_control_returned_nothing():
+    def resp(url):
+        tail = url.split("/items/", 1)[-1]
+        return "OperationalError: unrecognized token" if tail.endswith("'") else ""
     ev = probe_injection_observable(RUNNING, _cand("CWE-89"), ROUTE, _body_fn(resp))
     assert ev.reproduced is True and adjudicate(ev) == HELD
 

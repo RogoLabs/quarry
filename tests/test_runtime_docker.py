@@ -88,11 +88,36 @@ def test_start_tears_down_and_keeps_logs_when_target_never_gets_healthy(tmp_path
     monkeypatch.setattr(DockerRuntime, "_compose", fake_compose)
     monkeypatch.setattr(DockerRuntime, "_pull_sidecar", lambda self: None)
     monkeypatch.setattr(DockerRuntime, "_await_health", never_healthy)
-    runtime = DockerRuntime()
+    runtime = DockerRuntime(uncontained_ok=True)
     with pytest.raises(rt.DockerError, match="container logs: .*validate-compose.log"):
         runtime.start(runtime.detect(src), tmp_path)
     assert [c[0] for c in calls] == ["up", "logs", "down"]     # logs saved, then torn down
     assert "Retry 5/5" in (tmp_path / "logs" / "validate-compose.log").read_text()
+
+
+def test_start_refuses_until_the_runtime_contains_a_hostile_target(tmp_path, monkeypatch):
+    """Interim gate (IMPROVEMENT-PLAN item 2). Builds get egress and compose reads the
+    operator's environment, so nothing may reach `docker compose` unless the caller
+    says the target is trusted. The refusal comes before any docker call."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "docker-compose.yml").write_text("services:\n  web:\n    image: x\n")
+    calls = []
+    monkeypatch.setattr(DockerRuntime, "_compose",
+                        lambda self, *a, **k: calls.append(a))
+    runtime = DockerRuntime()
+    with pytest.raises(rt.UncontainedRuntime, match="network access"):
+        runtime.start(runtime.detect(src), tmp_path)
+    assert calls == []
+    assert not (src / "quarry-compose.hardened.yml").exists()
+
+
+def test_validate_cli_refuses_a_real_run_without_uncontained():
+    from typer.testing import CliRunner
+    from quarry import cli
+    r = CliRunner().invoke(cli.app, ["validate", "1"])
+    assert r.exit_code == 2
+    assert "refused" in r.output and "--uncontained" in r.output
 
 
 def test_detect_compose_and_entrypoint(tmp_path):
@@ -149,7 +174,7 @@ def test_target_is_reachable_on_the_net_but_cannot_egress(tmp_path):
         "    image: python:3.13-alpine\n"
         "    command: ['python','-m','http.server','8080']\n"
         "    ports: ['18080:8080']\n")
-    runtime = DockerRuntime(health_timeout=90, up_timeout=300)
+    runtime = DockerRuntime(health_timeout=90, up_timeout=300, uncontained_ok=True)
     spec = runtime.detect(src)
     assert spec is not None and spec.base_url == "http://web:8080"
     running = runtime.start(spec, tmp_path)

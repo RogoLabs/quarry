@@ -6,6 +6,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from quarry.dynamic.validate import Candidate, RunningTarget, adjudicate      # noqa: E402
@@ -41,11 +43,13 @@ def test_rate_limit_confirmed_when_no_throttling():
     assert "no throttling" in ev.summary
 
 
-def test_rate_limit_rejected_when_429_appears():
+def test_rate_limit_429_is_held_without_a_control():
+    # A 429 on the first route in the file is not the finding's own endpoint, and for
+    # CWE-400 (mostly ReDoS) a request limit is beside the point. No control, no reject.
     ev = probe_missing_rate_limit(RUNNING, CAND, LOGIN,
                                   _codes(["200", "200", "429", "429"]), burst=30)
     assert ev.reproduced is False and ev.determinism == "deterministic"
-    assert adjudicate(ev) == "rejected" and "429" in ev.observed
+    assert adjudicate(ev) == "needs-review" and "429" in ev.observed
 
 
 def test_rate_limit_needs_review_when_only_wrong_method():
@@ -60,12 +64,12 @@ def test_rate_limit_needs_review_without_routes():
     assert adjudicate(ev) == "needs-review"
 
 
-def _timings(present_ms, absent_ms):
-    """Fake exec_fn for timing probes: return seconds keyed by the username in the URL."""
+def _timings(present_ms, absent_ms, code="200"):
+    """Fake exec_fn for timing probes: `<status> <seconds>` keyed by the username."""
     def run(argv):
         url = argv[-1]
         ms = present_ms if "username=admin" in url else absent_ms
-        return 0, f"{ms / 1000:.6f}"
+        return 0, f"{code} {ms / 1000:.6f}"
     return run
 
 
@@ -78,7 +82,18 @@ def test_timing_oracle_confirmed_on_clear_separation():
 def test_timing_oracle_rejected_when_no_separation():
     ev = probe_auth_timing_oracle(RUNNING, CAND, LOGIN, _timings(20.0, 20.0), samples=15)
     assert ev.reproduced is False and ev.determinism == "statistical"
-    assert adjudicate(ev) == "rejected"
+    assert adjudicate(ev) == "rejected"            # the absent identifier is the control
+    assert "absent identifier" in ev.baseline and ev.handled is True
+
+
+@pytest.mark.parametrize("code", ["404", "405"])
+def test_timing_oracle_is_not_rejected_when_no_handler_answered(code):
+    """Both identifiers 404: equal medians time the router, not the auth check. This
+    was a rejection, and rejected-carry-forward then killed the finding in every run."""
+    ev = probe_auth_timing_oracle(RUNNING, CAND, LOGIN, _timings(20.0, 20.0, code),
+                                  samples=15)
+    assert ev.handled is False and adjudicate(ev) == "needs-review"
+    assert code in ev.summary
 
 
 def test_timing_oracle_needs_review_without_auth_route():

@@ -7,8 +7,11 @@ line(s) with whitespace stripped.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -48,6 +51,16 @@ def test_lineless_findings_key_on_their_message():
     assert a != b
 
 
+#: What a controlled Layer 3 rejection stores (validate.record_verdict).
+CONTROLLED = json.dumps({"baseline": "GET /x?q=1 -> 200", "differs_from_baseline": False,
+                         "handled": True})
+
+
+def _reject(con, fid, **kw):
+    kw = {"reason": "deterministic", "rationale": CONTROLLED, **kw}
+    db.verdict(con, fid, 0, verdict="rejected", **kw)
+
+
 def test_rejected_verdict_does_not_kill_a_sibling(con):
     """REGRESSION. With a file-wide id, rejecting one eval() rejected all of them."""
     rejected = add(con, "bandit", "B307", "src/a.py", 10)
@@ -55,10 +68,30 @@ def test_rejected_verdict_does_not_kill_a_sibling(con):
     con.execute("INSERT INTO runs (id,target,clone_url,status) VALUES (0,'o/r','x','done')")
     fid = con.execute("SELECT finding_id FROM occurrences WHERE id=?",
                       (rejected,)).fetchone()["finding_id"]
-    db.verdict(con, fid, 0, verdict="rejected")
+    _reject(con, fid)
     funnel.run(con, 1)
     alive = {r["id"] for r in con.execute("SELECT id FROM live_occurrences")}
     assert rejected not in alive and sibling in alive
+
+
+@pytest.mark.parametrize("kw", [
+    {"rationale": None},                                    # written before controls
+    {"reason": "statistical"},                              # a timing miss
+    {"rationale": json.dumps({"baseline": "GET /x -> 404", "differs_from_baseline": False,
+                              "handled": False})},          # no handler answered
+    {"seat": "chair"},                                      # not a Layer 3 probe
+], ids=["no-control", "statistical", "unhandled", "not-dynamic"])
+def test_only_a_controlled_deterministic_rejection_carries_forward(con, kw):
+    """A carried-forward rejection kills the finding in every later run, so it takes
+    the strongest rejection Layer 3 makes. A timing probe that 404'd both identifiers
+    was enough before."""
+    oid = add(con, "bandit", "B307", "src/a.py", 10)
+    con.execute("INSERT INTO runs (id,target,clone_url,status) VALUES (0,'o/r','x','done')")
+    fid = con.execute("SELECT finding_id FROM occurrences WHERE id=?",
+                      (oid,)).fetchone()["finding_id"]
+    _reject(con, fid, **kw)
+    funnel.run(con, 1)
+    assert oid in {r["id"] for r in con.execute("SELECT id FROM live_occurrences")}
 
 
 def test_carry_forward_uses_the_latest_verdict(con):
@@ -66,7 +99,7 @@ def test_carry_forward_uses_the_latest_verdict(con):
     con.execute("INSERT INTO runs (id,target,clone_url,status) VALUES (0,'o/r','x','done')")
     fid = con.execute("SELECT finding_id FROM occurrences WHERE id=?",
                       (oid,)).fetchone()["finding_id"]
-    db.verdict(con, fid, 0, verdict="rejected")
+    _reject(con, fid)
     db.verdict(con, fid, 0, verdict="confirmed")
     funnel.run(con, 1)
     assert oid in {r["id"] for r in con.execute("SELECT id FROM live_occurrences")}
