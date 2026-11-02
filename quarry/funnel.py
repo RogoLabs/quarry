@@ -1,4 +1,4 @@
-"""The funnel: twelve ordered stages between Layer 1 and anything that costs money.
+"""The funnel: thirteen ordered stages between Layer 1 and anything that costs money.
 
 Seat 1's canonical order, adopted verbatim, because order changes the answer:
 dedup must precede any cap or the cap is spent on duplicates; quote-verify must
@@ -118,6 +118,7 @@ class FunnelResult:
     started_with: int = 0
     stages: list[StageResult] = field(default_factory=list)
     survivors: int = 0
+    health: dict[str, list[str]] = field(default_factory=dict)
 
     def by_stage(self) -> dict[str, StageResult]:
         return {s.stage: s for s in self.stages}
@@ -125,59 +126,68 @@ class FunnelResult:
 
 # ---------------------------------------------------------------- the pipeline
 
-class FunnelAlreadyRan(RuntimeError):
-    """The funnel has already written its ledger for this run."""
-
-
 def run(con: sqlite3.Connection, run_id: int, *, src: Path | None = None,
         budget_top_k: int | None = None) -> FunnelResult:
-    """Execute every stage in Seat 1's canonical order.
+    """Execute every stage in Seat 1's canonical order over the run's *fresh*
+    occurrences: those no funnel stage has written an event for yet.
 
-    Once per run. A second pass appended a second set of score deltas (doubling
-    occurrence_rank) and a second set of kills, which land after any operator
-    resurrect and so silently undo it. Nothing is deleted, so there is no honest way
-    to replay over an existing ledger; scan into a new run instead."""
-    prior = con.execute(
-        "SELECT COUNT(*) n FROM funnel_events WHERE run_id=? AND actor='system' "
-        "AND stage != 'operator'", (run_id,)).fetchone()["n"]
-    if prior:
-        raise FunnelAlreadyRan(
-            f"run {run_id} has already been through the funnel ({prior} ledger events). "
-            f"Re-running would double every score and re-kill findings an operator "
-            f"resurrected. Scan the target into a new run to funnel it again.")
+    Per occurrence, not per run. It used to refuse a second pass, because replaying
+    over the ledger doubled every score and re-killed findings an operator had
+    resurrected. But a re-scan and Layer 2 both add occurrences after the funnel ran,
+    and those were never funnelled at all: 1,717 of 2,779 on run 1, all live. Now
+    each occurrence goes through once. Already-funnelled live occurrences are context
+    (`prior`): a fresh duplicate merges into them, a fresh hit can cluster with them,
+    and they count toward novelty, but no stage writes an event for them again.
+
+    Deep-review occurrences wait while their research run is still going, and are
+    deferred at the Layer 2 gate while their cross-family refutation is pending. A
+    later pass revives a deferred one once its refutation is in (`_revive_layer2`)."""
     res = FunnelResult(run_id)
     rows = _load(con, run_id)
-    res.started_with = len(rows)
+    with db.tx(con):
+        _revive_layer2(con, run_id, rows)
+    entered = [r for r in rows if r["_fresh"] and r["_alive"]]
+    res.started_with = len(entered)
 
-    for stage_fn in (
-        _quote_verify,
-        _symbol_containment,
-        _path_class_filter,
-        _local_dev_fixture,
-        _exact_dedup,
-        _sca_merge,
-        _cross_tool_cluster,
-        _rejected_carry_forward,
-        _rule_precision_prior,
-        _independence_corroboration,
-        _novelty_rank,
-    ):
-        alive = [r for r in rows if r["_alive"]]
+    for stage_fn in STAGES:
+        fresh = [r for r in rows if r["_alive"] and r["_fresh"]]
+        prior = [r for r in rows if r["_alive"] and not r["_fresh"]]
         with db.tx(con):
-            sr = stage_fn(con, run_id, alive, src)
-        sr.remaining = sum(1 for r in rows if r["_alive"])
+            sr = stage_fn(con, run_id, fresh, src, prior)
+        sr.remaining = sum(1 for r in rows if r["_alive"] and r["_fresh"])
         res.stages.append(sr)
 
     if budget_top_k is not None:
-        alive = [r for r in rows if r["_alive"]]
+        fresh = [r for r in rows if r["_alive"] and r["_fresh"]]
         with db.tx(con):
-            sr = _budget_top_k(con, run_id, alive, budget_top_k)
-        sr.remaining = sum(1 for r in rows if r["_alive"])
+            sr = _budget_top_k(con, run_id, fresh, budget_top_k)
+        sr.remaining = sum(1 for r in rows if r["_alive"] and r["_fresh"])
         res.stages.append(sr)
 
-    res.survivors = sum(1 for r in rows if r["_alive"])
-    _persist_summary(con, run_id, res)
+    res.survivors = sum(1 for r in rows if r["_alive"] and r["_fresh"])
+    with db.tx(con):
+        _persist_summary(con, run_id, res)
+        res.health = funnel_health(entered)
+        db.set_health(con, run_id, "funnel", res.health)
     return res
+
+
+def funnel_health(entered: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """A tool with output that lost every occurrence to deterministic kills. That is
+    what Checkov's broken paths looked like (21 of 21 killed by quote-verify) and the
+    run still reported success. Merges do not count: a duplicate is not a loss."""
+    by_tool: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for r in entered:
+        by_tool[r["tool"]].append(r)
+    out: dict[str, list[str]] = {}
+    for tool, rs in by_tool.items():
+        if all(r.get("_det_kill") for r in rs):
+            stages = sorted({r["_det_kill"] for r in rs})
+            out[tool] = [f"all {len(rs)} new occurrence(s) killed by deterministic "
+                         f"stage(s) {', '.join(stages)}; check the tool's output"]
+        else:
+            out[tool] = []
+    return out
 
 
 def _persist_summary(con: sqlite3.Connection, run_id: int, res: "FunnelResult") -> None:
@@ -186,6 +196,10 @@ def _persist_summary(con: sqlite3.Connection, run_id: int, res: "FunnelResult") 
     A stage that suppressed nothing writes no ledger rows, so it would silently vanish
     from the funnel table — and a stage you cannot see is a stage you cannot audit.
     The manifest is the reproducibility record, so the stage list belongs there.
+
+    Each pass is appended to `passes`; `stages` holds the order and the recall-risk
+    flag. Counts are not stored here: the run page reads them from the ledger, which
+    is what each cell links to.
     """
     import json as _json
     row = con.execute("SELECT manifest FROM runs WHERE id=?", (run_id,)).fetchone()
@@ -193,38 +207,88 @@ def _persist_summary(con: sqlite3.Connection, run_id: int, res: "FunnelResult") 
         manifest = _json.loads(row["manifest"]) if row and row["manifest"] else {}
     except (ValueError, TypeError):
         manifest = {}
+    old = manifest.get("funnel") if isinstance(manifest.get("funnel"), dict) else {}
+    passes = list(old.get("passes") or [])
+    if not passes and old.get("stages"):
+        # A run funnelled before passes were recorded: keep its one pass.
+        passes.append({"started_with": old.get("started_with"),
+                       "survivors": old.get("survivors")})
+    passes.append({"started_with": res.started_with, "survivors": res.survivors})
     manifest["funnel"] = {
-        "started_with": res.started_with,
-        "survivors": res.survivors,
-        "stages": [{"stage": s.stage, "kill": s.killed, "defer": s.deferred,
-                    "merge": s.merged, "boost": s.boosted, "pass": s.passed,
-                    "remaining": s.remaining, "heuristic": s.heuristic}
-                   for s in res.stages],
+        "passes": passes,
+        "stages": [{"stage": s.stage, "heuristic": s.heuristic} for s in res.stages],
     }
     con.execute("UPDATE runs SET manifest=? WHERE id=?",
                 (_json.dumps(manifest, sort_keys=True), run_id))
 
 
+def _research_in_progress(con: sqlite3.Connection, run_id: int) -> set[int]:
+    """Research runs whose worker is verifiably still working. Read through the same
+    liveness rule as the dashboard, never from the status column alone: run 1's deep
+    review still said `running` five days after its last heartbeat, with its pid gone,
+    and trusting that would hold its 1,708 candidates out of the funnel forever."""
+    from .web.queries import live_status        # the reader-side rule, one copy of it
+    return {r["id"] for r in con.execute("SELECT * FROM research_runs WHERE run_id=?",
+                                         (run_id,))
+            if live_status(dict(r))[0] in ("running", "unverified")}
+
+
 def _load(con: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]:
+    """Every occurrence of the run. `_alive` mirrors `live_occurrences`, so an operator
+    dismissal holds; `_fresh` marks the ones no funnel stage has seen."""
     rows = [dict(r) for r in con.execute(
         """SELECT o.id, o.finding_id, o.producer_id, o.path, o.start_line, o.message,
                   o.severity, o.secret_prefix, o.secret_sha, o.redacted, o.blob_sha,
                   o.fingerprint, o.raw_result,
                   p.tool, p.rule_id, p.n_occurrences, p.n_adjudicated, p.n_confirmed,
-                  p.enabled, b.start_line AS blob_start, b.end_line AS blob_end
+                  p.enabled, b.start_line AS blob_start, b.end_line AS blob_end,
+                  rf.id AS rf_id, rf.research_id, rf.quote_verified, rf.n_survived,
+                  rf.n_refuted, rf.refutations, rf.refuter_errors,
+                  EXISTS (SELECT 1 FROM live_occurrences l WHERE l.id = o.id) AS live,
+                  NOT EXISTS (SELECT 1 FROM funnel_events f WHERE f.occurrence_id = o.id
+                                AND f.stage != 'operator') AS unseen
            FROM occurrences o
            JOIN producers p ON p.id = o.producer_id
            LEFT JOIN evidence_blobs b ON b.sha = o.blob_sha
+           LEFT JOIN research_findings rf ON rf.occurrence_id = o.id
            WHERE o.run_id = ?
            ORDER BY o.id""", (run_id,))]
+    busy = _research_in_progress(con, run_id)
     for r in rows:
-        r["_alive"] = True
+        r["_busy"] = r["research_id"] in busy
+        r["_alive"] = bool(r["live"])
+        r["_fresh"] = bool(r["unseen"]) and not r["_busy"]
         r["_score"] = 0.0
     return rows
 
 
+def _layer2_decided(r: dict[str, Any]) -> bool:
+    return not r["quote_verified"] or bool(r["n_survived"]) or bool(r["n_refuted"])
+
+
+def _revive_layer2(con, run_id: int, rows: list[dict[str, Any]]) -> None:
+    """A deep candidate deferred at the Layer 2 gate because no cross-family refuter
+    had answered comes back once one has (`quarry deep --resume` finishes the refute
+    pass). Only when that defer is still its latest event, so an operator's later
+    dismissal stands."""
+    deferred = {r["occurrence_id"] for r in con.execute(
+        """SELECT f.occurrence_id FROM funnel_events f
+           WHERE f.run_id = ? AND f.stage = 'layer2-gate' AND f.action = 'defer'
+             AND f.id = (SELECT MAX(g.id) FROM funnel_events g
+                         WHERE g.occurrence_id = f.occurrence_id)""", (run_id,))}
+    for r in rows:
+        if r["id"] in deferred and r["rf_id"] is not None and _layer2_decided(r) \
+                and not r["_busy"]:
+            db.funnel(con, run_id, occurrence_id=r["id"], stage="layer2-gate",
+                      action="resurrect", deterministic=True,
+                      reason="cross-family refutation completed; re-entering the funnel")
+            r["_alive"] = r["_fresh"] = True
+
+
 def _kill(con, run_id, row, stage, reason, *, deterministic=True):
     row["_alive"] = False
+    if deterministic:
+        row["_det_kill"] = stage
     db.funnel(con, run_id, occurrence_id=row["id"], stage=stage, action="kill",
               reason=reason, deterministic=deterministic)
 
@@ -244,7 +308,7 @@ def _boost(con, run_id, row, stage, reason, delta):
 
 
 # -- 1 -------------------------------------------------------------------------
-def _quote_verify(con, run_id, rows, src) -> StageResult:
+def _quote_verify(con, run_id, rows, src, prior=()) -> StageResult:
     """Does the cited location still exist? Deterministic tools rarely lie about
     this, but a stale volume or a bad path mapping does — and catching it here is
     free, where catching it at adjudication costs ~$0.50 (the measured
@@ -260,8 +324,48 @@ def _quote_verify(con, run_id, rows, src) -> StageResult:
     return sr
 
 
+# -- 1b ------------------------------------------------------------------------
+def _layer2_gate(con, run_id, rows, src, prior=()) -> StageResult:
+    """Deep-review candidates pass only on the bar the Layer 2 digest uses: the quote
+    verified against the source, and a model of another family defended the claim
+    after being told to refute it. They used to skip the funnel entirely and land in
+    triage as 1,708 live rows, refuted ones included.
+
+    A quote that is not in the source is a deterministic kill. Refutation by every
+    cross-family model that answered is a model's judgement, so it is flagged as
+    recall risk. No answer yet is a defer, not evidence, and is revived later."""
+    sr = StageResult("layer2-gate", heuristic=True)
+    for r in rows:
+        if r["tool"] != "deep" or r["rf_id"] is None:
+            sr.passed += 1
+        elif not r["quote_verified"]:
+            _kill(con, run_id, r, sr.stage,
+                  "the model's quoted code was not found in the source")
+            sr.killed += 1
+        elif r["n_survived"]:
+            sr.passed += 1
+        elif r["n_refuted"]:
+            _kill(con, run_id, r, sr.stage,
+                  f"refuted by all {r['n_refuted']} cross-family model(s) that answered",
+                  deterministic=False)
+            sr.killed += 1
+        elif (r["refutations"] or "[]") == "[]":
+            _defer(con, run_id, r, sr.stage,
+                   "awaiting cross-family refutation: no refuter has answered yet")
+            sr.deferred += 1
+        else:
+            # Measured on runs 1 and 2: 14 candidates, every refuter errored or had its
+            # verdict discarded. `--resume` only refutes findings with no refutations, so
+            # these stay deferred until something re-refutes them.
+            _defer(con, run_id, r, sr.stage,
+                   f"no usable cross-family verdict: {r['refuter_errors'] or 0} refuter "
+                   f"error(s) and no valid refutation or defence")
+            sr.deferred += 1
+    return sr
+
+
 # -- 2 -------------------------------------------------------------------------
-def _symbol_containment(con, run_id, rows, src) -> StageResult:
+def _symbol_containment(con, run_id, rows, src, prior=()) -> StageResult:
     """A finding whose line falls outside the window we captured is mislocated."""
     sr = StageResult("symbol-containment")
     for r in rows:
@@ -276,7 +380,7 @@ def _symbol_containment(con, run_id, rows, src) -> StageResult:
 
 
 # -- 3 -------------------------------------------------------------------------
-def _path_class_filter(con, run_id, rows, src) -> StageResult:
+def _path_class_filter(con, run_id, rows, src, prior=()) -> StageResult:
     """Test, vendored, and generated paths. Heuristic — flagged as recall risk,
     because DefectDojo's `unittests/` is exactly the directory a previous run's skip
     list missed, and it cost ten paid adjudications.
@@ -309,7 +413,7 @@ def _path_class_filter(con, run_id, rows, src) -> StageResult:
 
 
 # -- 4 -------------------------------------------------------------------------
-def _local_dev_fixture(con, run_id, rows, src) -> StageResult:
+def _local_dev_fixture(con, run_id, rows, src, prior=()) -> StageResult:
     """Seat 3's reportability test.
 
     All three must hold to suppress: a development/example path, a secret-class
@@ -359,11 +463,13 @@ def _looks_placeholder(row: dict[str, Any]) -> bool:
 
 
 # -- 5 -------------------------------------------------------------------------
-def _exact_dedup(con, run_id, rows, src) -> StageResult:
+def _exact_dedup(con, run_id, rows, src, prior=()) -> StageResult:
     """Identical (finding_id, line) from the same producer. Merge, never kill —
-    the duplicate is real, it is just not a second finding."""
+    the duplicate is real, it is just not a second finding. A fresh duplicate of an
+    already-funnelled occurrence merges into it."""
     sr = StageResult("exact-dedup")
-    seen: dict[tuple, int] = {}
+    seen: dict[tuple, int] = {(r["finding_id"], r["producer_id"], r["start_line"]): r["id"]
+                              for r in reversed(prior)}
     for r in rows:
         key = (r["finding_id"], r["producer_id"], r["start_line"])
         if key in seen:
@@ -379,7 +485,7 @@ def _exact_dedup(con, run_id, rows, src) -> StageResult:
 
 
 # -- 6 -------------------------------------------------------------------------
-def _sca_merge(con, run_id, rows, src) -> StageResult:
+def _sca_merge(con, run_id, rows, src, prior=()) -> StageResult:
     """Four tools consuming GHSA/OSV are one database queried four times.
 
     Merging needs aliases, not rule ids: OSV reports `PYSEC-2026-2094` where Trivy
@@ -390,7 +496,9 @@ def _sca_merge(con, run_id, rows, src) -> StageResult:
     finding.
     """
     sr = StageResult("sca-merge")
-    seen: dict[tuple, int] = {}
+    seen: dict[tuple, int] = {(_advisory_key(r), _package_key(r)): r["id"]
+                              for r in reversed(prior)
+                              if independence_class(r["tool"], r["rule_id"]) == "sca-db"}
     for r in rows:
         if independence_class(r["tool"], r["rule_id"]) != "sca-db":
             sr.passed += 1
@@ -451,28 +559,31 @@ def _package_key(row: dict[str, Any]) -> str:
 
 
 # -- 7 -------------------------------------------------------------------------
-def _cross_tool_cluster(con, run_id, rows, src) -> StageResult:
+def _cross_tool_cluster(con, run_id, rows, src, prior=()) -> StageResult:
     """Assign issue_id: same file, overlapping lines, compatible class. A membership
     table, never a merge-and-delete — every member keeps its own row and its own
-    provenance."""
+    provenance. Already-funnelled occurrences are members too, so a fresh hit can
+    cluster with one; only the fresh members get an event."""
     sr = StageResult("cross-tool-cluster")
+    fresh = {r["id"] for r in rows}
     buckets: dict[tuple, list[dict]] = defaultdict(list)
-    for r in rows:
+    for r in (*prior, *rows):
         # A finding with no line (SCA on a lockfile) has no position to overlap. As
         # line 0 it fell into the 1-9 bucket and clustered with any SAST hit there.
         if not r["start_line"]:
-            sr.passed += 1
+            sr.passed += r["id"] in fresh
             continue
         buckets[(r["path"], r["start_line"] // 10)].append(r)
 
     for (path, decade), members in buckets.items():
         classes = {independence_class(m["tool"], m["rule_id"]) for m in members}
-        if len(members) < 2 or len(classes) < 2:
-            sr.passed += len(members)
+        new = [m for m in members if m["id"] in fresh]
+        if len(members) < 2 or len(classes) < 2 or not new:
+            sr.passed += len(new)
             continue
         issue_id = f"{run_id}:{path}:{decade}"
-        con.execute("INSERT OR IGNORE INTO issues (id,target,title,created_run) "
-                    "SELECT ?,?,?,? ",
+        con.execute("INSERT INTO issues (id,target,title,created_run) VALUES (?,?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET title=excluded.title",
                     (issue_id, path, f"{len(members)} findings at {path}", run_id))
         for m in members:
             con.execute("UPDATE findings SET issue_id=? WHERE id=?", (issue_id, m["finding_id"]))
@@ -480,6 +591,7 @@ def _cross_tool_cluster(con, run_id, rows, src) -> StageResult:
                         "VALUES (?,?,?)", (issue_id, m["finding_id"], run_id))
             m["_issue"] = issue_id
             m["_classes"] = classes
+        for m in new:
             # `pass`, not `merge`: clustering assigns identity, it never suppresses.
             # It still writes an event, because a stage that leaves no trace cannot be
             # audited and, in the UI, cannot be shown to have run at all.
@@ -490,12 +602,12 @@ def _cross_tool_cluster(con, run_id, rows, src) -> StageResult:
                       deterministic=True)
         # Counted as passed, matching the events above. It was counted as boosted, so
         # the funnel table showed "boost 3" over a set of zero boost events.
-        sr.passed += len(members)
+        sr.passed += len(new)
     return sr
 
 
 # -- 8 -------------------------------------------------------------------------
-def _rejected_carry_forward(con, run_id, rows, src) -> StageResult:
+def _rejected_carry_forward(con, run_id, rows, src, prior=()) -> StageResult:
     """A verdict from a previous run keys on finding_id, which is line-number-free.
     Without this, a re-scan re-pays to re-reject everything it already rejected."""
     sr = StageResult("rejected-carry-forward")
@@ -538,7 +650,7 @@ def _controlled_rejection(v) -> bool:
 
 
 # -- 9 -------------------------------------------------------------------------
-def _rule_precision_prior(con, run_id, rows, src) -> StageResult:
+def _rule_precision_prior(con, run_id, rows, src, prior=()) -> StageResult:
     """The cross-repo precision ledger, used as a prior. A producer with a measured
     record earns or loses rank; an unmeasured one is worth *investigating*, because
     a cheap measurement is itself valuable (Seat 4's cheapest-information-first)."""
@@ -565,7 +677,7 @@ def _rule_precision_prior(con, run_id, rows, src) -> StageResult:
 
 
 # -- 10 ------------------------------------------------------------------------
-def _independence_corroboration(con, run_id, rows, src) -> StageResult:
+def _independence_corroboration(con, run_id, rows, src, prior=()) -> StageResult:
     """Agreement weighted by independence, and **boost only**.
 
     It may never demote an N=1 finding. The findings that justify building this at
@@ -589,12 +701,13 @@ def _independence_corroboration(con, run_id, rows, src) -> StageResult:
 
 
 # -- 11 ------------------------------------------------------------------------
-def _novelty_rank(con, run_id, rows, src) -> StageResult:
+def _novelty_rank(con, run_id, rows, src, prior=()) -> StageResult:
     """A finding nobody has seen before outranks the fiftieth instance of a rule
-    that fires everywhere. This is the counterweight to corroboration."""
+    that fires everywhere. This is the counterweight to corroboration. The count
+    includes the run's already-funnelled live occurrences."""
     sr = StageResult("novelty-rank")
     per_producer: dict[str, int] = defaultdict(int)
-    for r in rows:
+    for r in (*prior, *rows):
         per_producer[r["producer_id"]] += 1
     for r in rows:
         n = per_producer[r["producer_id"]]
@@ -606,6 +719,24 @@ def _novelty_rank(con, run_id, rows, src) -> StageResult:
         else:
             sr.passed += 1
     return sr
+
+
+#: Seat 1's canonical order, plus the Layer 2 gate right after quote-verify: a deep
+#: candidate must clear its own bar before it can be deduplicated or clustered.
+STAGES = (
+    _quote_verify,
+    _layer2_gate,
+    _symbol_containment,
+    _path_class_filter,
+    _local_dev_fixture,
+    _exact_dedup,
+    _sca_merge,
+    _cross_tool_cluster,
+    _rejected_carry_forward,
+    _rule_precision_prior,
+    _independence_corroboration,
+    _novelty_rank,
+)
 
 
 # -- 12 ------------------------------------------------------------------------

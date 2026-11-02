@@ -206,9 +206,10 @@ def test_independence_classes_collapse_shared_lineage():
     assert ic("zizmor", "zizmor/artipacked") != ic("opengrep", "javascript.x")
 
 
-def test_funnel_refuses_to_run_twice_on_one_run(con):
+def test_a_second_pass_over_a_funnelled_run_changes_nothing(con):
     """REGRESSION. A second pass doubled every score in occurrence_rank and re-killed
-    findings an operator had resurrected, because its kills land after the resurrect."""
+    findings an operator had resurrected, because its kills land after the resurrect.
+    The funnel is per occurrence now, so with nothing fresh a pass writes nothing."""
     oid = add(con, "bandit", "B101", "tests/test_x.py", 5)
     add(con, "bandit", "B113", "src/net.py", 42)
     funnel.run(con, 1)
@@ -217,11 +218,123 @@ def test_funnel_refuses_to_run_twice_on_one_run(con):
     scores = dict(con.execute("SELECT occurrence_id, score FROM occurrence_rank").fetchall())
     events = con.execute("SELECT COUNT(*) FROM funnel_events").fetchone()[0]
 
-    with pytest.raises(funnel.FunnelAlreadyRan, match="already been through the funnel"):
-        funnel.run(con, 1)
+    res = funnel.run(con, 1)
+    assert res.started_with == 0 and res.survivors == 0
     assert dict(con.execute("SELECT occurrence_id, score FROM occurrence_rank").fetchall()) == scores
     assert con.execute("SELECT COUNT(*) FROM funnel_events").fetchone()[0] == events
     assert oid in {r["id"] for r in con.execute("SELECT id FROM live_occurrences")}
+
+
+def _events(c, oid):
+    return [(r["stage"], r["action"]) for r in c.execute(
+        "SELECT stage, action FROM funnel_events WHERE occurrence_id=? ORDER BY id", (oid,))]
+
+
+def test_occurrences_added_after_the_funnel_are_funnelled_by_the_next_pass(con):
+    """Run 1 on the operator's DB: a re-scan and Layer 2 added 1,717 occurrences after
+    the funnel ran, and all of them were live without passing a single stage."""
+    first = add(con, "bandit", "B113", "src/net.py", 42)
+    funnel.run(con, 1)
+    before = _events(con, first)
+
+    late_test = add(con, "bandit", "B101", "tests/test_late.py", 3)
+    late_dup = con.execute(
+        "INSERT INTO occurrences (run_id,finding_id,producer_id,path,start_line,message,"
+        "severity,blob_sha,raw_result) SELECT run_id,finding_id,producer_id,path,"
+        "start_line,message,severity,blob_sha,raw_result FROM occurrences WHERE id=?",
+        (first,)).lastrowid
+    res = funnel.run(con, 1)
+
+    assert res.started_with == 2
+    assert ("path-class", "kill") in _events(con, late_test)
+    assert _events(con, late_dup) == [("exact-dedup", "merge")], \
+        "a fresh duplicate must merge into the already-funnelled occurrence"
+    assert _events(con, first) == before, "an already-funnelled occurrence was re-scored"
+    passes = json.loads(con.execute("SELECT manifest FROM runs WHERE id=1").fetchone()[0])
+    assert len(passes["funnel"]["passes"]) == 2
+
+
+def _deep(c, *, verified=1, survived=0, refuted=0, status="done"):
+    oid = add(c, "deep", "authz", "src/api.py", 30)
+    rid = c.execute("INSERT INTO research_runs (run_id, status) VALUES (1, ?)",
+                    (status,)).lastrowid
+    c.execute("INSERT INTO research_findings (research_id, occurrence_id, subsystem, lens, "
+              "model, family, title, file, quote, quote_verified, n_survived, n_refuted) "
+              "VALUES (?,?,'api','authz','m','f','t','src/api.py','q',?,?,?)",
+              (rid, oid, verified, survived, refuted))
+    return oid, rid
+
+
+@pytest.mark.parametrize("kw, expect, deterministic", [
+    ({"verified": 0}, "kill", 1),
+    ({"refuted": 2}, "kill", 0),
+    ({}, "defer", 1),
+], ids=["quote-not-in-source", "refuted", "awaiting-refutation"])
+def test_layer2_gate_holds_deep_candidates_to_the_digest_bar(con, kw, expect, deterministic):
+    """Deep candidates skipped the funnel and reached triage as 1,708 live rows,
+    refuted ones included. They now clear the same bar as the Layer 2 digest."""
+    oid, _ = _deep(con, **kw)
+    funnel.run(con, 1)
+    row = con.execute("SELECT action, deterministic FROM funnel_events WHERE "
+                      "occurrence_id=? AND stage='layer2-gate'", (oid,)).fetchone()
+    assert (row["action"], row["deterministic"]) == (expect, deterministic)
+    assert oid not in {r["id"] for r in con.execute("SELECT id FROM live_occurrences")}
+
+
+def test_a_defended_deep_candidate_goes_through_the_rest_of_the_funnel(con):
+    oid, _ = _deep(con, survived=1, refuted=1)
+    funnel.run(con, 1)
+    assert not any(st == "layer2-gate" for st, _ in _events(con, oid))
+    assert ("rule-precision-prior", "boost") in _events(con, oid)
+    assert oid in {r["id"] for r in con.execute("SELECT id FROM live_occurrences")}
+
+
+def test_a_deferred_deep_candidate_comes_back_once_refuted(con):
+    """`quarry deep --resume` finishes a refute pass a deadline cut short. The defer
+    was a rate limit, not evidence, so the finding re-enters the funnel."""
+    oid, _ = _deep(con)
+    funnel.run(con, 1)
+    con.execute("UPDATE research_findings SET n_survived=1 WHERE occurrence_id=?", (oid,))
+    funnel.run(con, 1)
+    ev = _events(con, oid)
+    assert ev[:2] == [("layer2-gate", "defer"), ("layer2-gate", "resurrect")]
+    assert ("rule-precision-prior", "boost") in ev
+    assert oid in {r["id"] for r in con.execute("SELECT id FROM live_occurrences")}
+
+
+def test_deep_candidates_wait_while_their_research_run_is_going(con, monkeypatch):
+    from quarry.web import queries
+    monkeypatch.setattr(queries, "live_status", lambda row: ("running", "pid alive"))
+    oid, rid = _deep(con, survived=1, status="running")
+    funnel.run(con, 1)
+    assert _events(con, oid) == []
+    monkeypatch.setattr(queries, "live_status", lambda row: ("done", ""))
+    funnel.run(con, 1)
+    assert ("rule-precision-prior", "boost") in _events(con, oid)
+
+
+def test_a_research_run_whose_worker_died_does_not_hold_its_candidates(con):
+    """Run 1's research row says `running`; its pid has been gone for days. The status
+    column is the worker's claim, and a dead worker cannot withdraw it."""
+    oid, rid = _deep(con, survived=1, status="running")
+    con.execute("UPDATE research_runs SET pid=999999, heartbeat='2026-01-01 00:00:00' "
+                "WHERE id=?", (rid,))
+    funnel.run(con, 1)
+    assert ("rule-precision-prior", "boost") in _events(con, oid)
+
+
+def test_every_occurrence_a_pass_admits_leaves_an_event(con):
+    """`fresh` means "no funnel event yet", so a stage path that let an occurrence
+    through without writing anything would funnel it again on every pass."""
+    for i, (tool, rule, path) in enumerate([
+            ("bandit", "B113", "src/a.py"), ("bandit", "B101", "tests/t.py"),
+            ("osv-scanner", "GHSA-x", "poetry.lock"), ("gitleaks", "generic", "src/k.py")]):
+        add(con, tool, rule, path, 10 + i)
+    _deep(con, survived=1)
+    funnel.run(con, 1)
+    silent = con.execute("SELECT COUNT(*) FROM occurrences o WHERE NOT EXISTS (SELECT 1 "
+                         "FROM funnel_events f WHERE f.occurrence_id=o.id)").fetchone()[0]
+    assert silent == 0
 
 
 def test_operator_events_before_the_funnel_do_not_block_it(con):

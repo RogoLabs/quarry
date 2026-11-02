@@ -746,7 +746,7 @@ def _assert_cells_match_their_sets(client, con):
         if s.get("arrived"):
             assert q.arrived_total(con, 1) == s["arrived"]
             assert len(q.arrived(con, 1)) == s["arrived"]
-    assert rows[-1]["remaining"] == _live(con), \
+    assert rows[-1]["remaining"] == _live(con) and rows[-1]["drift"] == 0, \
         "the table must end where the live card does"
     return rows
 
@@ -789,3 +789,17 @@ def test_operator_dismissals_show_in_the_funnel_table(seeded):
     _post(client, "/producers/bandit:B101/restore", data={"run_id": 1})
     rows = _assert_cells_match_their_sets(client, con)
     assert next(s for s in rows if s["stage"] == "operator")["restored"] == op["kill"]
+
+
+def test_run_page_shows_each_scanner_and_any_health_warning(seeded):
+    client, con = seeded
+    assert "No scanner outcomes recorded" in client.get("/runs/1").text
+    db.update_manifest(con, 1, lambda m: m.setdefault("scan", {}).setdefault("tools", {})
+                       .update({"trivy": {"ok": False, "rc": -9, "seconds": 5.0,
+                                          "records": 0, "skipped": "", "note": "",
+                                          "error": "timed out after 5s"}}))
+    db.set_health(con, 1, "scan", {"trivy": ["failed: timed out after 5s"]})
+    page = client.get("/runs/1").text
+    assert "Check before trusting this run" in page
+    assert "failed: timed out after 5s" in page
+    assert '<span class="pill alarm">failed</span>' in page

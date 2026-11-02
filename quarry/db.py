@@ -11,7 +11,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 SCHEMA = Path(__file__).with_name("schema.sql")
 
@@ -81,6 +81,40 @@ def finish_run(con: sqlite3.Connection, run_id: int, status: str = "done",
         args.append(json.dumps(v, sort_keys=True) if k == "manifest" else v)
     args.append(run_id)
     con.execute(f"UPDATE runs SET {', '.join(sets)} WHERE id = ?", args)
+
+
+def read_manifest(con: sqlite3.Connection, run_id: int) -> dict[str, Any]:
+    row = con.execute("SELECT manifest FROM runs WHERE id=?", (run_id,)).fetchone()
+    try:
+        m = json.loads(row["manifest"]) if row and row["manifest"] else {}
+    except (ValueError, TypeError):
+        m = {}
+    return m if isinstance(m, dict) else {}
+
+
+def update_manifest(con: sqlite3.Connection, run_id: int,
+                    change: "Callable[[dict[str, Any]], None]") -> dict[str, Any]:
+    """Read, change in place, write back. The manifest is one JSON document, so every
+    writer goes through here rather than overwriting another writer's keys."""
+    m = read_manifest(con, run_id)
+    change(m)
+    con.execute("UPDATE runs SET manifest=? WHERE id=?",
+                (json.dumps(m, sort_keys=True, default=str), run_id))
+    return m
+
+
+def set_health(con: sqlite3.Connection, run_id: int, source: str,
+               by_tool: dict[str, list[str]]) -> None:
+    """Replace the health warnings `source` holds for each tool in `by_tool`. A tool
+    with an empty list is cleared, so a re-run that fixed it stops warning."""
+    def change(m: dict[str, Any]) -> None:
+        h = m.setdefault("health", {}).setdefault(source, {})
+        for tool, msgs in by_tool.items():
+            if msgs:
+                h[tool] = msgs
+            else:
+                h.pop(tool, None)
+    update_manifest(con, run_id, change)
 
 
 # ------------------------------------------------------------------ producers

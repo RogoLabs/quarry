@@ -7,6 +7,7 @@ is the invariant from docs/PLAN.md §4.1, stated in its testable form.
 from __future__ import annotations
 
 import json
+import os
 import platform
 import shutil
 import sqlite3
@@ -185,6 +186,51 @@ class ScanSummary:
     evidence_blobs: int = 0
     evidence_bytes: int = 0
     finding_ids: set[str] = field(default_factory=set, repr=False)
+    health: dict[str, list[str]] = field(default_factory=dict)
+
+
+class AlreadyScanned(RuntimeError):
+    """A tool already returned results for this run."""
+
+
+# Lockfiles osv-scanner reads. Used only to ask whether "0 vulnerabilities" was a scan.
+LOCKFILES = frozenset({
+    "poetry.lock", "Pipfile.lock", "pdm.lock", "uv.lock", "requirements.txt",
+    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+    "go.sum", "Cargo.lock", "Gemfile.lock", "composer.lock", "mix.lock",
+    "pubspec.lock", "gradle.lockfile", "packages.lock.json", "conan.lock",
+})
+_SKIP_WALK = {".git", "node_modules", "vendor", ".venv", "venv"}
+
+
+def _lockfiles(src: Path) -> int:
+    n = 0
+    for root, dirs, files in os.walk(src):
+        dirs[:] = [d for d in dirs if d not in _SKIP_WALK]
+        n += sum(1 for f in files if f in LOCKFILES)
+    return n
+
+
+def scan_health(per_tool: dict[str, dict[str, Any]], lockfiles: int) -> dict[str, list[str]]:
+    """Ways a tool can lose its output while the run still reports success. Each one
+    has happened: Checkov's paths left every finding without an evidence window (21 of
+    21 killed), and osv-scanner returned nothing for a whole run because one GIT
+    dependency aborted it. A warning here is a question to answer, not a verdict."""
+    out: dict[str, list[str]] = {}
+    for tool, info in per_tool.items():
+        msgs = []
+        if info.get("error"):
+            msgs.append(f"failed: {info['error']}")
+        lined, got = info.get("lined", 0), info.get("captured", 0)
+        if lined and got / lined < 0.5:
+            msgs.append(f"evidence captured for {got} of {lined} located finding(s); "
+                        f"the rest will be killed by quote-verify. Check the tool's paths.")
+        if (tool == "osv-scanner" and info.get("ok") and not info.get("note")
+                and not info.get("records") and lockfiles):
+            msgs.append(f"0 vulnerabilities across {lockfiles} lockfile(s). A clean "
+                        f"result is possible; confirm it parsed them.")
+        out[tool] = msgs
+    return out
 
 
 def scan(paths: Paths, con: sqlite3.Connection, run_id: int, *,
@@ -203,6 +249,16 @@ def scan(paths: Paths, con: sqlite3.Connection, run_id: int, *,
         raise RuntimeError(f"no run {run_id}")
     if row["status"] != "done":
         raise RuntimeError(f"run {run_id} is {row['status']}, not a completed ingest")
+    target, git_sha = row["target"], row["git_sha"]
+
+    summary = ScanSummary(run_id)
+    scanners = registry()
+    chosen = [s for n, s in scanners.items() if not only or n in only]
+    if again := sorted(_already_scanned(con, run_id) & {s.name for s in chosen}):
+        raise AlreadyScanned(
+            f"run {run_id} already has results from {', '.join(again)}. A second scan "
+            f"would add a second copy of every finding. Re-run only a tool that failed or "
+            f"was skipped (--only), or ingest the target into a new run.")
     vol = RunVolume.attach_existing(run_id, paths.runs)
     src = vol.src
     # A scan that quietly reports "0 findings" against an empty tree is worse than a
@@ -210,11 +266,6 @@ def scan(paths: Paths, con: sqlite3.Connection, run_id: int, *,
     if not src.is_dir() or not any(src.iterdir()):
         raise RuntimeError(f"run {run_id}: source tree at {src} is empty — "
                            f"re-ingest, or the volume was released")
-    target, git_sha = row["target"], row["git_sha"]
-
-    summary = ScanSummary(run_id)
-    scanners = registry()
-    chosen = [s for n, s in scanners.items() if not only or n in only]
     # Gitleaks first, whatever the registry order: every window built after it is
     # redacted with every secret it found. A scan that skips gitleaks still redacts
     # with the report an earlier scan left on the volume.
@@ -231,14 +282,42 @@ def scan(paths: Paths, con: sqlite3.Connection, run_id: int, *,
             "seconds": round(outcome.duration_s, 1),
             "records": len(outcome.records),
             "skipped": outcome.skipped, "error": outcome.error, "note": outcome.note,
+            "lined": 0, "captured": 0,
         }
-        if not outcome.ok:
-            continue
-        _persist(con, run_id, target, git_sha, src, sc.name, outcome.records, summary,
-                 secrets=frozenset(secrets))
+        if outcome.ok:
+            _persist(con, run_id, target, git_sha, src, sc.name, outcome.records, summary,
+                     secrets=frozenset(secrets))
+        # Per tool, so a scan interrupted part way still records what did run.
+        with db.tx(con):
+            _record_tool(con, run_id, sc.name, summary.per_tool[sc.name])
 
+    summary.health = scan_health(summary.per_tool, _lockfiles(src))
+    with db.tx(con):
+        db.set_health(con, run_id, "scan", summary.health)
     db.bump_producer_counts(con)
     return summary
+
+
+def _already_scanned(con: sqlite3.Connection, run_id: int) -> set[str]:
+    """Tools that returned results for this run: a recorded clean outcome, or any
+    occurrence at all (a run scanned before outcomes were recorded). A tool that failed
+    or was skipped is not in the set, so it can be re-run."""
+    tools = (db.read_manifest(con, run_id).get("scan") or {}).get("tools") or {}
+    done = {t for t, info in tools.items() if isinstance(info, dict) and info.get("ok")}
+    done |= {r["tool"] for r in con.execute(
+        "SELECT DISTINCT p.tool FROM occurrences o JOIN producers p ON p.id = o.producer_id "
+        "WHERE o.run_id = ? AND p.tool != 'deep'", (run_id,))}
+    return done
+
+
+def _record_tool(con: sqlite3.Connection, run_id: int, tool: str,
+                 info: dict[str, Any]) -> None:
+    """Keep each tool's outcome in the manifest. It was printed and thrown away, so a
+    run where Trivy timed out looked the same as one where Trivy found nothing."""
+    from datetime import datetime, timezone
+    entry = {**info, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    db.update_manifest(con, run_id, lambda m: m.setdefault("scan", {})
+                       .setdefault("tools", {}).__setitem__(tool, entry))
 
 
 def _persist(con: sqlite3.Connection, run_id: int, target: str, git_sha: str | None,
@@ -262,6 +341,9 @@ def _persist(con: sqlite3.Connection, run_id: int, target: str, git_sha: str | N
             # Evidence first, redacted with every known secret (Seat 4).
             ev: Evidence | None = extract_evidence(
                 src, Path(rec.path), rec.start_line, end_line=rec.end_line, secrets=known)
+            if rec.start_line and tool in summary.per_tool:
+                summary.per_tool[tool]["lined"] += 1
+                summary.per_tool[tool]["captured"] += ev is not None
             blob_sha = None
             if ev is not None:
                 blob_sha = ev.sha

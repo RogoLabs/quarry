@@ -18,7 +18,7 @@ quarry db sync                  # Trivy, Grype and OSV databases: the one networ
 quarry targets score owner/repo # rank candidates on attack surface and responsiveness
 quarry ingest owner/repo        # anonymous clone into a per-run APFS sparse image
 quarry scan 1                   # seven scanners under sandbox-exec, no network, no models
-quarry funnel 1                 # twelve ordered stages; nothing is deleted
+quarry funnel 1                 # thirteen ordered stages; nothing is deleted
 quarry killed 1                 # audit what the funnel suppressed, and why
 quarry validate 1 --dry-run     # plan which probes fit this codebase
 quarry validate 1 --uncontained # stand the target up in Docker and probe the survivors
@@ -72,7 +72,7 @@ keys and a GitHub token.
   can read your shell environment. A real `validate` run is refused unless you pass
   `--uncontained`, which is only for a target you trust.
 
-The test suite (483 tests) asserts these against a hostile fixture repo and real
+The test suite (498 tests) asserts these against a hostile fixture repo and real
 `sandbox-exec`. A profile with no test is a comment.
 
 ## Requirements

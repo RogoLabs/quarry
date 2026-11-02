@@ -220,6 +220,10 @@ def deep(run_id: int = typer.Argument(..., help="an ingested run"),
     for k, v in stats.items():
         t.add_row(_e(k.replace("_", " ")), _e(v))
     con_out.print(t)
+    # Candidates face the Layer 2 gate now rather than sitting in triage unfunnelled.
+    # Ones still awaiting refutation are deferred, and a later pass revives them.
+    con_out.print("[bold]funnel pass[/] over the new candidates")
+    _print_funnel(funnel_mod.run(connection, run_id, src=src))
     con_out.print(f"[dim]watch it at http://127.0.0.1:8099/research/{rid}[/]")
 
 
@@ -308,8 +312,12 @@ def scan(run_id: int = typer.Argument(..., help="an ingested run"),
     """Run the deterministic layer (Layer 1) over an ingested run. No model calls."""
     paths, connection = _open()
     tools = [t.strip() for t in only.split(",") if t.strip()] or None
-    with con_out.status(f"scanning run {run_id}…"):
-        s = orchestrator.scan(paths, connection, run_id, only=tools, timeout=timeout)
+    try:
+        with con_out.status(f"scanning run {run_id}…"):
+            s = orchestrator.scan(paths, connection, run_id, only=tools, timeout=timeout)
+    except orchestrator.AlreadyScanned as e:
+        con_out.print(f"[red]refused[/]: {_e(e)}")
+        raise typer.Exit(2)
 
     t = Table(show_header=True, header_style="bold")
     for c in ("tool", "rc", "secs", "records", "note"):
@@ -322,12 +330,20 @@ def scan(run_id: int = typer.Argument(..., help="an ingested run"),
     con_out.print(t)
     con_out.print(f"[bold]{s.occurrences}[/] occurrences · [bold]{s.findings}[/] distinct findings · "
                   f"{s.evidence_blobs} evidence blobs ({s.evidence_bytes/1024:.0f} KB gzipped)")
+    _print_health(s.health)
+
+
+def _print_health(by_tool: dict) -> None:
+    for tool, msgs in by_tool.items():
+        for m in msgs:
+            con_out.print(f"[red bold]health[/] {_e(tool)}: {_e(m)}")
 
 
 @app.command()
 def funnel(run_id: int = typer.Argument(..., help="a scanned run"),
            top_k: int = typer.Option(0, help="budget cut; 0 = no cut")) -> None:
-    """Run the deterministic funnel over a scanned run. Free, and nothing is deleted."""
+    """Run the deterministic funnel over a scanned run's new occurrences. Free, and
+    nothing is deleted. Safe to repeat: each occurrence goes through once."""
     paths, connection = _open()
     from .ingest import RunVolume
     try:
@@ -336,7 +352,14 @@ def funnel(run_id: int = typer.Argument(..., help="a scanned run"),
         src = None
     res = funnel_mod.run(connection, run_id, src=src,
                          budget_top_k=top_k if top_k > 0 else None)
+    _print_funnel(res)
 
+
+def _print_funnel(res) -> None:
+    if not res.started_with:
+        con_out.print(f"[dim]run {res.run_id}: nothing new to funnel; every occurrence "
+                      f"has already been through it[/]")
+        return
     t = Table(show_header=True, header_style="bold")
     for c in ("#", "stage", "killed", "deferred", "merged", "boosted", "remaining"):
         t.add_column(c, justify="right" if c not in ("stage",) else "left")
@@ -353,6 +376,7 @@ def funnel(run_id: int = typer.Argument(..., help="a scanned run"),
     con_out.print(f"[bold]{res.started_with}[/] → [bold]{res.survivors}[/] survive "
                   f"({pct:.0f}%). [yellow]⚠[/] = heuristic stage, carries recall risk. "
                   f"Nothing deleted; every suppression is reversible.")
+    _print_health(res.health)
 
 
 @app.command()

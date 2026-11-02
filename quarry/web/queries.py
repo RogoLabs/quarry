@@ -19,6 +19,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
+from .. import db
+
 BANDS = ("known-good", "unmeasured", "known-bad")
 
 
@@ -180,13 +182,17 @@ def funnel_stages(con: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]:
     Counts come from the ledger, the same rows each cell's link opens. They came from
     the manifest snapshot, which disagreed with its own links twice: cross-tool-cluster
     reported a boost it never wrote, and operator dismissals, written after the
-    snapshot, never appeared. The manifest still supplies the stage order, the stages
-    that wrote no rows (so they show as zeroes rather than vanish) and each stage's
-    `remaining` at the time it ran.
+    snapshot, never appeared. The manifest still supplies the stage order and the
+    stages that wrote no rows, so they show as zeroes rather than vanish.
 
-    Occurrences that reached the run after the funnel (Layer 2 survivors, a re-scan)
-    get their own row, and the last row's `remaining` is the live count, so the table
-    ends where the "live" card does.
+    `remaining` is derived from the ledger too, so it holds across funnel passes: the
+    occurrences that entered the funnel, less each stage's kills, defers and merges,
+    plus the ones that stage itself brought back (the Layer 2 gate revives a deferred
+    deep candidate once its refutation is in).
+
+    Occurrences that no funnel pass has seen yet get their own row, so the table ends
+    where the "live" card does. `drift` on the last row is the difference between the
+    two, which should be zero.
     """
     import json as _json
     snapshot: list[dict[str, Any]] = []
@@ -208,34 +214,47 @@ def funnel_stages(con: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]:
         SELECT stage, MIN(id) AS first_id, MIN(deterministic) AS d FROM funnel_events
         WHERE run_id=? GROUP BY stage ORDER BY first_id""", (run_id,)).fetchall()
 
-    def stage_row(name: str, heuristic: bool, remaining: int | None) -> dict[str, Any]:
+    def stage_row(name: str, heuristic: bool) -> dict[str, Any]:
         c = counts.get(name, {})
-        return {"stage": name, "heuristic": heuristic, "remaining": remaining,
+        return {"stage": name, "heuristic": heuristic, "remaining": None,
                 **{a: c.get(a, 0) for a in FUNNEL_ACTIONS},
                 "restored": c.get("resurrect", 0)}
 
     heuristic = {r["stage"]: r["d"] == 0 for r in ledger}
-    out = [stage_row(s["stage"], bool(s.get("heuristic")) or heuristic.get(s["stage"], False),
-                     s.get("remaining"))
+    out = [stage_row(s["stage"], bool(s.get("heuristic")) or heuristic.get(s["stage"], False))
            for s in snapshot]
     seen = {s["stage"] for s in out}
     # Stages written after the snapshot, or every stage on a run with no snapshot.
-    later = [stage_row(r["stage"], r["d"] == 0, None)
+    later = [stage_row(r["stage"], r["d"] == 0)
              for r in ledger if r["stage"] not in seen]
     funnel_ran = bool(out) or any(s["stage"] != "operator" for s in later)
     if not funnel_ran:
         return out + later
 
     funnel_rows = out + [s for s in later if s["stage"] != "operator"]
+    rem = con.execute(
+        "SELECT COUNT(DISTINCT occurrence_id) c FROM funnel_events WHERE run_id=? "
+        "AND stage != 'operator' AND occurrence_id IS NOT NULL", (run_id,)).fetchone()["c"]
+    for s in funnel_rows:
+        rem += s["restored"] - s["kill"] - s["defer"] - s["merge"]
+        s["remaining"] = rem
     after = [s for s in later if s["stage"] == "operator"]
     if n := arrived_total(con, run_id):
-        prev = funnel_rows[-1]["remaining"] if funnel_rows else None
         after.insert(0, {"stage": ARRIVED_AFTER_FUNNEL, "arrived": n, "heuristic": False,
-                         "remaining": None if prev is None else prev + n,
+                         "remaining": rem + n,
                          **{a: 0 for a in FUNNEL_ACTIONS}, "restored": 0})
+    for s in after:
+        if s["stage"] == "operator":
+            rem += s["restored"] - s["kill"] - s["defer"] - s["merge"]
+            s["remaining"] = rem
+        else:
+            rem = s["remaining"]
     rows = funnel_rows + after
-    rows[-1]["remaining"] = con.execute(
-        "SELECT COUNT(*) c FROM live_occurrences WHERE run_id=?", (run_id,)).fetchone()["c"]
+    # The ledger arithmetic should land on the live count. If it does not, say so on
+    # the row rather than quietly replace it: a gap here is a ledger defect.
+    live = con.execute("SELECT COUNT(*) c FROM live_occurrences WHERE run_id=?",
+                       (run_id,)).fetchone()["c"]
+    rows[-1]["drift"] = live - rows[-1]["remaining"]
     return rows
 
 
@@ -418,6 +437,14 @@ def run_summary(con: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
     d["producers"] = con.execute(
         "SELECT COUNT(DISTINCT producer_id) c FROM live_occurrences WHERE run_id=?",
         (run_id,)).fetchone()["c"]
+    m = db.read_manifest(con, run_id)
+    tools = (m.get("scan") or {}).get("tools") or {}
+    d["scan_tools"] = [{"tool": t, **i} for t, i in sorted(tools.items())
+                       if isinstance(i, dict)]
+    d["health"] = [{"source": src, "tool": tool, "message": msg}
+                   for src, by_tool in sorted((m.get("health") or {}).items())
+                   if isinstance(by_tool, dict)
+                   for tool, msgs in sorted(by_tool.items()) for msg in (msgs or [])]
     return d
 
 

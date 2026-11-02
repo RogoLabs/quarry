@@ -188,3 +188,99 @@ def test_osv_seeds_register_every_ecosystem():
     assert '"resolved"' in seeds["package-lock.json"]          # npm registers only with it
     assert "specs:\n    rake" in seeds["Gemfile.lock"]
     assert '"name"' in seeds["composer.lock"]
+
+
+# ---------------------------------------------------------------- scan outcomes
+
+class _Canned(Scanner):
+    """A scanner whose outcome is fixed, so orchestrator.scan runs end to end."""
+    def __init__(self, name, outcome_fn):
+        self.name = self.binary = name
+        self._fn = outcome_fn
+
+    def run(self, rundir, src, *, timeout=1800):
+        return self._fn()
+
+
+def _scan_env(tmp_path, monkeypatch, tools):
+    from quarry.scanners import base as sbase
+    src = tmp_path / "vol" / "src"
+    src.mkdir(parents=True)
+    (src / "app.py").write_text("eval(x)\n")
+    (src / "poetry.lock").write_text("")
+    vol = SimpleNamespace(mount=tmp_path / "vol", src=src)
+    monkeypatch.setattr(orchestrator.RunVolume, "attach_existing", lambda rid, runs: vol)
+    import quarry.scanners as scanners
+    monkeypatch.setattr(scanners, "registry", lambda: tools)
+    c = db.init(tmp_path / "t.db")
+    c.execute("INSERT INTO runs (id,target,clone_url,status) VALUES (1,'o/r','x','done')")
+    return c, SimpleNamespace(runs=tmp_path)
+
+
+def _ok(*recs):
+    return lambda: base.ScanOutcome("t", True, 0, 1.0, list(recs))
+
+
+def test_each_tool_outcome_is_kept_in_the_manifest(tmp_path, monkeypatch):
+    """It was printed and dropped, so a timed-out Trivy looked like a clean one."""
+    timed_out = lambda: base.ScanOutcome("trivy", False, -9, 5.0, error="timed out after 5s")
+    tools = {"bandit": _Canned("bandit", _ok(Record("bandit", "B307", "app.py", 1))),
+             "trivy": _Canned("trivy", timed_out)}
+    c, paths = _scan_env(tmp_path, monkeypatch, tools)
+    s = orchestrator.scan(paths, c, 1)
+    kept = db.read_manifest(c, 1)["scan"]["tools"]
+    assert kept["bandit"]["ok"] and kept["bandit"]["records"] == 1
+    assert (kept["bandit"]["lined"], kept["bandit"]["captured"]) == (1, 1)
+    assert not kept["trivy"]["ok"] and "timed out" in kept["trivy"]["error"]
+    assert s.health["trivy"] == ["failed: timed out after 5s"]
+    assert db.read_manifest(c, 1)["health"]["scan"] == {"trivy": ["failed: timed out after 5s"]}
+
+
+def test_a_tool_that_returned_results_is_not_scanned_into_the_run_again(tmp_path, monkeypatch):
+    """Run 1 got 9 OSV findings from a re-scan after the funnel, none of them funnelled.
+    A tool that failed can be re-run; one that succeeded would duplicate every finding."""
+    state = {"fail": True}
+    def osv():
+        if state["fail"]:
+            return base.ScanOutcome("osv-scanner", False, 127, 1.0, error="exit 127")
+        return base.ScanOutcome("osv-scanner", True, 0, 1.0, [])
+    tools = {"bandit": _Canned("bandit", _ok(Record("bandit", "B307", "app.py", 1))),
+             "osv-scanner": _Canned("osv-scanner", osv)}
+    c, paths = _scan_env(tmp_path, monkeypatch, tools)
+    orchestrator.scan(paths, c, 1)
+    with pytest.raises(orchestrator.AlreadyScanned, match="bandit"):
+        orchestrator.scan(paths, c, 1, only=["bandit"])
+    state["fail"] = False
+    orchestrator.scan(paths, c, 1, only=["osv-scanner"])          # the failed one may rerun
+    with pytest.raises(orchestrator.AlreadyScanned, match="osv-scanner"):
+        orchestrator.scan(paths, c, 1, only=["osv-scanner"])
+
+
+def test_a_tool_whose_paths_miss_the_clone_is_flagged(tmp_path, monkeypatch):
+    """Checkov reported `src/<path>`, so 21 of 21 findings had no evidence window and
+    quote-verify killed them all while the run said done."""
+    recs = [Record("checkov", "CKV_DOCKER_2", f"src/d{i}/Dockerfile", 1) for i in range(3)]
+    c, paths = _scan_env(tmp_path, monkeypatch, {"checkov": _Canned("checkov", _ok(*recs))})
+    s = orchestrator.scan(paths, c, 1)
+    assert "evidence captured for 0 of 3" in s.health["checkov"][0]
+
+
+def test_osv_with_lockfiles_and_no_findings_is_questioned():
+    h = orchestrator.scan_health(
+        {"osv-scanner": {"ok": True, "records": 0, "note": ""}}, lockfiles=2)
+    assert "0 vulnerabilities across 2 lockfile(s)" in h["osv-scanner"][0]
+    clean = orchestrator.scan_health(
+        {"osv-scanner": {"ok": True, "records": 0, "note": "no package manifests to scan"}},
+        lockfiles=0)
+    assert clean["osv-scanner"] == []
+
+
+def test_a_tool_that_loses_everything_to_deterministic_stages_is_flagged(con):
+    for i in range(3):
+        add(con, "checkov", "CKV_DOCKER_2", f"src/d{i}/Dockerfile", 1, blob=False)
+    add(con, "bandit", "B307", "src/a.py", 10)
+    res = funnel.run(con, 1)
+    assert "all 3 new occurrence(s) killed" in res.health["checkov"][0]
+    assert "quote-verify" in res.health["checkov"][0]
+    assert res.health["bandit"] == []
+    assert db.read_manifest(con, 1)["health"]["funnel"].keys() == {"checkov"}

@@ -9,6 +9,19 @@
       <span class="pill incomplete">not OSI, CodeQL gated off</span>{% endif %}
     · {{ run.started_at|local }}</p>
 
+  {#  Ways a tool can lose its output while the run still says "done". Each check
+      exists because it happened: Checkov's paths cost every one of its findings. #}
+  {% if run.health %}
+  <div class="banner hl stack" role="note">
+    <b>Check before trusting this run's numbers.</b>
+    <ul>
+    {% for h in run.health %}
+      <li><code>{{ h.tool|visible }}</code> ({{ h.source }}): {{ h.message|visible }}</li>
+    {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
   {#  The pipeline, left to right, each stage's count linking to its set. #}
   <nav class="pipeline" aria-label="Pipeline for run {{ run.id }}">
     <ol>
@@ -65,8 +78,41 @@
     <p class="note">{% if vc.total %}{{ vc.total }} verdict(s) in this run.
       <a href="/validation?run={{ run.id }}">All of them</a>. A probe with no recorded
       baseline is held as needs review, so that state is the common one.{% else %}No
-      verdicts yet. <code>quarry validate {{ run.id }}</code> probes the live findings
-      against the running target.{% endif %}</p>
+      verdicts yet. <code>quarry validate {{ run.id }} --dry-run</code> plans the probes;
+      a real run needs <code>--uncontained</code> until the Docker runtime contains a
+      hostile target.{% endif %}</p>
+  </div>
+
+  {#  Kept per tool in the manifest. It was printed to the terminal and dropped, so a
+      tool that timed out looked like a tool that found nothing. #}
+  <h2 class="h-sec" id="scanners">Scanners: what ran, and what each returned</h2>
+  <div class="tbl">
+    <table>
+      <caption class="sr-only">Outcome of each Layer 1 scanner for run {{ run.id }}</caption>
+      <thead><tr><th scope="col">Tool</th><th scope="col">Outcome</th>
+        <th scope="col" class="n">Records</th><th scope="col" class="n">Evidence</th>
+        <th scope="col" class="n">Seconds</th><th scope="col">Detail</th></tr></thead>
+      <tbody>
+      {% for t in run.scan_tools %}
+        <tr>
+          <td class="mono sm">{{ t.tool }}</td>
+          <td>{% if t.skipped %}<span class="pill incomplete">skipped</span>
+            {% elif not t.ok %}<span class="pill alarm">failed</span>
+            {% elif t.note %}<span class="pill inert">nothing to scan</span>
+            {% else %}<span class="pill inert">ran</span>{% endif %}</td>
+          <td class="n">{{ t.records }}</td>
+          <td class="n">{% if t.lined %}{{ t.captured }}/{{ t.lined }}{% else %}·{% endif %}</td>
+          <td class="n">{{ t.seconds }}</td>
+          <td class="dim">{{ (t.skipped or t.error or t.note or '')|visible }}</td>
+        </tr>
+      {% endfor %}
+      {% if not run.scan_tools %}
+        <tr><td colspan="6" class="dim">No scanner outcomes recorded. Runs scanned before
+          outcomes were kept have none; <code>quarry scan {{ run.id }}</code> records them
+          for a run not scanned yet.</td></tr>
+      {% endif %}
+      </tbody>
+    </table>
   </div>
 
   <h2 class="h-sec" id="funnel">The funnel: every number is a link to the set it killed</h2>
@@ -129,7 +175,9 @@
             {% else %}<td class="z">·</td>{% endif %}
           {% endfor %}
           {% endif %}
-          <td class="rem">{{ ns.rem }}</td>
+          <td class="rem">{{ ns.rem }}{% if s.drift %}
+            <span class="pill incomplete" title="the ledger does not add up to the live count">
+              {{ '%+d'|format(s.drift) }} unexplained</span>{% endif %}</td>
         </tr>
       {% endfor %}
       {% if not stages %}
