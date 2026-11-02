@@ -394,14 +394,20 @@ def _path_class_filter(con, run_id, rows, src, prior=()) -> StageResult:
     generated-path rule, and vendored trees stay excluded for everyone because a
     vulnerable dependency vendored into `node_modules/` is the dependency finding
     already reported from the manifest.
+
+    The `secrets` class is exempt from the test-path rule for the same reason. A key
+    committed under `tests/` is as leaked as one under `src/`, and run 1 killed 38
+    Gitleaks hits here by path alone. local-dev-fixture decides them on the value.
     """
     sr = StageResult("path-class", heuristic=True)
     for r in rows:
         p = r["path"]
-        is_sca = independence_class(r["tool"], r["rule_id"]) == "sca-db"
-        rules = [(VENDOR_PAT, "vendored"), (TEST_PAT, "test")]
-        if not is_sca:
-            rules.insert(1, (GENERATED_PAT, "generated"))
+        cls = independence_class(r["tool"], r["rule_id"])
+        rules = [(VENDOR_PAT, "vendored")]
+        if cls != "sca-db":
+            rules.append((GENERATED_PAT, "generated"))
+        if cls != "secrets":
+            rules.append((TEST_PAT, "test"))
         for pat, label in rules:
             if pat.search(p):
                 _kill(con, run_id, r, sr.stage, f"{label} path: {p}", deterministic=False)
@@ -432,7 +438,9 @@ def _local_dev_fixture(con, run_id, rows, src, prior=()) -> StageResult:
         if not is_secret:
             sr.passed += 1
             continue
-        dev_path = bool(DEVPATH_PAT.search(r["path"]))
+        # Test paths count as development paths here: path-class leaves secrets in
+        # them to this stage, which kills only on a known placeholder value.
+        dev_path = bool(DEVPATH_PAT.search(r["path"]) or TEST_PAT.search(r["path"]))
         if dev_path and _looks_placeholder(r):
             _kill(con, run_id, r, sr.stage,
                   f"development-path fixture credential in {r['path']} "
@@ -566,25 +574,29 @@ def _cross_tool_cluster(con, run_id, rows, src, prior=()) -> StageResult:
     cluster with one; only the fresh members get an event."""
     sr = StageResult("cross-tool-cluster")
     fresh = {r["id"] for r in rows}
-    buckets: dict[tuple, list[dict]] = defaultdict(list)
+    by_path: dict[str, list[dict]] = defaultdict(list)
     for r in (*prior, *rows):
         # A finding with no line (SCA on a lockfile) has no position to overlap. As
         # line 0 it fell into the 1-9 bucket and clustered with any SAST hit there.
         if not r["start_line"]:
             sr.passed += r["id"] in fresh
             continue
-        buckets[(r["path"], r["start_line"] // 10)].append(r)
+        by_path[r["path"]].append(r)
+    target = (con.execute("SELECT target FROM runs WHERE id=?", (run_id,)).fetchone()
+              or [""])[0]
 
-    for (path, decade), members in buckets.items():
+    for path, members in _line_groups(by_path):
         classes = {independence_class(m["tool"], m["rule_id"]) for m in members}
         new = [m for m in members if m["id"] in fresh]
         if len(members) < 2 or len(classes) < 2 or not new:
             sr.passed += len(new)
             continue
-        issue_id = f"{run_id}:{path}:{decade}"
+        issue_id = _issue_id(con, run_id, path, members)
+        # issues.target is the repository, as on every other table. It was written with
+        # the file path.
         con.execute("INSERT INTO issues (id,target,title,created_run) VALUES (?,?,?,?) "
                     "ON CONFLICT(id) DO UPDATE SET title=excluded.title",
-                    (issue_id, path, f"{len(members)} findings at {path}", run_id))
+                    (issue_id, target, f"{len(members)} findings at {path}", run_id))
         for m in members:
             con.execute("UPDATE findings SET issue_id=? WHERE id=?", (issue_id, m["finding_id"]))
             con.execute("INSERT OR IGNORE INTO issue_members (issue_id,finding_id,run_id) "
@@ -604,6 +616,36 @@ def _cross_tool_cluster(con, run_id, rows, src, prior=()) -> StageResult:
         # the funnel table showed "boost 3" over a set of zero boost events.
         sr.passed += len(new)
     return sr
+
+
+CLUSTER_SPAN = 10
+
+
+def _line_groups(by_path: dict[str, list[dict]]):
+    """Per file, findings whose lines fall within CLUSTER_SPAN of the group's first
+    line. Bucketing by `line // 10` put lines 9 and 10 in different buckets, so two
+    tools flagging adjacent lines never clustered."""
+    for path, rs in by_path.items():
+        rs = sorted(rs, key=lambda r: (r["start_line"], r["id"]))
+        group: list[dict] = []
+        for r in rs:
+            if group and r["start_line"] - group[0]["start_line"] > CLUSTER_SPAN:
+                yield path, group
+                group = []
+            group.append(r)
+        if group:
+            yield path, group
+
+
+def _issue_id(con, run_id: int, path: str, members: list[dict]) -> str:
+    """Reuse the issue an earlier pass gave any member in this run, so a fresh hit that
+    lands above an existing cluster joins it rather than opening a second one."""
+    ids = [m["finding_id"] for m in members]
+    marks = ",".join("?" * len(ids))
+    have = con.execute(
+        f"SELECT MIN(issue_id) FROM findings WHERE id IN ({marks}) AND issue_id LIKE ?",
+        (*ids, f"{run_id}:%")).fetchone()[0]
+    return have or f"{run_id}:{path}:{members[0]['start_line']}"
 
 
 # -- 8 -------------------------------------------------------------------------

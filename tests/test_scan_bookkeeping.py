@@ -284,3 +284,47 @@ def test_a_tool_that_loses_everything_to_deterministic_stages_is_flagged(con):
     assert "quote-verify" in res.health["checkov"][0]
     assert res.health["bandit"] == []
     assert db.read_manifest(con, 1)["health"]["funnel"].keys() == {"checkov"}
+
+
+def test_osv_severity_follows_the_score_and_unresolved_paths_are_dropped(tmp_path):
+    """IMPROVEMENT-PLAN item 14. Any CVSS v3 vector read as "high", so lodash's
+    A:L-only 5.3 (GHSA-29mw-wpgm-hmr9, from a real offline scan of the seeds) sat
+    beside a 9.8. And a manifest outside the clone became a finding on "."."""
+    import json
+    from quarry.scanners.tools import OSVScanner
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "package-lock.json").write_text("{}")
+    v3 = [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L"}]
+    pkg = {"package": {"name": "lodash", "version": "4.17.20"},
+           "vulnerabilities": [{"id": "GHSA-29mw-wpgm-hmr9", "severity": v3},
+                               {"id": "GHSA-crit", "severity": v3},
+                               {"id": "GHSA-none"}],
+           "groups": [{"ids": ["GHSA-29mw-wpgm-hmr9", "CVE-2020-28500"], "max_severity": "5.3"},
+                      {"ids": ["GHSA-crit"], "max_severity": "9.8"},
+                      {"ids": ["GHSA-none"], "max_severity": ""}]}
+    out = tmp_path / "osv.json"
+    out.write_text(json.dumps({"results": [
+        {"source": {"path": str(src / "package-lock.json")}, "packages": [pkg]},
+        {"source": {"path": "/Users/someone/elsewhere/package-lock.json"}, "packages": [pkg]},
+    ]}))
+    recs = list(OSVScanner().parse(out, src))
+    assert {r.path for r in recs} == {"package-lock.json"}
+    assert {r.rule_id: r.severity for r in recs} == {
+        "GHSA-29mw-wpgm-hmr9": "medium", "GHSA-crit": "critical", "GHSA-none": "unscored"}
+
+
+def test_trivy_inline_ignores_are_reported(tmp_path, monkeypatch):
+    """IMPROVEMENT-PLAN item 14, measured on trivy 0.76.1: `#trivy:ignore:AVD-DS-0001`
+    removes DS-0001 from the SARIF and nothing says so. Quarry cannot stop Trivy
+    obeying it, so the run says which files carry one."""
+    tools = {"trivy": _Canned("trivy", _ok())}
+    c, paths = _scan_env(tmp_path, monkeypatch, tools)
+    src = tmp_path / "vol" / "src"
+    (src / "Dockerfile").write_text("#trivy:ignore:AVD-DS-0001\nFROM alpine\n")
+    (src / "node_modules").mkdir()
+    (src / "node_modules" / "x.tf").write_text("# trivy:ignore:AVD-AWS-0086\n")
+    s = orchestrator.scan(paths, c, 1)
+    assert any("2 file(s) carry trivy:ignore" in m and "Dockerfile" in m
+               for m in s.health["trivy"])
+    assert orchestrator.trivy_inline_ignores(src) == ["Dockerfile", "node_modules/x.tf"]

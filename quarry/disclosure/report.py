@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..cwe import probe_class
 from ..taint import TaintError, safe_relpath, scrub_text
 
 CWE_TITLE = {
@@ -221,7 +222,7 @@ def extract_security_contacts(src: Path) -> list[SecurityContact]:
 
 
 def _title(cwe: str | None) -> str:
-    return CWE_TITLE.get(cwe or "", "Security vulnerability")
+    return CWE_TITLE.get(probe_class(cwe) or "", "Security vulnerability")
 
 
 # ------------------------------------------------------------------ Markdown safety
@@ -298,8 +299,9 @@ def _render_contacts(contacts) -> str:
 def render_report(ctx: DisclosureContext) -> str:
     cwe = _text(ctx.cwe or "(unclassified)")
     klass = _title(ctx.cwe)
-    severity = CWE_SEVERITY.get(ctx.cwe or "", "To be assessed")
-    fix = CWE_FIX.get(ctx.cwe or "", "Review and remediate the issue described above.")
+    severity = CWE_SEVERITY.get(probe_class(ctx.cwe) or "", "To be assessed")
+    fix = CWE_FIX.get(probe_class(ctx.cwe) or "",
+                      "Review and remediate the issue described above.")
     where = _code(ctx.file + (f" ({ctx.symbol})" if ctx.symbol else "")
                   + (f":{int(ctx.line)}" if ctx.line else ""))
     sha = _code(ctx.git_sha or "(working tree)")

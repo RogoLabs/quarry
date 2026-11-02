@@ -19,6 +19,7 @@ from typing import Any
 from . import db, taint
 from .config import Paths
 from .ingest import RunVolume, clone_target
+from .ingest.clone import canonical_target
 
 # OSI-approved identifiers we recognise for the CodeQL gate (docs/PLAN.md §5).
 # Conservative on purpose: an unknown license means "not OSI", which means no CodeQL.
@@ -126,8 +127,10 @@ def ingest(paths: Paths, con: sqlite3.Connection, target: str, *,
     an empty credential helper; the scrub and quarantine run in Tier 0 but only ever
     call lstat/unlink/move on paths derived from os.walk, never from file *contents*.
     """
+    target = canonical_target(target)
+    clone_url = target if "://" in target else f"https://github.com/{target}"
     manifest = tool_manifest()
-    run_id = db.start_run(con, target, f"https://github.com/{target}", manifest)
+    run_id = db.start_run(con, target, clone_url, manifest)
     db.egress(con, run_id, "clone", "github.com", note="anonymous https, no credential")
 
     notes: list[str] = []
@@ -211,6 +214,30 @@ def _lockfiles(src: Path) -> int:
     return n
 
 
+_TRIVY_IGNORE = b"trivy:ignore"
+
+
+def trivy_inline_ignores(src: Path, *, cap: int = 1024 * 1024) -> list[str]:
+    """Files in the clone that carry a `trivy:ignore` comment. Trivy obeys these for
+    misconfiguration results and drops the result from its output with no trace;
+    `--show-suppressed` does not bring it back and no flag turns it off (MEASURED,
+    trivy 0.76.1: `#trivy:ignore:AVD-DS-0001` above FROM removed DS-0001). The clone is
+    read-only to scanners, so the comment cannot be stripped; it is reported instead.
+    A substring match, read without following links, nothing interpreted. Vendored
+    trees are walked too, because Trivy scans them."""
+    hits: list[str] = []
+    for root, dirs, files in os.walk(src):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        for name in files:
+            p = Path(root) / name
+            try:
+                if _TRIVY_IGNORE in taint.read_capped(p, cap):
+                    hits.append(p.relative_to(src).as_posix())
+            except (taint.TaintError, OSError):
+                continue
+    return sorted(hits)
+
+
 def scan_health(per_tool: dict[str, dict[str, Any]], lockfiles: int) -> dict[str, list[str]]:
     """Ways a tool can lose its output while the run still reports success. Each one
     has happened: Checkov's paths left every finding without an evidence window (21 of
@@ -292,8 +319,24 @@ def scan(paths: Paths, con: sqlite3.Connection, run_id: int, *,
             _record_tool(con, run_id, sc.name, summary.per_tool[sc.name])
 
     summary.health = scan_health(summary.per_tool, _lockfiles(src))
+    if "trivy" in summary.per_tool and (ignored := trivy_inline_ignores(src)):
+        shown = ", ".join(ignored[:5])
+        if len(ignored) > 5:
+            shown += f" and {len(ignored) - 5} more"
+        summary.health.setdefault("trivy", []).append(
+            f"{len(ignored)} file(s) carry trivy:ignore comments, which Trivy obeys and "
+            f"drops without a trace: {shown}")
+    # What the SCA tools scanned against. A clean result from a months-old database
+    # looks the same as a clean result from today's, so the age is kept with the run.
+    from . import vulndb
+    used = [t for t in summary.per_tool if t in vulndb.DB_OF_TOOL]
+    ages = vulndb.ages()
     with db.tx(con):
         db.set_health(con, run_id, "scan", summary.health)
+        if used:
+            db.update_manifest(con, run_id, lambda m: m.setdefault("vulndb", {}).update(
+                {vulndb.DB_OF_TOOL[t]: ages[vulndb.DB_OF_TOOL[t]] for t in used}))
+            db.set_health(con, run_id, "vulndb", vulndb.stale_warnings(ages, used))
     db.bump_producer_counts(con)
     return summary
 

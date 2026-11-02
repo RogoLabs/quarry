@@ -63,7 +63,9 @@ keys and a GitHub token.
 - No process that reads target bytes holds a credential. Clones are anonymous, with
   hooks, submodules and LFS smudge disabled.
 - Symlinks in the clone are recorded and destroyed. Target-supplied scanner configs and
-  inline suppressions are quarantined or ignored, never obeyed.
+  inline suppressions are quarantined or ignored, with one known exception: Trivy obeys
+  inline `trivy:ignore` comments and has no flag to stop it. A scan that finds any
+  lists the files on the run page.
 - Secrets are stored as a prefix plus SHA-256, including inside evidence windows.
 - The dashboard only answers to loopback Host headers, refuses cross-site POSTs, and
   renders bidi and zero-width characters from target code as visible tokens.
@@ -76,7 +78,7 @@ keys and a GitHub token.
   limits, and builds with `network: none`. Image pulls are the one step with network
   access. A build that needs the network fails and is recorded on the run page.
 
-The test suite (516 tests) asserts these against a hostile fixture repo and real
+The test suite (566 tests) asserts these against a hostile fixture repo and real
 `sandbox-exec`. A profile with no test is a comment.
 
 ## Requirements

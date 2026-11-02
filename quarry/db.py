@@ -13,6 +13,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from .cwe import normalise as normalise_cwe
+
 SCHEMA = Path(__file__).with_name("schema.sql")
 
 
@@ -129,7 +131,7 @@ def upsert_producer(con: sqlite3.Connection, tool: str, rule_id: str, **meta: An
              cwe              = COALESCE(excluded.cwe, producers.cwe),
              default_severity = COALESCE(excluded.default_severity, producers.default_severity),
              help_uri         = COALESCE(excluded.help_uri, producers.help_uri)""",
-        (pid, tool, rule_id, meta.get("name"), meta.get("cwe"),
+        (pid, tool, rule_id, meta.get("name"), normalise_cwe(meta.get("cwe")),
          meta.get("default_severity"), meta.get("help_uri")))
     return pid
 

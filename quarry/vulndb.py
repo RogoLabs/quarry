@@ -9,10 +9,12 @@ than a slogan.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import db
@@ -150,4 +152,91 @@ def status() -> dict[str, str]:
             continue
         total = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
         out[name] = f"{total / 1e6:.0f} MB"
+    return out
+
+
+# ------------------------------------------------------------------ age
+
+#: A database older than this is called out on the run page and in `doctor`. Trivy's
+#: own NextUpdate is 24 hours after UpdatedAt; a week is the point where a scan's
+#: "nothing found" stops being worth much, not a precise threshold.
+STALE_DAYS = 7
+#: Which database each scanner reads. Grype has a database but no adapter (decision A).
+DB_OF_TOOL = {"trivy": "trivy", "osv-scanner": "osv"}
+_GRYPE_BUILT = re.compile(r"_(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)_")
+
+
+def _parse_ts(text: str) -> datetime | None:
+    """ISO-8601 with any number of fractional digits (Trivy writes nanoseconds)."""
+    m = re.match(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$",
+                 text.strip())
+    if not m:
+        return None
+    frac = (m[2] or "")[:7]
+    tz = "+00:00" if m[3] in (None, "Z") else m[3]
+    try:
+        return datetime.fromisoformat(f"{m[1]}{frac}{tz}")
+    except ValueError:
+        return None
+
+
+def built_at(name: str, root: Path | None = None) -> tuple[datetime | None, str]:
+    """When a database's data was built, and what that is read from. Each tool records
+    it differently, so the basis travels with the time."""
+    import json
+    root = root or db_dir()
+    if name == "trivy":
+        p = root / "trivy" / "db" / "metadata.json"
+        try:
+            return _parse_ts(json.loads(p.read_text()).get("UpdatedAt", "")), \
+                "metadata.json UpdatedAt"
+        except (OSError, ValueError, AttributeError):
+            return None, "metadata.json missing"
+    if name == "grype":
+        p = root / "grype" / "6" / "import.json"
+        try:
+            m = _GRYPE_BUILT.search(json.loads(p.read_text()).get("source", ""))
+        except (OSError, ValueError, AttributeError):
+            return None, "import.json missing"
+        return (_parse_ts(m[1]) if m else None), "archive build time in import.json"
+    if name == "osv":
+        # OSV publishes per-ecosystem zips continuously, so the download time is close
+        # to the data's age. The oldest ecosystem is the one that matters.
+        zips = list((root / "osv").rglob("all.zip"))
+        if not zips:
+            return None, "no ecosystem zips"
+        oldest = min(z.stat().st_mtime for z in zips)
+        return datetime.fromtimestamp(oldest, timezone.utc), \
+            f"oldest of {len(zips)} ecosystem zip download times"
+    raise ValueError(f"unknown database {name!r}")
+
+
+def ages(now: datetime | None = None, root: Path | None = None) -> dict[str, dict]:
+    now = now or datetime.now(timezone.utc)
+    out = {}
+    for name in ("trivy", "grype", "osv"):
+        when, basis = built_at(name, root)
+        out[name] = {"built": when.isoformat() if when else None, "basis": basis,
+                     "age_days": round((now - when).total_seconds() / 86400, 1)
+                     if when else None}
+    return out
+
+
+def stale_warnings(by_db: dict[str, dict], tools: list[str]) -> dict[str, list[str]]:
+    """Health messages for the scanners in `tools`, keyed by tool, empty when fresh."""
+    out: dict[str, list[str]] = {}
+    for tool in tools:
+        name = DB_OF_TOOL.get(tool)
+        if name is None:
+            continue
+        a = by_db.get(name) or {}
+        if a.get("age_days") is None:
+            out[tool] = [f"{name} database build time unknown ({a.get('basis', '?')}); "
+                         f"run `quarry db sync`"]
+        elif a["age_days"] > STALE_DAYS:
+            out[tool] = [f"{name} database is {a['age_days']:.0f} days old at scan time "
+                         f"(over {STALE_DAYS}); its clean results may be stale. Run "
+                         f"`quarry db sync` and re-scan"]
+        else:
+            out[tool] = []
     return out

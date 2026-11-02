@@ -49,17 +49,28 @@ def db_sync(timeout: int = typer.Option(900)) -> None:
     for r in vulndb.sync_all(connection, timeout=timeout):
         mark = "[green]ok[/]" if r.ok else "[red]fail[/]"
         con_out.print(f"  {_e(f'{r.name:14s}')} {mark} {r.seconds:5.1f}s  {_e(r.detail)}")
-    con_out.print(vulndb.status())
+    con_out.print(_db_table())
 
 
 @db_app.command("status")
 def db_status() -> None:
-    """Show which vulnerability databases are present."""
+    """Show which vulnerability databases are present, and how old each one is."""
+    con_out.print(_db_table())
+
+
+def _db_table() -> Table:
     t = Table(show_header=True, header_style="bold")
-    t.add_column("database"); t.add_column("size")
+    t.add_column("database"); t.add_column("size"); t.add_column("built")
+    t.add_column("age"); t.add_column("read from")
+    ages = vulndb.ages()
     for k, v in vulndb.status().items():
-        t.add_row(_e(k), _e(v))
-    con_out.print(t)
+        a = ages.get(k, {})
+        days = a.get("age_days")
+        age = ("[dim]?[/]" if days is None else
+               f"[red]{days:.1f} d[/]" if days > vulndb.STALE_DAYS else f"{days:.1f} d")
+        t.add_row(_e(k), _e(v), _e((a.get("built") or "")[:19]), age,
+                  f"[dim]{_e(a.get('basis', ''))}[/]")
+    return t
 
 
 #: The only binds `serve` accepts. The dashboard has no authentication and its routes
@@ -264,6 +275,10 @@ def doctor() -> None:
     c.add_row("total spend", f"[green]${spend['c']:.4f}[/]")
     c.add_row("hosts contacted", _e(", ".join(h["destination"] for h in hosts) or "none"))
     con_out.print(c)
+
+    dbs = _db_table()
+    dbs.title = f"vulnerability databases (stale past {vulndb.STALE_DAYS} days)"
+    con_out.print(dbs)
 
     m = orchestrator.tool_manifest()
     t2 = Table(title="tools", show_header=True, header_style="bold")

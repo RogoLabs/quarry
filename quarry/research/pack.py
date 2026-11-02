@@ -51,12 +51,13 @@ class Pack:
     def tokens(self) -> int:
         return sum(f.tokens for f in self.files)
 
-    def render(self, include_data: bool = True) -> str:
+    def render(self, include_data: bool = True, tag: str = "") -> str:
         out = []
+        head = f"{tag} " if tag else ""
         for f in self.files:
             if f.kind == "data-summary" and not include_data:
                 continue
-            out.append(f"===== FILE: {f.path} =====\n{f.text}")
+            out.append(f"===== {head}FILE: {f.path} =====\n{f.text}")
         return "\n\n".join(out)
 
     def manifest(self) -> str:
@@ -177,10 +178,11 @@ class Subsystem:
     def tokens(self) -> int:
         return self.pack.tokens + int(len(self.repo_map) / CHARS_PER_TOKEN)
 
-    def render(self) -> str:
-        return (f"===== REPOSITORY MAP (orientation only — full source follows for "
-                f"the '{self.name}' subsystem) =====\n{self.repo_map}\n\n"
-                f"===== SUBSYSTEM: {self.name} =====\n{self.pack.render()}")
+    def render(self, tag: str = "") -> str:
+        head = f"{tag} " if tag else ""
+        return (f"===== {head}REPOSITORY MAP (orientation only; full source follows "
+                f"for the '{self.name}' subsystem) =====\n{self.repo_map}\n\n"
+                f"===== {head}SUBSYSTEM: {self.name} =====\n{self.pack.render(tag=tag)}")
 
 
 # Directories that are configuration for humans and tools, not attack surface. They
@@ -272,7 +274,7 @@ def _subsystem_key(rel: str, depth: int = 2) -> str:
 
 def pack_subsystems(root: Path, *, budget_tokens: int = 40_000,
                     profile_summary: str = "", include_tests: bool = False,
-                    ) -> list[Subsystem]:
+                    refused: list[tuple[str, str]] | None = None) -> list[Subsystem]:
     """Split a repo into review units that each fit a context.
 
     Whole-repo review is strictly better when it fits — `cve-validation-library` is
@@ -308,6 +310,14 @@ def pack_subsystems(root: Path, *, budget_tokens: int = 40_000,
         total = 0
         part = 0
         for f in files:
+            if f.tokens > room:
+                # A file bigger than a whole unit was admitted alone and then cut by the
+                # model's context window, so the review read part of it and said
+                # nothing about which part. Refused, and the caller says so.
+                if refused is not None:
+                    refused.append((f.path, f"~{f.tokens} tokens, over the {room}-token "
+                                            f"unit budget"))
+                continue
             if batch and total + f.tokens > room:
                 part += 1
                 units.append(Subsystem(f"{name} (part {part})",

@@ -31,7 +31,7 @@ MODELS = ["qwen3.6:27b", "devstral:24b", "granite4.2:30b"]   # three distinct fa
 
 class _Sub:
     """A subsystem stand-in: the refute pass only needs render() for the prompt."""
-    def render(self) -> str:
+    def render(self, tag: str = "") -> str:
         return "===== REPOSITORY =====\nconst x = 1\n"
 
 

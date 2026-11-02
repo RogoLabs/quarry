@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
+from ..cwe import probe_class
 from .validate import Candidate, ProbeEvidence, RunningTarget
 from .probes import (probe_broken_authz, probe_missing_rate_limit,
                      probe_auth_timing_oracle, probe_injection_observable,
@@ -127,7 +128,7 @@ def select_probe_lenses(prof, candidates: list[Candidate]):
         if not ok:
             skipped.append((lens.key, why))
             continue
-        matching = [c for c in candidates if c.cwe in lens.cwes]
+        matching = [c for c in candidates if probe_class(c.cwe) in lens.cwes]
         if not matching:
             skipped.append((lens.key, "profile supports it, but no surviving finding "
                                       f"with a CWE in {sorted(lens.cwes)}"))

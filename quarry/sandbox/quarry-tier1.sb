@@ -78,3 +78,8 @@
 (deny  file-write*)
 (allow file-write* (subpath (param "RUNDIR"))
                    (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr"))
+;;    Except the clone and the quarantine. A scanner that could write in src/ could
+;;    plant a link or a file that the unsandboxed parent then reads as evidence, or
+;;    change what the next scanner sees. Later rules win, so this narrows the allow.
+(deny  file-write* (subpath (string-append (param "RUNDIR") "/src"))
+                   (subpath (string-append (param "RUNDIR") "/quarantine")))

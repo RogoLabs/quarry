@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -77,6 +78,23 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1 << 16), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+_GITHUB_FORM = re.compile(r"^(?:[a-z+]+:/{2})?(?:git@)?(?:www\.)?github\.com[/:]", re.I)
+
+
+def canonical_target(target: str) -> str:
+    """The one spelling of a target that runs and finding ids are keyed on. A GitHub
+    repo in any form becomes `owner/repo`; any other URL loses a trailing `.git` or
+    `/`. finding_id hashes this string, so `o/r` and `https://github.com/o/r` used to
+    be different findings, and a verdict on one did not carry to the other.
+
+    Case is kept. GitHub resolves owner and repo case-insensitively, but the runs
+    already in the database are keyed on the case they were ingested with, and
+    lowercasing now would orphan their verdicts."""
+    t = target.strip().removesuffix("/").removesuffix(".git").removesuffix("/")
+    m = _GITHUB_FORM.match(t)
+    return t[m.end():] if m else t
 
 
 def _https_url(target: str) -> str:

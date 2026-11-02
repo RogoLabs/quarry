@@ -294,12 +294,14 @@ def extract_evidence(root: Path, rel: Path, line: int | None, *,
     `secrets` is unioned with every secret in the run's Gitleaks report (when `root`
     is a run volume's src/), so no caller can build a window that skips one.
     """
-    full = (root / rel)
+    # This runs in the unsandboxed parent, and Tier 1 scanners can write under src/,
+    # so a link planted there after the scrub must not be followed. The root is
+    # resolved here (it is Quarry's own path), and the open refuses a link in any
+    # component below it. A minified bundle over 8 MiB is not evidence either.
+    full = Path(os.path.realpath(root)) / rel
     try:
-        raw = full.read_bytes()
-    except (OSError, ValueError):
-        return None
-    if len(raw) > 8 * 1024 * 1024:      # a minified bundle is not evidence
+        raw = read_capped(full, 8 * 1024 * 1024)
+    except (TaintError, OSError, ValueError):
         return None
     file_sha = hashlib.sha256(raw).hexdigest()
     # Redact the whole file as decoded, before anything reshapes it: splitlines drops

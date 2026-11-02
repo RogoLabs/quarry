@@ -155,3 +155,20 @@ def test_scan_redacts_every_run_secret_whatever_the_tool_order(volume, tmp_path,
     for row in con.execute("SELECT message, raw_result FROM occurrences"):
         for text in (row["message"] or "", row["raw_result"]):
             assert KEY_A not in text and KEY_B not in text
+
+
+def test_evidence_is_not_read_through_a_link_planted_after_the_scrub(tmp_path):
+    """IMPROVEMENT-PLAN item 14. extract_evidence runs in the unsandboxed parent and
+    used read_bytes, which follows links, while Tier 1 lets a scanner write in src/."""
+    from quarry.taint import extract_evidence
+    secret = tmp_path / "home" / "id_rsa"
+    secret.parent.mkdir()
+    secret.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n")
+    src = tmp_path / "vol" / "src"
+    (src / "pkg").mkdir(parents=True)
+    (src / "app.py").write_text("x = 1\n")
+    (src / "planted.py").symlink_to(secret)
+    (src / "linkdir").symlink_to(secret.parent)
+    assert extract_evidence(src, Path("app.py"), 1) is not None
+    assert extract_evidence(src, Path("planted.py"), 1) is None
+    assert extract_evidence(src, Path("linkdir/id_rsa"), 1) is None

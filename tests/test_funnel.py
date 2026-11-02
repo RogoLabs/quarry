@@ -342,3 +342,31 @@ def test_operator_events_before_the_funnel_do_not_block_it(con):
     db.funnel(con, 1, occurrence_id=oid, stage="operator", action="kill",
               reason="dismissed", deterministic=False, actor="operator")
     funnel.run(con, 1)
+
+
+def test_a_secret_in_a_test_path_is_decided_on_its_value_not_its_path(con):
+    """IMPROVEMENT-PLAN item 9. Run 1 killed 38 Gitleaks hits under test paths by path
+    alone. A real key committed to tests/ is still a leak; a placeholder is not."""
+    real = add(con, "gitleaks", "aws-access-token", "tests/conftest.py", 4,
+               secret="AKIAQUARRYREALKEY123")
+    fixture = add(con, "gitleaks", "generic-api-key", "tests/test_api.py", 9,
+                  secret="changeme")
+    sast = add(con, "bandit", "B105", "tests/test_api.py", 9)
+    funnel.run(con, 1)
+    assert not [e for e in _events(con, real) if e[1] == "kill"]
+    assert ("local-dev-fixture", "kill") in _events(con, fixture)
+    assert ("path-class", "kill") in _events(con, sast)       # non-secrets: unchanged
+
+
+def test_adjacent_lines_across_a_decade_boundary_cluster(con):
+    """IMPROVEMENT-PLAN item 14. `line // 10` bucketing kept lines 9 and 10 apart."""
+    a = add(con, "bandit", "B608", "src/db.py", 9)
+    b = add(con, "opengrep", "python.sqli", "src/db.py", 10)
+    far = add(con, "opengrep", "python.other", "src/db.py", 40)
+    funnel.run(con, 1)
+    issue = con.execute("SELECT f.issue_id FROM findings f JOIN occurrences o "
+                        "ON o.finding_id=f.id WHERE o.id IN (?,?)", (a, b)).fetchall()
+    assert len({r[0] for r in issue}) == 1 and issue[0][0]
+    assert con.execute("SELECT f.issue_id FROM findings f JOIN occurrences o "
+                       "ON o.finding_id=f.id WHERE o.id=?", (far,)).fetchone()[0] is None
+    assert con.execute("SELECT target FROM issues").fetchone()[0] == "o/r"

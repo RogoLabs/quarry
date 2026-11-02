@@ -201,6 +201,17 @@ def strip_source(obj: Any, keys: tuple[str, ...] = ("snippet",)) -> Any:
     return obj
 
 
+def score_band(score: float) -> str:
+    """CVSS qualitative bands, which GitHub's security-severity mapping also uses."""
+    if score >= 9.0:
+        return "critical"
+    if score >= 7.0:
+        return "high"
+    if score >= 4.0:
+        return "medium"
+    return "low" if score > 0 else "none"
+
+
 def _sarif_severity(result: dict, props: dict) -> str:
     """GitHub's mapping (docs/PLAN §5): security-severity numeric wins, else level."""
     try:
@@ -208,12 +219,6 @@ def _sarif_severity(result: dict, props: dict) -> str:
     except (TypeError, ValueError):
         ss = None
     if ss is not None:
-        if ss >= 9.0:
-            return "critical"
-        if ss >= 7.0:
-            return "high"
-        if ss >= 4.0:
-            return "medium"
-        return "low"
+        return score_band(ss)
     return {"error": "high", "warning": "medium", "note": "low",
             "none": "info"}.get(result.get("level", "warning"), "medium")

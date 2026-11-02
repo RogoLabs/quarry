@@ -119,3 +119,20 @@ def test_persist_gives_same_rule_siblings_their_own_findings(tmp_path):
     summary = orchestrator.ScanSummary(1)
     orchestrator._persist(c, 1, "o/r", None, tmp_path, "bandit", recs, summary)
     assert c.execute("SELECT COUNT(DISTINCT finding_id) n FROM occurrences").fetchone()["n"] == 2
+
+
+@pytest.mark.parametrize("spelling", [
+    "CVEProject/cve-services", "https://github.com/CVEProject/cve-services",
+    "https://github.com/CVEProject/cve-services.git", "github.com/CVEProject/cve-services/",
+    "git@github.com:CVEProject/cve-services.git", "HTTPS://GitHub.com/CVEProject/cve-services"])
+def test_every_spelling_of_a_github_target_is_one_target(spelling):
+    """IMPROVEMENT-PLAN item 14. finding_id hashes the target string, so a run
+    ingested by URL had different ids from one ingested as owner/repo, and verdicts
+    did not carry between them."""
+    from quarry.ingest.clone import canonical_target
+    assert canonical_target(spelling) == "CVEProject/cve-services"
+
+
+def test_a_non_github_url_keeps_its_host():
+    from quarry.ingest.clone import canonical_target
+    assert canonical_target("https://gitlab.com/o/r.git") == "https://gitlab.com/o/r"

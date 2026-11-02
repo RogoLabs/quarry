@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 import statistics
 
+from ..cwe import probe_class
 from .validate import Candidate, ProbeEvidence, RunningTarget
 
 ExecFn = "Callable[[list[str]], tuple[int, str]]"
@@ -247,7 +248,7 @@ def probe_injection_observable(running: RunningTarget, candidate: Candidate,
     if not targets:
         return ProbeEvidence(reproduced=False, determinism="unknown",
                              summary="no route in the finding's file to inject into")
-    cwe = (candidate.cwe or "").upper()
+    cwe = probe_class(candidate.cwe) or ""
     exercised = False
     encoded_hit = None            # reflected, but safely encoded: positive evidence of safety
     for r in targets:
@@ -319,7 +320,7 @@ def probe_path_traversal_ssrf(running: RunningTarget, candidate: Candidate,
     if not targets:
         return ProbeEvidence(reproduced=False, determinism="unknown",
                              summary="no route in the finding's file to test")
-    cwe = (candidate.cwe or "").upper()
+    cwe = probe_class(candidate.cwe) or ""
     exercised = False
 
     if cwe == "CWE-22":

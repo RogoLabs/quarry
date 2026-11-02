@@ -7,7 +7,7 @@ from typing import Iterable
 
 from .. import taint
 from ..sandbox.spawn import rules_dir as _sandbox_rules_dir
-from .base import Record, Scanner, rel_or_none, sarif_records, strip_source
+from .base import Record, Scanner, rel_or_none, sarif_records, score_band, strip_source
 
 RULES_ENV = "QUARRY_RULES"
 
@@ -195,14 +195,20 @@ class OSVScanner(Scanner):
     def parse(self, out: Path, src: Path) -> Iterable[Record]:
         doc = taint.load_json(out)
         for res in (doc or {}).get("results", []):
+            # A manifest path that does not resolve inside the clone is dropped, as in
+            # every other adapter. It used to become ".", a finding on the repo root.
+            src_path = rel_or_none((res.get("source") or {}).get("path"), src)
+            if src_path is None:
+                continue
             for pkg in res.get("packages", []):
                 info = pkg.get("package") or {}
-                src_path = rel_or_none((res.get("source") or {}).get("path"), src) or "."
+                scores = _osv_group_scores(pkg)
                 for v in pkg.get("vulnerabilities", []):
-                    sev = "medium"
-                    for s in v.get("severity", []):
-                        if s.get("type") == "CVSS_V3":
-                            sev = "high"
+                    # osv-scanner's own max_severity for the alias group, a CVSS base
+                    # score. Any CVSS v3 vector used to read as "high", so an A:L-only
+                    # 5.3 sat beside a 9.8.
+                    score = scores.get(v.get("id"))
+                    sev = score_band(score) if score is not None else "unscored"
                     yield Record(
                         tool=self.name, rule_id=v.get("id", "?"), path=src_path,
                         message=taint.scrub_text(
@@ -212,6 +218,18 @@ class OSVScanner(Scanner):
                         raw={"package": info, "vuln_id": v.get("id"),
                              "aliases": v.get("aliases"), "purl": info.get("purl")},
                     )
+
+
+def _osv_group_scores(pkg: dict) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for g in pkg.get("groups") or []:
+        try:
+            score = float(g.get("max_severity"))
+        except (TypeError, ValueError):
+            continue
+        for vid in g.get("ids") or []:
+            out[vid] = max(score, out.get(vid, 0.0))
+    return out
 
 
 class TrivyFS(Scanner):

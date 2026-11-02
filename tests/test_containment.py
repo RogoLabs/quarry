@@ -165,6 +165,20 @@ def test_run_volume_is_writable(volume):
     assert (volume.mount / "out" / "ok").exists()
 
 
+def test_the_clone_and_quarantine_are_not_writable(volume):
+    """IMPROVEMENT-PLAN item 14. A scanner that can write in src/ can plant a link the
+    unsandboxed parent then reads as evidence, or change what the next scanner sees.
+    All seven scanners were run under this rule before it shipped and still succeed."""
+    for sub in ("src", "quarantine"):
+        (volume.mount / sub).mkdir(exist_ok=True)
+        target = volume.mount / sub / "planted"
+        r = tier1(volume.mount, ["/usr/bin/touch", str(target)], name=f"write-{sub}")
+        assert r.returncode != 0 and not target.exists(), f"a scanner wrote into {sub}/"
+    r = tier1(volume.mount, ["/bin/ln", "-s", "/etc/passwd", str(volume.mount / "src" / "l")],
+              name="link-src")
+    assert r.returncode != 0 and not (volume.mount / "src" / "l").is_symlink()
+
+
 def test_no_credential_env_is_inherited(volume):
     """env -i plus a fixed allowlist: a scanner sees no token even if the orchestrator has one."""
     os.environ["ANTHROPIC_API_KEY"] = "sk-ant-canary-value"

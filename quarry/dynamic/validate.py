@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .. import db
+from ..cwe import normalise as normalise_cwe, probe_class
 
 # CWE classes whose findings a running-target probe can actually decide: the effect is
 # observable from a loopback client (a response, a timing separation, a reflected
@@ -139,10 +140,9 @@ def register_runtime(rt: TargetRuntime) -> None:
 
 
 def _cwe_of(row: dict[str, Any]) -> str | None:
-    cwe = row.get("cwe")
-    if cwe and str(cwe).upper().startswith("CWE-"):
-        return str(cwe).upper()
-    return None
+    # Normalised on read as well as at ingest, so producers stored in the long form
+    # before ingest normalised them are still selected.
+    return normalise_cwe(row.get("cwe"))
 
 
 def select_candidates(con: sqlite3.Connection, run_id: int, *,
@@ -150,12 +150,15 @@ def select_candidates(con: sqlite3.Connection, run_id: int, *,
     """Live findings worth probing, best first.
 
     Only occurrences that survive the funnel (live_occurrences) are eligible, and only
-    those whose producer's CWE is in DYNAMICALLY_TESTABLE. Ordered by the producer's
+    those whose producer's CWE is in DYNAMICALLY_TESTABLE. Dependency findings
+    (the funnel's `sca-db` class) are left out: they sit on a lockfile, which has no
+    route, and both verdicts in the operator's DB were probes against poetry.lock that
+    could not run. Ordered by the producer's
     cross-repo precision (n_confirmed / n_adjudicated), so the probe budget goes to the
     rules that have earned it, then by occurrence id for stability."""
     rows = con.execute(
         """SELECT o.id AS occurrence_id, o.finding_id, o.path, o.start_line,
-                  o.message, o.producer_id, f.target, p.cwe,
+                  o.message, o.producer_id, f.target, p.cwe, p.tool, p.rule_id,
                   CASE WHEN p.n_adjudicated > 0
                        THEN CAST(p.n_confirmed AS REAL) / p.n_adjudicated ELSE 0 END AS precision
              FROM live_occurrences o
@@ -164,11 +167,14 @@ def select_candidates(con: sqlite3.Connection, run_id: int, *,
             WHERE o.run_id = ?
             ORDER BY precision DESC, o.id ASC""",
         (run_id,)).fetchall()
+    from ..funnel import independence_class
     out: list[Candidate] = []
     for r in rows:
         row = dict(r)
+        if independence_class(row["tool"], row["rule_id"]) == "sca-db":
+            continue
         cwe = _cwe_of(row)
-        if cwe not in DYNAMICALLY_TESTABLE:
+        if probe_class(cwe) not in DYNAMICALLY_TESTABLE:
             continue
         out.append(Candidate(
             finding_id=row["finding_id"], occurrence_id=row["occurrence_id"],
@@ -267,7 +273,7 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
     its routes, and record a verdict. Every target is torn down even on error."""
     from ..research.profile import profile_repo
     from .lenses import select_probe_lenses
-    from .routes import build_route_map, fetch_openapi_routes
+    from .routes import build_route_map, crawl_routes, fetch_openapi_routes
 
     rundir = Path(rundir)
     src = rundir / "src"
@@ -297,10 +303,15 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
         def exec_fn(argv):
             return runtime.probe_exec(running, argv)
         if enrich:
-            try:
-                rmap.add_all(fetch_openapi_routes(exec_fn, running.base_url))
-            except Exception:                       # enrichment is best-effort
-                pass
+            # Best-effort, and both read-only: a served OpenAPI document, then a bounded
+            # GET-only crawl. Neither knows a handler file, so each only adds to a static
+            # route it matches by (method, path); with mount prefixes resolved, that
+            # match now happens for routers mounted under a prefix.
+            for discover in (fetch_openapi_routes, crawl_routes):
+                try:
+                    rmap.add_all(discover(exec_fn, running.base_url))
+                except Exception:                   # enrichment is best-effort
+                    pass
         for lens, matching, _why in selected:
             for cand in matching:
                 routes = rmap.for_finding(cand.path)

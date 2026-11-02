@@ -86,9 +86,20 @@ def execute(con: sqlite3.Connection, rid: int, src: Path, *,
     models = json.loads(row["models"])
     prof = profile_repo(src)
     lens_by_key = {l.key: l for l in E.CATALOGUE}
+    refused: list[tuple[str, str]] = []
     subs = {s.name: s for s in pack_subsystems(src, budget_tokens=45_000,
-                                               profile_summary=prof.summary())}
+                                               profile_summary=prof.summary(),
+                                               refused=refused)}
+    for path, why in refused:
+        progress(f"  [refused] {taint.scrub_text(path, 120)}: {why}")
     _claim(con, rid)
+    # What answered, so a run can be reproduced: the Ollama version and each model's
+    # digest. A tag like qwen3-coder:30b is mutable; the digest is not.
+    prov = E.model_provenance(models)
+    prov["refused_files"] = [{"path": p, "why": w} for p, w in refused]
+    with db.tx(con):
+        db.update_manifest(con, row["run_id"],
+                           lambda m: m.setdefault("deep", {}).__setitem__(str(rid), prov))
     if deadline:
         con.execute("UPDATE research_runs SET deadline=? WHERE id=?",
                     (deadline.isoformat(timespec="seconds"), rid))
@@ -126,10 +137,12 @@ def execute(con: sqlite3.Connection, rid: int, src: Path, *,
                     "updated_at=datetime('now') WHERE id=?", (u["id"],))
         con.commit()
 
-        text = sub.render()
+        tag = E.new_tag()
+        text = sub.render(tag)
         t0 = time.time()
         try:
-            raw, meta = E.call(u["model"], E.hunt_prompt(text, lens, sub.pack.manifest()),
+            raw, meta = E.call(u["model"],
+                               E.hunt_prompt(text, lens, sub.pack.manifest(), tag),
                                E.FINDING_SCHEMA, num_ctx=num_ctx, num_predict=2200)
             found = E.parse_findings(raw, lens.key, u["model"])
             for f in found:
@@ -170,6 +183,14 @@ def _persist(con, rid: int, run_id: int, unit, found: list[E.Finding], src: Path
     from ..taint import extract_evidence, finding_id
     target = con.execute("SELECT target, git_sha FROM runs WHERE id=?",
                          (run_id,)).fetchone()
+    # Model output is redacted like an evidence window. The secrets lens asks for
+    # exactly the lines that hold secrets, and the quote and raw_result went to the DB
+    # and the digest verbatim. Verification already ran on the unredacted quote.
+    secrets = taint.run_secrets(src.parent)
+    for f in found:
+        for k in ("title", "quote", "reasoning", "attacker_control",
+                  "why_it_might_be_wrong"):
+            setattr(f, k, taint.redact_in(getattr(f, k) or "", secrets))
     with db.tx(con):
         for f in found:
             # `file` is model output, i.e. target-influenced text. "/etc/hosts" or
@@ -248,6 +269,7 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
     autocommit), so an interrupted pass resumes at the (finding, model) pair rather than
     restarting the whole run."""
     out = {"refuted": 0, "survived": 0}
+    secrets = taint.run_secrets(src.parent)
     pending = con.execute(
         "SELECT COUNT(*) FROM research_findings WHERE research_id=? AND refutations='[]'",
         (rid,)).fetchone()[0]
@@ -284,11 +306,16 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
                           why_it_might_be_wrong=r["self_critique"] or "",
                           quote_verified=bool(r["quote_verified"]),
                           refutations=json.loads(r["refutations"]))
-            text = sub.render()
+            tag = E.new_tag()
+            text = sub.render(tag)
             try:
-                raw, _ = E.call(m, E.refute_prompt(text, f), E.REFUTE_SCHEMA,
+                raw, _ = E.call(m, E.refute_prompt(text, f, tag), E.REFUTE_SCHEMA,
                                 num_ctx=65536, num_predict=700)
-                f.refutations.append({"model": m, **json.loads(raw)})
+                rec = E.refutation_record(m, raw)
+                for k in ("reason", "counter_quote"):
+                    if k in rec:
+                        rec[k] = taint.redact_in(str(rec[k]), secrets)
+                f.refutations.append(rec)
             except Exception as e:                      # noqa: BLE001
                 f.refutations.append({"model": m, "verdict": "error",
                                       "reason": str(e)[:200]})

@@ -184,3 +184,57 @@ def test_a_target_that_will_not_come_up_is_recorded_on_the_run(scanned):
 
     run_validation(con, 1, rundir, FakeRuntime({"/secret": "200"}))
     assert db.read_manifest(con, 1)["health"]["validate"] == {}
+
+
+def _candidate_ids(con):
+    from quarry.dynamic.validate import select_candidates
+    return [c.finding_id for c in select_candidates(con, 1)]
+
+
+def _add_finding(con, fid, tool, rule, cwe, path, line=2):
+    with db.tx(con):
+        pid = db.upsert_producer(con, tool, rule, cwe=cwe)
+        con.execute("INSERT INTO findings (id,target,path,producer_id,first_seen_run,"
+                    "last_seen_run) VALUES (?,?,?,?,1,1)", (fid, "o/r", path, pid))
+        con.execute("INSERT INTO occurrences (run_id,finding_id,producer_id,path,"
+                    "start_line,message) VALUES (1,?,?,?,?,'m')", (fid, pid, path, line))
+
+
+def test_a_long_form_cwe_is_selected_and_stored_short(scanned):
+    """IMPROVEMENT-PLAN item 10. Opengrep tags read 'CWE-22: Improper Limitation...',
+    which never equalled 'CWE-22', so no Opengrep finding reached Layer 3."""
+    con, _ = scanned
+    _add_finding(con, "f-trav", "opengrep", "path-join",
+                 "CWE-22: Improper Limitation of a Pathname to a Restricted Directory",
+                 "app.py")
+    assert "f-trav" in _candidate_ids(con)
+    assert con.execute("SELECT cwe FROM producers WHERE id='opengrep:path-join'"
+                       ).fetchone()[0] == "CWE-22"
+    # A producer stored in the long form by an older build is still selected.
+    con.execute("UPDATE producers SET cwe='CWE-22: Improper Limitation' "
+                "WHERE id='opengrep:path-join'")
+    from quarry.dynamic.validate import select_candidates
+    trav = [c for c in select_candidates(con, 1) if c.finding_id == "f-trav"]
+    assert [c.cwe for c in trav] == ["CWE-22"]          # what the verdict will carry
+
+
+def test_cwe_78_reaches_the_command_injection_probe(scanned):
+    from quarry.cwe import probe_class
+    from quarry.dynamic.lenses import CATALOGUE
+    con, _ = scanned
+    _add_finding(con, "f-cmd", "bandit", "B602", "CWE-78", "app.py")
+    cands = [c for c in __import__("quarry.dynamic.validate", fromlist=["x"])
+             .select_candidates(con, 1) if c.finding_id == "f-cmd"]
+    assert cands and cands[0].cwe == "CWE-78"            # stored as the scanner said
+    assert any(probe_class(cands[0].cwe) in lens.cwes for lens in CATALOGUE)
+
+
+def test_dependency_findings_are_not_probe_candidates(scanned):
+    """IMPROVEMENT-PLAN item 11. Both verdicts in the DB were probes against
+    poetry.lock: no route, nothing decided, two of the 50-candidate budget spent."""
+    con, _ = scanned
+    _add_finding(con, "f-osv", "osv-scanner", "GHSA-xxxx", "CWE-22", "poetry.lock", 0)
+    _add_finding(con, "f-trivy", "trivy", "CVE-2024-1", "CWE-400", "poetry.lock", 0)
+    ids = _candidate_ids(con)
+    assert "f-osv" not in ids and "f-trivy" not in ids
+    assert "f-secret" in ids

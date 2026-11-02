@@ -12,9 +12,10 @@ it came from:
                surfaced.
 
 Static is required under any configuration, because the finding-to-route link is itself
-static. The others are added behind the same RouteSource interface and merged by
-(method, path). This module ships the static source and the map; openapi and crawl sources
-plug in next.
+static. The others are merged into it by (method, path), which only works when the static
+path is the one the server actually answers on, so static extraction resolves mount
+prefixes: FastAPI `APIRouter(prefix=)` and `include_router`, Flask `url_prefix` and
+`register_blueprint`, Express `app.use` with `require` or `import`.
 """
 from __future__ import annotations
 
@@ -25,17 +26,48 @@ from typing import Protocol
 
 METHODS = ("get", "post", "put", "patch", "delete")
 
-# Express / JS: app.get('/x', ...), router.post("/x", ...)
+# Express / JS: app.get('/x', ...), router.post("/x", ...). The object is captured so a
+# route on a mounted router picks up its mount prefix.
 _JS_ROUTE = re.compile(
-    r"\b(?:app|router|r)\.(get|post|put|patch|delete)\s*\(\s*[\"'`]([^\"'`]+)[\"'`]",
-    re.I)
+    r"\b(\w+)\.(get|post|put|patch|delete)\s*\(\s*[\"'`]([^\"'`]+)[\"'`]", re.I)
+# The objects a JS route may be declared on: the common names, plus any variable the
+# file binds to express.Router() / Router(). Not every `x.get("/...")`, because
+# `axios.get("/api/x")` in client code is a request, not a route.
+_JS_ROUTER_NAMES = {"app", "router", "r"}
+_JS_ROUTER_VAR = re.compile(r"(?:const|let|var)\s+(\w+)\s*=\s*(?:express\.)?Router\s*\(")
+_JS_REQUIRE = re.compile(
+    r"(?:const|let|var)\s+(\w+)\s*=\s*require\(\s*[\"'](\.[^\"']+)[\"']\s*\)"
+    r"|import\s+(\w+)\s+from\s+[\"'](\.[^\"']+)[\"']")
+# app.use('/api', usersRouter) and app.use('/api', require('./routes/users'))
+_JS_USE = re.compile(
+    r"\b(\w+)\.use\s*\(\s*[\"'`]([^\"'`]+)[\"'`]\s*,\s*"
+    r"(?:(\w+)\s*[,)]|require\(\s*[\"'](\.[^\"']+)[\"']\s*\))")
 # FastAPI / decorator style: @app.get("/x"), @router.post("/x")
 _PY_DECOR = re.compile(
-    r"@(?:\w+)\.(get|post|put|patch|delete)\s*\(\s*[\"']([^\"']+)[\"']", re.I)
+    r"@(\w+)\.(get|post|put|patch|delete)\s*\(\s*[\"']([^\"']+)[\"']", re.I)
 # Flask / Django-ish: @app.route("/x", methods=["GET","POST"])
 _PY_ROUTE = re.compile(
-    r"@(?:\w+)\.route\s*\(\s*[\"']([^\"']+)[\"'](?:[^)]*methods\s*=\s*\[([^\]]*)\])?",
+    r"@(\w+)\.route\s*\(\s*[\"']([^\"']+)[\"'](?:[^)]*methods\s*=\s*\[([^\]]*)\])?",
     re.I)
+# router = APIRouter(prefix="/users"), bp = Blueprint("users", __name__, url_prefix="/u")
+_PY_ROUTER = re.compile(r"(\w+)\s*=\s*(APIRouter|Blueprint)\s*\(([^)]*)\)")
+# app.include_router(users.router, prefix="/api"), app.register_blueprint(bp, url_prefix=)
+_PY_MOUNT = re.compile(
+    r"\b(\w+)\.(include_router|register_blueprint)\s*\(\s*([\w.]+)\s*(?:,([^)]*))?\)")
+_PY_FROM = re.compile(r"^\s*from\s+([\w.]+)\s+import\s+\(?([^)\n]+)\)?", re.M)
+_PY_IMPORT = re.compile(r"^\s*import\s+([\w.]+)(?:\s+as\s+(\w+))?", re.M)
+
+
+def _kwarg(args: str | None, name: str) -> str | None:
+    m = re.search(rf"\b{name}\s*=\s*[\"']([^\"']*)[\"']", args or "")
+    return m[1] if m else None
+
+
+def _join(*parts: str) -> str:
+    """Join URL path pieces with exactly one slash between them; "" pieces vanish."""
+    segs = [p.strip("/") for p in parts if p and p.strip("/")]
+    return "/" + "/".join(segs) if segs else "/"
+
 
 _SRC_EXTS = (".js", ".ts", ".mjs", ".cjs", ".jsx", ".tsx", ".py")
 _SKIP = {"node_modules", ".git", "dist", "build", "venv", ".venv", "__pycache__",
@@ -75,17 +107,27 @@ class StaticRouteSource:
     max_file_bytes: int = 400_000
 
     def discover(self, src: Path) -> list[Route]:
+        """Two passes. First every file is read for its routes, its router objects and
+        what it mounts; then each route gets the prefixes of every mount that reaches
+        its router. Routes on a mounted router used to keep their bare path, so probes
+        hit /users instead of /api/users and read 404 as "handled"."""
         src = src.resolve()
-        out: list[Route] = []
+        texts: dict[str, str] = {}
         for p in self._files(src):
             try:
                 if p.stat().st_size > self.max_file_bytes:
                     continue
-                text = p.read_text(errors="replace")
+                texts[str(p.relative_to(src))] = p.read_text(errors="replace")
             except OSError:
                 continue
-            rel = str(p.relative_to(src))
-            out.extend(self._routes_in(text, rel))
+        mounts = _Mounts(texts)
+        out: list[Route] = []
+        for rel, text in texts.items():
+            for obj, method, path in self._routes_in(text, rel):
+                for prefix in mounts.prefixes(rel, obj):
+                    full = _join(prefix, path) if prefix else path
+                    out.append(Route(method, full, rel, "static",
+                                     params=_path_params(full)))
         # stable, de-duplicated
         seen: dict[tuple, Route] = {}
         for r in out:
@@ -100,27 +142,155 @@ class StaticRouteSource:
                 if Path(name).suffix.lower() in _SRC_EXTS:
                     yield Path(dp) / name
 
-    def _routes_in(self, text: str, rel: str) -> list[Route]:
-        found: list[Route] = []
-        for m in _JS_ROUTE.finditer(text):
-            found.append(Route(m.group(1).upper(), m.group(2), rel, "static",
-                               params=_path_params(m.group(2))))
+    def _routes_in(self, text: str, rel: str) -> list[tuple[str, str, str]]:
+        """(object, METHOD, path) for every route declared in one file."""
+        found: list[tuple[str, str, str]] = []
+        if not rel.endswith(".py"):
+            routers = _JS_ROUTER_NAMES | set(_JS_ROUTER_VAR.findall(text))
+            for m in _JS_ROUTE.finditer(text):
+                if m[1] in routers:
+                    found.append((m[1], m[2].upper(), m[3]))
+            return found
         for m in _PY_DECOR.finditer(text):
-            found.append(Route(m.group(1).upper(), m.group(2), rel, "static",
-                               params=_path_params(m.group(2))))
+            found.append((m[1], m[2].upper(), m[3]))
         for m in _PY_ROUTE.finditer(text):
-            path = m.group(1)
-            methods = m.group(2)
+            path, methods = m[2], m[3]
             if methods:
                 verbs = [v.strip().strip("\"'").upper()
                          for v in methods.split(",") if v.strip()]
             else:
                 verbs = ["GET"]               # Flask defaults to GET
-            for v in verbs:
-                if v.lower() in METHODS:
-                    found.append(Route(v, path, rel, "static",
-                                       params=_path_params(path)))
+            found.extend((m[1], v, path) for v in verbs if v.lower() in METHODS)
         return found
+
+
+class _Mounts:
+    """Where each router object is mounted, resolved across files. A mount whose target
+    cannot be pinned to exactly one file is ignored rather than guessed, so a route is
+    never given a prefix that belongs to a different router."""
+
+    def __init__(self, texts: dict[str, str]):
+        self.texts = texts
+        # (file, obj) -> its own prefix: APIRouter(prefix=) or Blueprint(url_prefix=)
+        self.local: dict[tuple[str, str], str] = {}
+        # (target file, target obj or None) -> [(mounting file, mounting obj, prefix,
+        #                                         replaces the target's own prefix)]
+        self.into: dict[tuple[str, str | None], list[tuple[str, str, str, bool]]] = {}
+        for rel, text in texts.items():
+            if rel.endswith(".py"):
+                self._python(rel, text)
+            else:
+                self._js(rel, text)
+
+    # -- parsing -----------------------------------------------------------
+    def _python(self, rel: str, text: str) -> None:
+        for m in _PY_ROUTER.finditer(text):
+            kw = "prefix" if m[2] == "APIRouter" else "url_prefix"
+            self.local[(rel, m[1])] = _kwarg(m[3], kw) or ""
+        names = self._py_imports(rel, text)
+        for m in _PY_MOUNT.finditer(text):
+            target = self._py_target(rel, m[3], names)
+            if target is None:
+                continue
+            if m[2] == "include_router":       # FastAPI prepends to the router's prefix
+                prefix, replaces = _kwarg(m[4], "prefix") or "", False
+            else:                              # Flask: url_prefix= replaces the blueprint's
+                prefix = _kwarg(m[4], "url_prefix")
+                replaces = prefix is not None
+                prefix = prefix or ""
+            self.into.setdefault(target, []).append((rel, m[1], prefix, replaces))
+
+    def _py_imports(self, rel: str, text: str) -> dict[str, tuple[str, str | None]]:
+        """Local name -> (module, attribute or None) for what a file imports."""
+        names: dict[str, tuple[str, str | None]] = {}
+        for m in _PY_IMPORT.finditer(text):
+            names[m[2] or m[1].split(".")[0]] = (m[1], None)
+        for m in _PY_FROM.finditer(text):
+            for part in m[2].split(","):
+                bits = part.split()
+                if not bits:
+                    continue
+                alias = bits[2] if len(bits) == 3 and bits[1] == "as" else bits[0]
+                names[alias] = (m[1], bits[0])
+        return names
+
+    def _py_target(self, rel: str, expr: str, names) -> tuple[str, str] | None:
+        head, _, attr = expr.partition(".")
+        if not attr:
+            if (rel, head) in self.local:
+                return rel, head
+            if head not in names:
+                return None
+            mod, name = names[head]
+            f = self._py_module(rel, mod)      # from .users import router [as x]
+            return (f, name) if f and name else None
+        if head not in names:
+            return None
+        mod, name = names[head]                # from .routers import users; users.router
+        f = self._py_module(rel, f"{mod}.{name}" if name else mod)
+        return (f, attr) if f else None
+
+    def _py_module(self, rel: str, mod: str) -> str | None:
+        dots = len(mod) - len(mod.lstrip("."))
+        parts = [p for p in mod.lstrip(".").split(".") if p]
+        if dots:
+            base = Path(rel).parent
+            for _ in range(dots - 1):
+                base = base.parent
+            stem = (base / Path(*parts)) if parts else base
+            cands = [f"{stem}.py", f"{stem}/__init__.py"]
+            hits = [c.removeprefix("./") for c in cands
+                    if c.removeprefix("./") in self.texts]
+        else:
+            tail = "/".join(parts)
+            hits = [f for f in self.texts
+                    if f == f"{tail}.py" or f.endswith(f"/{tail}.py")
+                    or f == f"{tail}/__init__.py" or f.endswith(f"/{tail}/__init__.py")]
+        return hits[0] if len(hits) == 1 else None
+
+    def _js(self, rel: str, text: str) -> None:
+        req = {}
+        for m in _JS_REQUIRE.finditer(text):
+            var, spec = (m[1], m[2]) if m[1] else (m[3], m[4])
+            req[var] = spec
+        local = set(_JS_ROUTER_VAR.findall(text))
+        for m in _JS_USE.finditer(text):
+            var, spec = m[3], m[4]
+            if var and var in local:
+                target = (rel, var)
+            else:
+                spec = spec or req.get(var or "")
+                f = self._js_module(rel, spec) if spec else None
+                if f is None:
+                    continue
+                target = (f, None)
+            self.into.setdefault(target, []).append((rel, m[1], m[2], False))
+
+    def _js_module(self, rel: str, spec: str) -> str | None:
+        import posixpath
+        base = posixpath.normpath(posixpath.join(posixpath.dirname(rel), spec))
+        for ext in ("", ".js", ".ts", ".mjs", ".cjs", "/index.js", "/index.ts"):
+            if f"{base}{ext}" in self.texts:
+                return f"{base}{ext}"
+        return None
+
+    # -- resolution ----------------------------------------------------------
+    def prefixes(self, rel: str, obj: str, _seen: frozenset = frozenset()) -> list[str]:
+        """Every full prefix a route on `obj` in `rel` is served under. [""] when it is
+        not mounted anywhere, which is the old behaviour."""
+        key = (rel, obj)
+        if key in _seen:
+            return [""]
+        own = self.local.get(key, "")
+        mounts = self.into.get(key, []) + (
+            self.into.get((rel, None), []) if obj not in ("app",) else [])
+        if not mounts:
+            return [own]
+        out = []
+        for frm, frm_obj, prefix, replaces in mounts:
+            for outer in self.prefixes(frm, frm_obj, _seen | {key}):
+                out.append(_join(outer, prefix) if replaces else _join(outer, prefix, own))
+        return sorted(set(out))
 
 
 def _path_params(path: str) -> tuple[str, ...]:
