@@ -90,6 +90,9 @@ which writes a fresh document from an allowlist rather than editing the author's
 `internal: true` network, no host port publishing, binds only inside the clone,
 dropped capabilities, network-less builds, and interpolation under a scrubbed
 environment. A live test proves a sidecar reaches the target but not the internet.
+Network-less builds turned out to rule out most real targets, whose Dockerfiles install
+dependencies in RUN steps, so `--build-network` lets the build (and only the build)
+reach the network, and the run page records that it did.
 The sandbox-exec run-command runtime remains a possible narrow add-on behind the same
 `TargetRuntime` interface, not the primary.
 

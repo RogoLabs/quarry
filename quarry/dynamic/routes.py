@@ -15,7 +15,8 @@ Static is required under any configuration, because the finding-to-route link is
 static. The others are merged into it by (method, path), which only works when the static
 path is the one the server actually answers on, so static extraction resolves mount
 prefixes: FastAPI `APIRouter(prefix=)` and `include_router`, Flask `url_prefix` and
-`register_blueprint`, Express `app.use` with `require` or `import`.
+`register_blueprint`, Flask-RESTX `Namespace`, `Api(prefix=)` and `add_namespace`, Express
+`app.use` with `require` or `import`.
 """
 from __future__ import annotations
 
@@ -45,17 +46,85 @@ _JS_USE = re.compile(
 # FastAPI / decorator style: @app.get("/x"), @router.post("/x")
 _PY_DECOR = re.compile(
     r"@(\w+)\.(get|post|put|patch|delete)\s*\(\s*[\"']([^\"']+)[\"']", re.I)
-# Flask / Django-ish: @app.route("/x", methods=["GET","POST"])
-_PY_ROUTE = re.compile(
-    r"@(\w+)\.route\s*\(\s*[\"']([^\"']+)[\"'](?:[^)]*methods\s*=\s*\[([^\]]*)\])?",
-    re.I)
+# Flask: @app.route("/x", methods=["GET","POST"]) on a function. Flask-RESTX and
+# flask-smorest: @ns.route("/x", "/y") on a Resource or MethodView class, whose methods
+# are the class's get/post/... functions. The arguments are read with _call_args.
+_PY_ROUTE = re.compile(r"@(\w+)\.route\s*\(")
+_PY_STR_ARG = re.compile(r"\s*[\"']([^\"']*)[\"']\s*(?:,|$)")
+_PY_METHODS = re.compile(r"\bmethods\s*=\s*[\[(]([^\])]*)[\])]")
+_PY_DECORATED = re.compile(r"^([ \t]*)(?:async[ \t]+)?(def|class)[ \t]+\w+", re.M)
+_PY_VERB_DEF = re.compile(
+    r"^([ \t]+)(?:async[ \t]+)?def[ \t]+(get|post|put|patch|delete)\s*\(", re.M)
+# ns = Namespace("users", path="/u"); api = Api(blueprint, prefix="/v1")
+_PY_NAMESPACE = re.compile(r"(\w+)\s*=\s*Namespace\s*\(")
+_PY_API = re.compile(r"(\w+)\s*=\s*Api\s*\(")
 # router = APIRouter(prefix="/users"), bp = Blueprint("users", __name__, url_prefix="/u")
 _PY_ROUTER = re.compile(r"(\w+)\s*=\s*(APIRouter|Blueprint)\s*\(([^)]*)\)")
-# app.include_router(users.router, prefix="/api"), app.register_blueprint(bp, url_prefix=)
+# app.include_router(users.router, prefix="/api"), app.register_blueprint(bp, url_prefix=),
+# api.add_namespace(users.ns, path="/users")
 _PY_MOUNT = re.compile(
-    r"\b(\w+)\.(include_router|register_blueprint)\s*\(\s*([\w.]+)\s*(?:,([^)]*))?\)")
+    r"\b(\w+)\.(include_router|register_blueprint|add_namespace)\s*\(\s*([\w.]+)\s*"
+    r"(?:,([^)]*))?\)")
 _PY_FROM = re.compile(r"^\s*from\s+([\w.]+)\s+import\s+\(?([^)\n]+)\)?", re.M)
 _PY_IMPORT = re.compile(r"^\s*import\s+([\w.]+)(?:\s+as\s+(\w+))?", re.M)
+
+
+# One path parameter in any framework's syntax: Flask <name> and <converter:name> (with
+# converter arguments too), OpenAPI and FastAPI {name} and {name:path}, Express :name.
+# Shared with the probes, which substitute a value for each one.
+PATH_PARAM = re.compile(r"<(?:[^<>:]+:)?(\w+)>|\{(\w+)(?::[^}]*)?\}|:(\w+)")
+
+
+def _call_args(text: str, open_paren: int) -> str:
+    """The text between the parenthesis at `open_paren` and its match, skipping string
+    literals. Constructor calls nest (`Api(bp, version=version("x"))`), which a `[^)]*`
+    pattern stops inside."""
+    depth, i, quote = 0, open_paren, ""
+    while i < len(text):
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 1
+            elif c == quote:
+                quote = ""
+        elif c in "\"'":
+            quote = c
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_paren + 1:i]
+        i += 1
+    return text[open_paren + 1:]
+
+
+def _str_args(args: str) -> list[str]:
+    """The leading positional string literals of a call's arguments."""
+    out, pos = [], 0
+    while (m := _PY_STR_ARG.match(args, pos)):
+        out.append(m[1])
+        pos = m.end()
+    return out
+
+
+def _class_verbs(text: str, start: int, indent: str) -> list[str]:
+    """HTTP verbs a class defines as methods: its body runs from the line after `start`
+    until the next non-blank line indented no deeper than the class itself."""
+    lines = text[start:].splitlines()[1:]
+    body = []
+    for line in lines:
+        if line.strip() and not line.lstrip().startswith("#") and \
+                len(line) - len(line.lstrip()) <= len(indent):
+            break
+        body.append(line)
+    code = [ln for ln in body if ln.strip() and not ln.lstrip().startswith("#")]
+    if not code:
+        return []
+    depth = len(code[0]) - len(code[0].lstrip())     # the class body's own indent
+    found = {m[2].lower() for m in _PY_VERB_DEF.finditer("\n".join(body))
+             if len(m[1]) == depth}                  # not a function nested in a method
+    return [v.upper() for v in METHODS if v in found]
 
 
 def _kwarg(args: str | None, name: str) -> str | None:
@@ -89,8 +158,9 @@ class Route:
 
 
 def _norm_path(path: str) -> str:
-    """Normalise path-param syntax so :id, {id} and <id> compare equal across sources."""
-    p = re.sub(r"[:{<]\w+[}>]?", "{}", path)
+    """Normalise path-param syntax so :id, {id}, <id> and <int:id> compare equal across
+    sources."""
+    p = PATH_PARAM.sub("{}", path)
     return "/" + p.strip("/")
 
 
@@ -154,13 +224,20 @@ class StaticRouteSource:
         for m in _PY_DECOR.finditer(text):
             found.append((m[1], m[2].upper(), m[3]))
         for m in _PY_ROUTE.finditer(text):
-            path, methods = m[2], m[3]
-            if methods:
+            args = _call_args(text, m.end() - 1)
+            paths = _str_args(args)
+            target = _PY_DECORATED.search(text, m.end())
+            if not paths or target is None:
+                continue
+            if target[2] == "class":           # a Resource: its methods are the verbs
+                verbs = _class_verbs(text, target.start(), target[1])
+            elif (meth := _PY_METHODS.search(args)):
                 verbs = [v.strip().strip("\"'").upper()
-                         for v in methods.split(",") if v.strip()]
+                         for v in meth[1].split(",") if v.strip()]
             else:
                 verbs = ["GET"]               # Flask defaults to GET
-            found.extend((m[1], v, path) for v in verbs if v.lower() in METHODS)
+            found.extend((m[1], v, path) for path in paths
+                         for v in verbs if v.lower() in METHODS)
         return found
 
 
@@ -187,15 +264,31 @@ class _Mounts:
         for m in _PY_ROUTER.finditer(text):
             kw = "prefix" if m[2] == "APIRouter" else "url_prefix"
             self.local[(rel, m[1])] = _kwarg(m[3], kw) or ""
+        for m in _PY_NAMESPACE.finditer(text):
+            # A RESTX namespace is served under path=, or /<name> when none is given.
+            args = _call_args(text, m.end() - 1)
+            name = (_str_args(args) or [""])[0]
+            path = _kwarg(args, "path")
+            self.local[(rel, m[1])] = path if path is not None else _join(name)
         names = self._py_imports(rel, text)
+        for m in _PY_API.finditer(text):
+            # Api(app_or_blueprint, prefix=): the Api is mounted on its first argument.
+            args = _call_args(text, m.end() - 1)
+            host = re.match(r"\s*([A-Za-z_][\w.]*)\s*(?:,|$)", args)
+            if host is None:
+                continue
+            frm = self._py_target(rel, host[1], names) or (rel, host[1])
+            self.into.setdefault((rel, m[1]), []).append(
+                (frm[0], frm[1], _kwarg(args, "prefix") or "", False))
         for m in _PY_MOUNT.finditer(text):
             target = self._py_target(rel, m[3], names)
             if target is None:
                 continue
             if m[2] == "include_router":       # FastAPI prepends to the router's prefix
                 prefix, replaces = _kwarg(m[4], "prefix") or "", False
-            else:                              # Flask: url_prefix= replaces the blueprint's
-                prefix = _kwarg(m[4], "url_prefix")
+            else:                              # Flask url_prefix= and RESTX path= replace
+                kw = "url_prefix" if m[2] == "register_blueprint" else "path"
+                prefix = _kwarg(m[4], kw)
                 replaces = prefix is not None
                 prefix = prefix or ""
             self.into.setdefault(target, []).append((rel, m[1], prefix, replaces))
@@ -294,7 +387,7 @@ class _Mounts:
 
 
 def _path_params(path: str) -> tuple[str, ...]:
-    return tuple(re.findall(r"[:{<](\w+)[}>]?", path))
+    return tuple(next(g for g in m.groups() if g) for m in PATH_PARAM.finditer(path))
 
 
 @dataclass
@@ -353,6 +446,28 @@ def build_route_map(src: Path, sources: list[RouteSource] | None = None) -> Rout
 
 _OPENAPI_FILES = ("openapi.json", "openapi.yaml", "openapi.yml",
                   "swagger.json", "swagger.yaml", "swagger.yml")
+# Committed specs are looked for this deep, outside test and example trees, so a fixture
+# spec for some other service is not read as this one's. VulnLookup keeps its generated
+# swagger.json at docs/_static/files/.
+_OPENAPI_MAX_DEPTH = 4
+_OPENAPI_MAX_BYTES = 8_000_000
+_OPENAPI_SKIP = _SKIP | {"test", "tests", "testdata", "fixtures", "examples", "example",
+                         "e2e", "mocks"}
+
+
+def _base_path(doc: dict) -> str:
+    """The path every operation is served under: Swagger 2 `basePath`, or the path of
+    OpenAPI 3's first server URL (absolute or relative). Flask-RESTX on a blueprint
+    writes `basePath: /api` and keys its paths without it."""
+    if isinstance(doc.get("basePath"), str):
+        return doc["basePath"]
+    servers = doc.get("servers")
+    if isinstance(servers, list) and servers and isinstance(servers[0], dict):
+        from urllib.parse import urlparse
+        url = str(servers[0].get("url") or "")
+        if "{" not in url:                     # a templated server has no fixed path
+            return urlparse(url).path if "://" in url else url
+    return ""
 
 
 def _security_required(sec) -> bool | None:
@@ -381,6 +496,7 @@ def routes_from_openapi(doc: dict) -> list[Route]:
         return []
     global_sec = doc.get("security")
     global_security = _security_required(global_sec) if global_sec is not None else False
+    base = _base_path(doc)
     out: list[Route] = []
     for path, item in paths.items():
         if not isinstance(item, dict):
@@ -393,31 +509,45 @@ def routes_from_openapi(doc: dict) -> list[Route]:
             params = tuple(
                 p.get("name") for p in op.get("parameters", []) or []
                 if isinstance(p, dict) and p.get("in") == "path" and p.get("name"))
-            out.append(Route(method.upper(), path, "", "openapi",
-                             auth_required=auth, params=params))
+            out.append(Route(method.upper(), _join(base, path) if base else path, "",
+                             "openapi", auth_required=auth, params=params))
     return out
 
 
 @dataclass
 class OpenApiFileRouteSource:
-    """An OpenAPI/Swagger document committed to the repo. Hermetic, no running target."""
+    """OpenAPI/Swagger documents committed to the repo. Hermetic, no running target.
+    Every spec found is read, shallowest first, and a later one only enriches routes an
+    earlier one did not describe (RouteMap merges, never overwrites)."""
     name: str = "openapi"
 
     def discover(self, src: Path) -> list[Route]:
         import json
+        import os
         import yaml
-        for name in _OPENAPI_FILES:
-            p = src / name
-            if not p.is_file():
-                continue
+        src = Path(src)
+        found: list[tuple[int, str]] = []
+        for dp, dn, fn in os.walk(src):
+            rel = Path(dp).relative_to(src)
+            depth = len(rel.parts)
+            dn[:] = sorted(d for d in dn if d not in _OPENAPI_SKIP
+                           and depth < _OPENAPI_MAX_DEPTH)
+            for name in fn:
+                if name in _OPENAPI_FILES:
+                    found.append((depth, str(rel / name)))
+        out: list[Route] = []
+        for _, rel in sorted(found):
+            p = src / rel
             try:
+                if p.is_symlink() or p.stat().st_size > _OPENAPI_MAX_BYTES:
+                    continue
                 text = p.read_text(errors="replace")
-                doc = json.loads(text) if name.endswith(".json") else yaml.safe_load(text)
+                doc = json.loads(text) if rel.endswith(".json") else yaml.safe_load(text)
             except (OSError, ValueError, yaml.YAMLError):
                 continue
-            if isinstance(doc, dict):
-                return routes_from_openapi(doc)
-        return []
+            if isinstance(doc, dict) and ("openapi" in doc or "swagger" in doc):
+                out.extend(routes_from_openapi(doc))
+        return out
 
 
 # ------------------------------------------------------------------ runtime sources
@@ -426,7 +556,8 @@ class OpenApiFileRouteSource:
 
 def fetch_openapi_routes(exec_fn, base_url: str,
                          specs=("/openapi.json", "/swagger.json",
-                                "/v3/api-docs", "/swagger/v1/swagger.json")) -> list[Route]:
+                                "/v3/api-docs", "/swagger/v1/swagger.json",
+                                "/api/swagger.json", "/api/openapi.json")) -> list[Route]:
     """Fetch an OpenAPI document the running target serves and parse it. Read-only."""
     import json
     for spec in specs:

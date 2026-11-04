@@ -22,6 +22,8 @@ quarry funnel 1                 # thirteen ordered stages; nothing is deleted
 quarry killed 1                 # audit what the funnel suppressed, and why
 quarry validate 1 --dry-run     # plan which probes fit this codebase
 quarry validate 1               # stand the target up in Docker and probe the survivors
+# a real-world target usually needs more, e.g. VulnLookup:
+#   quarry validate 1 --build-network --memory 6g --env INSTANCE_UUID=$(uuidgen)
 quarry report 1                 # Markdown advisory drafts for confirmed findings
 quarry serve                    # dashboard on 127.0.0.1:8099
 ```
@@ -77,8 +79,18 @@ keys and a GitHub token.
   `cap_drop: ALL` with a short list added back, `no-new-privileges`, memory and pid
   limits, and builds with `network: none`. Image pulls are the one step with network
   access. A build that needs the network fails and is recorded on the run page.
+- `validate --build-network` is the opt-in for the many Dockerfiles that install
+  dependencies in RUN steps. Those steps can then reach the internet, the LAN and this
+  Mac (Docker Desktop routes `host.docker.internal` to it), but the build still gets
+  none of your environment, registry credentials, SSH agent or BuildKit secrets, and the
+  running target stays on the internal network. The run page says the build had network.
+  A clone with no `.env` is interpolated from its `.env.sample` (or `.example`, `.dist`,
+  `.template`), and the run page says that too. A placeholder in that sample is filled
+  with `--env KEY=VALUE`, which you type; nothing is read from your shell. `--memory`
+  raises the per-service memory cap (2g by default), which is a resource guard rather
+  than a containment control.
 
-The test suite (566 tests) asserts these against a hostile fixture repo and real
+The test suite (583 tests) asserts these against a hostile fixture repo and real
 `sandbox-exec`. A profile with no test is a comment.
 
 ## Requirements

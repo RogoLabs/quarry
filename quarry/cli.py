@@ -426,12 +426,24 @@ def killed(run_id: int, stage: str = typer.Option("", help="filter to one stage"
 @app.command()
 def validate(run_id: int = typer.Argument(..., help="a scanned + funnelled run"),
              limit: int = typer.Option(50, help="max candidates to probe"),
-             dry_run: bool = typer.Option(False, help="profile and plan only; probe nothing")
+             dry_run: bool = typer.Option(False, help="profile and plan only; probe nothing"),
+             build_network: bool = typer.Option(
+                 False, "--build-network",
+                 help="let Dockerfile RUN steps reach the network while the target is "
+                      "built; they still get none of your environment or credentials, "
+                      "and the running target stays offline"),
+             env: list[str] = typer.Option(
+                 [], "--env",
+                 help="KEY=VALUE for one of the target's own variables, such as a "
+                      "placeholder its sample .env ships; repeatable"),
+             memory: str = typer.Option(
+                 "2g", help="memory cap for each of the target's services, like 6g")
              ) -> None:
     """Layer 3: stand the target up and probe surviving findings into
     confirmed-or-killed verdicts. Which probes run is chosen from what the codebase is.
-    The target runs from a compose document Quarry rebuilds: builds get no network, and
-    nothing from your shell environment is interpolated."""
+    The target runs from a compose document Quarry rebuilds: builds get no network
+    unless you pass --build-network, and nothing from your shell environment is
+    interpolated."""
     from .ingest import RunVolume
     from .dynamic import runtime_docker, plan_validation, run_validation
 
@@ -450,7 +462,23 @@ def validate(run_id: int = typer.Argument(..., help="a scanned + funnelled run")
             con_out.print(f"  [dim]skip  {_e(key)}: {_e(why)}[/]")
         return
 
-    runtime = runtime_docker.DockerRuntime()
+    overrides = {}
+    for item in env:
+        key, sep, value = item.partition("=")
+        if not sep:
+            con_out.print(f"[red]--env {_e(item)}[/]: expected KEY=VALUE")
+            raise typer.Exit(2)
+        overrides[key] = value
+    try:
+        runtime = runtime_docker.DockerRuntime(
+            build_network="default" if build_network else "none",
+            env_overrides=overrides, mem_limit=memory)
+    except ValueError as e:
+        con_out.print(f"[red]{_e(str(e))}[/]")
+        raise typer.Exit(2)
+    if build_network:
+        con_out.print("[yellow]--build-network[/]: RUN steps can reach the internet, the "
+                      "LAN and this Mac while the target builds")
     try:
         with con_out.status("standing the target up and probing…"):
             res = run_validation(connection, run_id, vol.mount, runtime, limit=limit)

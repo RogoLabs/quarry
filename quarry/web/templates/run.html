@@ -80,7 +80,8 @@
       baseline is held as needs review, so that state is the common one.{% else %}No
       verdicts yet. <code>quarry validate {{ run.id }} --dry-run</code> plans the probes;
       <code>quarry validate {{ run.id }}</code> builds the target with no network and
-      probes it.{% endif %}</p>
+      probes it; add <code>--build-network</code> for a Dockerfile that installs its
+      dependencies in RUN steps.{% endif %}</p>
   </div>
 
   {#  Kept per tool in the manifest. It was printed to the terminal and dropped, so a

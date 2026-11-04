@@ -200,3 +200,124 @@ def test_an_ambiguous_mount_target_adds_no_prefix(tmp_path):
     (tmp_path / "main.py").write_text("from users import router\n"
                                       "app.include_router(router, prefix='/api')\n")
     assert _paths(tmp_path, "a/users.py") == [("GET", "/x")]
+
+
+def test_flask_restx_namespaces_resources_and_api_prefix(tmp_path):
+    # VulnLookup's shape: an Api on a /api blueprint, with nested parentheses in the
+    # constructor, namespaces mounted by path= from an absolute import, and Resource
+    # classes whose methods are the verbs.
+    (tmp_path / "web" / "api").mkdir(parents=True)
+    (tmp_path / "web" / "api" / "__init__.py").write_text(
+        "from flask import Blueprint\n"
+        "from flask_restx import Api\n"
+        "bp = Blueprint(\n    'apiv1', __name__, url_prefix='/api'\n)\n"
+        "def setup():\n"
+        "    api = Api(\n"
+        "        bp,\n"
+        "        version=version('x') if cfg.get('A', True) else '1.0',\n"
+        "        description='see (this)',\n"
+        "        prefix='/v1',\n"
+        "    )\n"
+        "    from web.api import vuln\n"
+        "    from web.api import users\n"
+        "    api.add_namespace(vuln.vuln_ns, path='/vulnerability')\n"
+        "    api.add_namespace(vuln.legacy_ns, path='/')\n"
+        "    api.add_namespace(\n        users.users_ns\n    )\n")
+    (tmp_path / "web" / "api" / "vuln.py").write_text(
+        "vuln_ns = Namespace('vulnerability', description='x (y)')\n"
+        "legacy_ns = Namespace('legacy')\n"
+        "@legacy_ns.route(\n    'cve/<string:vid>', doc=False\n)\n"
+        "@vuln_ns.route('/<string:vid>')\n"
+        "class Vulnerability(Resource):\n"
+        "    @limit()\n"
+        "    def get(self, vid):\n"
+        "        def post(): ...\n"          # a nested function is not a verb of the class
+        "        return {}\n"
+        "\n"
+        "    # a comment at class depth does not end the body\n"
+        "    def delete(self, vid): ...\n"
+        "@vuln_ns.route('/bulk', '/many')\n"
+        "class Bulk(Resource):\n"
+        "    def post(self): ...\n"
+        "def helper(): ...\n"
+        "def get(): ...\n")              # a module-level get is not a Resource method
+    (tmp_path / "web" / "api" / "users.py").write_text(
+        "users_ns = Namespace('users', path='/u')\n"
+        "@users_ns.route('/<int:uid>')\n"
+        "class User(Resource):\n"
+        "    async def put(self, uid): ...\n")
+    assert _paths(tmp_path, "web/api/vuln.py") == [
+        ("DELETE", "/api/v1/cve/<string:vid>"),
+        ("DELETE", "/api/v1/vulnerability/<string:vid>"),
+        ("GET", "/api/v1/cve/<string:vid>"),
+        ("GET", "/api/v1/vulnerability/<string:vid>"),
+        ("POST", "/api/v1/vulnerability/bulk"), ("POST", "/api/v1/vulnerability/many")]
+    assert _paths(tmp_path, "web/api/users.py") == [("PUT", "/api/v1/u/<int:uid>")]
+
+
+def test_a_namespace_without_a_mount_path_uses_its_own(tmp_path):
+    (tmp_path / "app.py").write_text(
+        "api = Api(app)\n"
+        "ns = Namespace('cwe')\n"
+        "api.add_namespace(ns)\n"
+        "@ns.route('/<cwe_id>')\n"
+        "class C(Resource):\n"
+        "    def get(self, cwe_id): ...\n"
+        "@app.route('/plain', methods=('POST',))\n"
+        "def plain(): ...\n")
+    assert _paths(tmp_path, "app.py") == [("GET", "/cwe/<cwe_id>"), ("POST", "/plain")]
+
+
+def test_flask_converters_normalise_and_name_their_parameter():
+    from quarry.dynamic.routes import _path_params
+    assert _norm_path("/u/<int:uid>") == _norm_path("/u/{uid}") == "/u/{}"
+    assert _norm_path("/c/<string(length=2):code>/x") == "/c/{}/x"
+    assert _norm_path("/f/{p:path}") == "/f/{}"
+    assert _path_params("/a/<int:uid>/b/<name>/{x}/:y") == ("uid", "name", "x", "y")
+
+
+def test_probe_urls_fill_converter_parameters_once():
+    from quarry.dynamic.probes import _concrete, _inject
+    from quarry.dynamic.validate import RunningTarget
+    assert _concrete("/api/browse/<string:vendor>/products") == "/api/browse/1/products"
+    running = RunningTarget("http://web:10001", stop=lambda: None, network="n")
+    route = Route("GET", "/api/c/<string:a>/<int:b>")
+    assert _inject(running, route, "MARK") == "http://web:10001/api/c/MARK/1"
+
+
+def test_openapi_base_path_and_server_path_prefix_every_route():
+    swagger = {"swagger": "2.0", "basePath": "/api",
+               "paths": {"/vulnerability/{vid}": {"get": {}}}}
+    assert [r.path for r in routes_from_openapi(swagger)] == ["/api/vulnerability/{vid}"]
+    v3 = {"openapi": "3.0.0", "servers": [{"url": "https://x.example/v2/"}],
+          "paths": {"/items": {"get": {}}}}
+    assert [r.path for r in routes_from_openapi(v3)] == ["/v2/items"]
+    relative = {"openapi": "3.0.0", "servers": [{"url": "/rest"}], "paths": {"/a": {"get": {}}}}
+    assert [r.path for r in routes_from_openapi(relative)] == ["/rest/a"]
+    templated = {"openapi": "3.0.0", "servers": [{"url": "{scheme}://h/{base}"}],
+                 "paths": {"/a": {"get": {}}}}
+    assert [r.path for r in routes_from_openapi(templated)] == ["/a"]
+
+
+def test_a_committed_spec_below_the_root_is_found_but_not_a_test_fixture(tmp_path):
+    import json
+    from quarry.dynamic.routes import OpenApiFileRouteSource
+    (tmp_path / "docs" / "_static" / "files").mkdir(parents=True)
+    (tmp_path / "docs" / "_static" / "files" / "swagger.json").write_text(json.dumps(
+        {"swagger": "2.0", "basePath": "/api", "security": [{"k": []}],
+         "paths": {"/users/{uid}": {"get": {}}}}))
+    (tmp_path / "tests" / "fixtures").mkdir(parents=True)
+    (tmp_path / "tests" / "fixtures" / "openapi.json").write_text(json.dumps(
+        {"openapi": "3.0.0", "paths": {"/fixture": {"get": {}}}}))
+    (tmp_path / "swagger.json").write_text(json.dumps({"paths": {"/notaspec": {}}}))
+    (tmp_path / "api.py").write_text(
+        "bp = Blueprint('a', __name__, url_prefix='/api')\n"
+        "api = Api(bp)\n"
+        "ns = Namespace('users')\n"
+        "api.add_namespace(ns)\n"
+        "@ns.route('/<int:uid>')\n"
+        "class U(Resource):\n"
+        "    def get(self, uid): ...\n")
+    assert [r.path for r in OpenApiFileRouteSource().discover(tmp_path)] == ["/api/users/{uid}"]
+    [r] = build_route_map(tmp_path).for_finding("api.py")
+    assert r.source == "static+openapi" and r.auth_required is True

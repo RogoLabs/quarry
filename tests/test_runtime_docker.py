@@ -298,7 +298,7 @@ def _fake_start(monkeypatch, *, build_rc=0):
 
     monkeypatch.setattr(DockerRuntime, "_preflight", lambda self, work: None)
     monkeypatch.setattr(rt, "resolve_compose",
-                        lambda base, env_file, env: rt.yaml.safe_load(base.read_text()))
+                        lambda base, env_file, env, **kw: rt.yaml.safe_load(base.read_text()))
     monkeypatch.setattr(rt, "_operator_docker_host", lambda: None)
     monkeypatch.setattr(DockerRuntime, "_compose", fake_compose)
     monkeypatch.setattr(DockerRuntime, "_pull_sidecar", lambda self: None)
@@ -337,6 +337,178 @@ def test_a_build_that_needs_the_network_is_a_provisioning_gap(tmp_path, monkeypa
     with pytest.raises(rt.ProvisioningGap, match="network disabled"):
         runtime.start(runtime.detect(src), tmp_path)
     assert [c[0] for c in calls] == ["build", "logs", "down"]   # never brought up
+
+
+def test_a_failed_build_with_the_network_on_is_not_blamed_on_the_network(tmp_path,
+                                                                         monkeypatch):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "Dockerfile").write_text("FROM alpine\nRUN false\n")
+    (src / "compose.yml").write_text(f"services:\n  web:\n    build: {{context: {src}}}\n")
+    _fake_start(monkeypatch, build_rc=1)
+    runtime = DockerRuntime()
+    with pytest.raises(rt.ProvisioningGap, match="--build-network"):
+        runtime.start(runtime.detect(src), tmp_path)
+    runtime = DockerRuntime(build_network="default")
+    with pytest.raises(rt.ProvisioningGap) as e:
+        runtime.start(runtime.detect(src), tmp_path)
+    assert "network disabled" not in str(e.value) and "build failed" in str(e.value)
+    hardened = rt.yaml.safe_load((tmp_path / "compose" / "compose.hardened.yml").read_text())
+    assert hardened["services"]["web"]["build"]["network"] == "default"
+    assert runtime.provisioning["build_network"] == "default"
+
+
+def test_build_network_is_none_unless_opted_in_and_never_host(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    doc = {"services": {"web": {"build": {"context": str(src), "network": "host"}}}}
+    assert harden_compose(doc, src)["services"]["web"]["build"]["network"] == "none"
+    opted = harden_compose(doc, src, build_network="default")
+    assert opted["services"]["web"]["build"]["network"] == "default"
+    assert opted["networks"][ISOLATED_NET]["internal"] is True     # the run stays offline
+    with pytest.raises(ValueError):
+        harden_compose(doc, src, build_network="host")
+    with pytest.raises(ValueError):
+        DockerRuntime(build_network="host")
+
+
+def test_a_shipped_env_sample_stands_in_for_a_missing_dotenv(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / ".env.sample").write_text("PORT=10001\nCOMPOSE_FILE=/etc/x.yml\n")
+    assert rt.dotenv_path(src, src) == src / ".env.sample"
+    assert rt.filtered_dotenv(src, src) == "PORT=10001\n"
+    (src / ".env").write_text("PORT=1\n")                 # a real .env still wins
+    assert rt.filtered_dotenv(src, src) == "PORT=1\n"
+
+
+def test_stage_env_files_uses_a_sample_or_makes_a_missing_file_optional(tmp_path):
+    src = tmp_path / "src"
+    (src / "conf").mkdir(parents=True)
+    (src / ".env.sample").write_text("A=1\n")
+    (src / "conf" / "app.env").write_text("B=2\n")
+    doc = {"services": {
+        "web": {"image": "x", "env_file": [".env", "conf/app.env"]},
+        "worker": {"image": "x", "env_file": {"path": "worker.env"}},
+    }}
+    staged, notes = rt.stage_env_files(doc, src, src)
+    assert staged["services"]["web"]["env_file"] == [str(src / ".env.sample"), "conf/app.env"]
+    assert staged["services"]["worker"]["env_file"] == [
+        {"path": "worker.env", "required": False}]
+    assert len(notes) == 2 and ".env.sample" in notes[0]
+    assert doc["services"]["web"]["env_file"] == [".env", "conf/app.env"]  # not mutated
+    present = {"services": {"web": {"image": "x", "env_file": "conf/app.env"}}}
+    assert rt.stage_env_files(present, src, src) == (present, [])
+
+
+def test_entrypoint_prefers_the_service_built_from_the_clone():
+    # VulnLookup's shape: `config` sorts services, so a datastore publishing a port comes
+    # before the web app the project builds.
+    doc = {"services": {
+        "db": {"image": "postgres:13"},
+        "kvrocks_master": {"image": "apache/kvrocks", "ports": ["10002:10002"]},
+        "vulnerability_lookup": {"build": {"context": "."}, "ports": ["10001:10001"]},
+    }}
+    assert rt._entrypoint(doc) == ("vulnerability_lookup", 10001)
+    doc["services"]["vulnerability_lookup"].pop("ports")
+    assert rt._entrypoint(doc) == ("kvrocks_master", 10002)    # no port on the build
+    doc["services"]["kvrocks_master"].pop("ports")
+    assert rt._entrypoint(doc) == ("vulnerability_lookup", 8080)
+
+
+@compose_cli
+def test_prepare_boots_a_fresh_clone_from_its_env_sample(tmp_path):
+    """The real `docker compose config` on a file whose env_file is the .env a fresh
+    clone does not have. Relative paths in the staged copy still resolve to the clone."""
+    src = tmp_path / "src"
+    (src / "cache").mkdir(parents=True)
+    (src / "Dockerfile").write_text("FROM alpine\n")
+    (src / ".env.sample").write_text("PORT=10001\nPASS=sample_pw\n")
+    (src / "docker-compose.yml").write_text(
+        "services:\n"
+        "  cache:\n"
+        "    image: valkey/valkey\n"
+        "    command: valkey-server --requirepass ${PASS}\n"
+        "    volumes: ['./cache:/cache']\n"
+        "  web:\n"
+        "    build: {context: .}\n"
+        "    env_file: [.env]\n"
+        "    ports: ['${PORT}:${PORT}']\n")
+    runtime = DockerRuntime()
+    hardened, service, port = runtime.prepare(src / "docker-compose.yml", src,
+                                              tmp_path / "compose")
+    import yaml
+    doc = yaml.safe_load(hardened.read_text())
+    assert (service, port) == ("web", 10001)
+    assert doc["services"]["web"]["environment"]["PASS"] == "sample_pw"
+    assert doc["services"]["web"]["build"]["context"] == str(src)
+    assert doc["services"]["cache"]["volumes"][0]["source"] == str(src / "cache")
+    assert "sample_pw" in str(doc["services"]["cache"]["command"])
+    assert runtime.provisioning["dotenv"] == ".env.sample"
+    assert not (src / ".env").exists()                 # nothing written to the clone
+
+
+def test_memory_cap_is_the_operators_but_must_be_a_size(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    doc = {"services": {"web": {"image": "x", "mem_limit": "64g"}}}
+    assert harden_compose(doc, src)["services"]["web"]["mem_limit"] == "2g"
+    assert harden_compose(doc, src, mem_limit="6g")["services"]["web"]["mem_limit"] == "6g"
+    for bad in ("6", "0g", "-1g", "6g; rm", "6gb"):
+        with pytest.raises(ValueError):
+            harden_compose(doc, src, mem_limit=bad)
+        with pytest.raises(ValueError):
+            DockerRuntime(mem_limit=bad)
+
+
+def test_env_overrides_refuse_cli_keys_and_line_breaks():
+    rt.check_env_overrides({"INSTANCE_UUID": "x", "_A1": ""})
+    for bad in ({"COMPOSE_FILE": "/etc/x"}, {"DOCKER_HOST": "tcp://h"}, {"1X": "y"},
+                {"A-B": "y"}, {"A": "x\nCOMPOSE_FILE=/etc/x"}):
+        with pytest.raises(ValueError):
+            rt.check_env_overrides(bad)
+    with pytest.raises(ValueError):
+        DockerRuntime(env_overrides={"BUILDKIT_SYNTAX": "evil/f"})
+
+
+def test_env_overrides_replace_the_targets_value_everywhere_it_lands():
+    resolved = {"services": {
+        "web": {"environment": {"INSTANCE_UUID": "set_instance_uuid", "PORT": "1"}},
+        "worker": {"environment": ["INSTANCE_UUID=set_instance_uuid", "X=1"]},
+        "db": {"environment": {"POSTGRES_DB": "v"}},
+    }}
+    text = rt.apply_env_overrides("PORT=1\nINSTANCE_UUID=set_instance_uuid\n", resolved,
+                                  {"INSTANCE_UUID": "6f1d"})
+    assert text == "PORT=1\nINSTANCE_UUID=6f1d\n"
+    assert resolved["services"]["web"]["environment"]["INSTANCE_UUID"] == "6f1d"
+    assert resolved["services"]["worker"]["environment"] == ["INSTANCE_UUID=6f1d", "X=1"]
+    assert "INSTANCE_UUID" not in resolved["services"]["db"]["environment"]
+    assert rt.apply_env_overrides("A=1\n", resolved, {}) == "A=1\n"
+
+
+@compose_cli
+def test_an_operator_value_replaces_a_sample_placeholder_in_args_and_env(tmp_path,
+                                                                        monkeypatch):
+    monkeypatch.setenv("INSTANCE_UUID", "from_the_operator_shell")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "Dockerfile").write_text("FROM alpine\n")
+    (src / ".env.sample").write_text("INSTANCE_UUID=set_instance_uuid\nNAME=YOURORG\n")
+    (src / "docker-compose.yml").write_text(
+        "services:\n"
+        "  web:\n"
+        "    build: {context: ., args: {INSTANCE_UUID: '${INSTANCE_UUID}'}}\n"
+        "    env_file: .env\n"
+        "    expose: ['10001']\n")
+    runtime = DockerRuntime(env_overrides={"INSTANCE_UUID": "6f1d0c1e-0000-4000-8000-1"})
+    hardened, _, _ = runtime.prepare(src / "docker-compose.yml", src, tmp_path / "compose")
+    import yaml
+    web = yaml.safe_load(hardened.read_text())["services"]["web"]
+    assert web["build"]["args"]["INSTANCE_UUID"] == "6f1d0c1e-0000-4000-8000-1"
+    assert web["environment"]["INSTANCE_UUID"] == "6f1d0c1e-0000-4000-8000-1"
+    assert web["environment"]["NAME"] == "YOURORG"          # the rest of the sample stays
+    assert "from_the_operator_shell" not in hardened.read_text()
+    assert runtime.provisioning["env_overrides"] == ["INSTANCE_UUID"]
 
 
 def test_start_refuses_a_hostile_file_before_any_docker_call(tmp_path, monkeypatch):

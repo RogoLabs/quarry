@@ -15,6 +15,7 @@ import re
 import statistics
 
 from ..cwe import probe_class
+from .routes import PATH_PARAM
 from .validate import Candidate, ProbeEvidence, RunningTarget
 
 ExecFn = "Callable[[list[str]], tuple[int, str]]"
@@ -31,7 +32,7 @@ _REAL = {"200", "201", "204", "400", "401", "403", "409", "422", "429"}
 
 def _concrete(path: str) -> str:
     """Substitute a benign value for every path parameter so the URL is requestable."""
-    return "/" + re.sub(r"[:{<]\w+[}>]?", "1", path).strip("/")
+    return "/" + PATH_PARAM.sub("1", path).strip("/")
 
 
 def _status(exec_fn, url: str) -> str:
@@ -67,7 +68,7 @@ def _inject(running: RunningTarget, route, payload: str) -> str:
     """Place a payload into a route's first path parameter, or as a query value when the
     route has none. Read-only: the result is a single GET URL."""
     base = running.base_url.rstrip("/")
-    if re.search(r"[:{<]\w+[}>]?", route.path):
+    if PATH_PARAM.search(route.path):
         # one pass: first param gets the payload, the rest get a benign value, so the
         # payload is never re-scanned (an angle-bracket payload would look like a param).
         seen = {"n": 0}
@@ -76,7 +77,7 @@ def _inject(running: RunningTarget, route, payload: str) -> str:
             seen["n"] += 1
             return payload if seen["n"] == 1 else "1"
 
-        return base + "/" + re.sub(r"[:{<]\w+[}>]?", repl, route.path).strip("/")
+        return base + "/" + PATH_PARAM.sub(repl, route.path).strip("/")
     sep = "&" if "?" in route.path else "?"
     return base + _concrete(route.path) + f"{sep}q={payload}"
 

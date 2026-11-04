@@ -17,8 +17,14 @@ this module writes that document itself rather than editing the author's:
    no-new-privileges and resource limits, and builds run with `network: none`.
 
 Image pulls happen during provisioning and may touch the network; Dockerfile RUN steps
-may not. A probe reaches the target by joining the isolated network as an ephemeral
-sidecar; nothing is ever published to the host.
+may not, unless the operator passes `build_network="default"` (`quarry validate
+--build-network`). Most real Dockerfiles install their dependencies in RUN steps, so
+without it they cannot be validated at all. With it, RUN steps can reach the internet,
+the LAN and the host (Docker Desktop routes host.docker.internal to the Mac), but they
+still see no operator environment, registry credentials, SSH agent or BuildKit secrets,
+because none of those are passed to the build. The running target stays on the internal
+network either way. A probe reaches the target by joining the isolated network as an
+ephemeral sidecar; nothing is ever published to the host.
 
 `harden_compose` and the checks around it are pure, so they are unit-tested without
 Docker. Resolution needs the docker CLI; bring-up needs a daemon.
@@ -69,6 +75,11 @@ DEPENDS_CONDITIONS = ("service_started", "service_healthy",
 KEEP_CAPS = ("CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "SETUID", "SETGID", "KILL",
              "NET_BIND_SERVICE")
 LIMITS = {"mem_limit": "2g", "pids_limit": 512, "cpus": 2.0}
+# The memory cap is a resource guard, not a containment control, so the operator may
+# raise it (`--memory`). MEASURED: VulnLookup runs 49 preloaded gunicorn workers and its
+# feeders in one container, and at 2g the kernel OOM-killed the web server 53 times
+# before it bound a port.
+_MEM = re.compile(r"^[1-9][0-9]*[kmg]$")
 # Keys that steer the docker or compose CLI itself rather than the target. A target's
 # .env may set them (COMPOSE_PROJECT_NAME is honoured from .env, MEASURED with compose
 # v5.6.1), and build args named BUILDKIT_* reach the builder, so none are passed on.
@@ -78,6 +89,12 @@ _RESERVED_ENV = ("COMPOSE_", "DOCKER_", "BUILDKIT_", "BUILDX_")
 # not honour it.
 _OFFICIAL_FRONTEND = re.compile(
     r"^(docker\.io/)?docker/dockerfile(-upstream)?(:[\w.-]+)?(@sha256:[0-9a-f]{64})?$")
+# The build network modes an operator may choose. `host` is never offered: on Docker
+# Desktop it is the VM's own network namespace, which is more reach than a build needs.
+BUILD_NETWORKS = ("none", "default")
+# Where a project keeps the .env it expects you to copy. Used only when the file the
+# compose document names does not exist, which is the normal state of a fresh clone.
+ENV_SAMPLE_SUFFIXES = (".example", ".sample", ".dist", ".template")
 # The oldest versions this is written for. Compose v2 is the plugin that reads
 # `config --format json` (v1 docker-compose is a different program), and engine 20.10
 # is the first with cgroup v2 support, which the pids and memory limits rely on in
@@ -244,13 +261,33 @@ def precheck_compose(doc: dict, compose_dir: Path, src: Path) -> None:
 _DOTENV = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
 
 
-def filtered_dotenv(compose_dir: Path, src: Path) -> str:
-    """The target's .env as compose will see it: simple KEY=VALUE lines only, and no key
-    that steers the CLI (COMPOSE_ENV_FILES could name a host file to interpolate from,
-    COMPOSE_FILE another compose file). A quoted value that does not close on its own
-    line is dropped rather than parsed, so a continuation line cannot become a key."""
+def env_sample(p: Path, src: Path) -> Path | None:
+    """The sample a project ships for a missing env file (`.env.sample` for `.env`), if
+    exactly that file exists inside the clone."""
+    for suffix in ENV_SAMPLE_SUFFIXES:
+        s = p.with_name(p.name + suffix)
+        if s.is_file() and _inside(s, src):
+            return s
+    return None
+
+
+def dotenv_path(compose_dir: Path, src: Path) -> Path | None:
+    """The file compose interpolates from: the target's .env, or its shipped sample when
+    the clone has none (a committed .env is rare; `cp .env.sample .env` is the norm)."""
     p = compose_dir / ".env"
-    if not p.is_file() or not _inside(p, src):
+    if p.is_file():
+        return p if _inside(p, src) else None
+    return env_sample(p, src)
+
+
+def filtered_dotenv(compose_dir: Path, src: Path) -> str:
+    """The target's .env (or its sample) as compose will see it: simple KEY=VALUE lines
+    only, and no key that steers the CLI (COMPOSE_ENV_FILES could name a host file to
+    interpolate from, COMPOSE_FILE another compose file). A quoted value that does not
+    close on its own line is dropped rather than parsed, so a continuation line cannot
+    become a key."""
+    p = dotenv_path(compose_dir, src)
+    if p is None:
         return ""
     kept = []
     for line in p.read_text(errors="replace").splitlines():
@@ -264,11 +301,78 @@ def filtered_dotenv(compose_dir: Path, src: Path) -> str:
     return "\n".join(kept) + ("\n" if kept else "")
 
 
+def stage_env_files(doc: dict, compose_dir: Path, src: Path) -> tuple[dict, list[str]]:
+    """Point each `env_file` that does not exist at its shipped sample, or mark it
+    optional when there is none, so `compose config` does not fail on a fresh clone.
+    Runs after precheck_compose, so every entry is already known to be inside the clone.
+    Returns the document (a copy when anything changed) and one note per change."""
+    notes: list[str] = []
+    out = json.loads(json.dumps(doc))
+    for name, svc in (out.get("services") or {}).items():
+        if not isinstance(svc, dict) or svc.get("env_file") is None:
+            continue
+        raw = svc["env_file"]
+        entries = raw if isinstance(raw, list) else [raw]
+        staged = []
+        for e in entries:
+            f = e.get("path") if isinstance(e, dict) else e
+            p = compose_dir / os.path.expanduser(str(f))
+            if f is None or p.is_file():
+                staged.append(e)
+                continue
+            if (sample := env_sample(p, src)) is not None:
+                staged.append(str(sample))
+                notes.append(f"service {name!r}: env_file {f} is missing; "
+                             f"used {sample.relative_to(src)}")
+            else:
+                staged.append({"path": str(f), "required": False})
+                notes.append(f"service {name!r}: env_file {f} is missing and has no "
+                             "sample; started without it")
+        svc["env_file"] = staged
+    return (out, notes) if notes else (doc, [])
+
+
+_ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def check_env_overrides(overrides: dict[str, str]) -> None:
+    """Refuse an operator value compose would treat as anything but data: a key that
+    steers the CLI, a malformed key, or a value with a line break (it would become a
+    second line of the env file)."""
+    for k, v in overrides.items():
+        if not _ENV_KEY.match(k) or k.startswith(_RESERVED_ENV):
+            raise ValueError(f"--env {k!r}: not a key validate will set")
+        if "\n" in v or "\r" in v:
+            raise ValueError(f"--env {k}: the value has a line break")
+
+
+def apply_env_overrides(dotenv: str, resolved: dict, overrides: dict[str, str]) -> str:
+    """Put the operator's values where the target's own would have gone: in the env file
+    compose interpolates from (replacing the target's line), and in every resolved
+    service environment that already has the key, which is where env_file contents
+    land. A key no service declares is only interpolated. Returns the new env text;
+    `resolved` is changed in place."""
+    if not overrides:
+        return dotenv
+    kept = [ln for ln in dotenv.splitlines() if ln.split("=", 1)[0] not in overrides]
+    text = "\n".join(kept + [f"{k}={v}" for k, v in overrides.items()]) + "\n"
+    for svc in (resolved.get("services") or {}).values():
+        env = svc.get("environment") if isinstance(svc, dict) else None
+        if isinstance(env, dict):
+            for k in overrides.keys() & env.keys():
+                env[k] = overrides[k]
+        elif isinstance(env, list):
+            svc["environment"] = [
+                f"{k}={overrides[k]}" if (k := str(e).split("=", 1)[0]) in overrides
+                else e for e in env]
+    return text
+
+
 def _is_remote(ref: str) -> bool:
     return "://" in ref or ref.startswith("git@")
 
 
-def _rebuild_build(name: str, build, src: Path) -> dict:
+def _rebuild_build(name: str, build, src: Path, network: str = "none") -> dict:
     b = {"context": build} if isinstance(build, str) else dict(build or {})
     ctx = str(b.get("context") or ".")
     if _is_remote(ctx) or not os.path.isabs(ctx) or not _inside(ctx, src):
@@ -289,7 +393,9 @@ def _rebuild_build(name: str, build, src: Path) -> dict:
                        if not str(k).startswith(_RESERVED_ENV)}
     elif args is not None:
         out.pop("args")                     # config emits a mapping; anything else is odd
-    out["network"] = "none"                 # RUN steps get no network at all
+    if network not in BUILD_NETWORKS:
+        raise ValueError(f"build network {network!r} is not one of {BUILD_NETWORKS}")
+    out["network"] = network                # "none" unless the operator opted in
     return out
 
 
@@ -363,11 +469,12 @@ def _force_offline_env(svc: dict) -> None:
 
 
 def _rebuild_service(name: str, svc: dict, src: Path, network: str,
-                     named: set[str]) -> dict:
+                     named: set[str], build_network: str = "none",
+                     mem_limit: str = LIMITS["mem_limit"]) -> dict:
     out = {k: json.loads(json.dumps(svc[k])) for k in SERVICE_KEYS
            if svc.get(k) is not None}
     if svc.get("build") is not None:
-        out["build"] = _rebuild_build(name, svc["build"], src)
+        out["build"] = _rebuild_build(name, svc["build"], src, build_network)
         # A built service keeps compose's own project-scoped image name. With `image:`
         # set, compose tags the build with it, and a target could overwrite the
         # operator's local postgres:16, or Quarry's own SIDECAR_IMAGE.
@@ -386,16 +493,19 @@ def _rebuild_service(name: str, svc: dict, src: Path, network: str,
     out["cap_drop"] = ["ALL"]
     out["cap_add"] = list(KEEP_CAPS)
     out["security_opt"] = ["no-new-privileges:true"]
-    out.update(LIMITS)
+    out.update(LIMITS, mem_limit=mem_limit)
     out["restart"] = "no"                   # nothing outlives a failed bring-up
     return out
 
 
-def harden_compose(doc: dict, src: Path, *, network: str = ISOLATED_NET) -> dict:
+def harden_compose(doc: dict, src: Path, *, network: str = ISOLATED_NET,
+                   build_network: str = "none",
+                   mem_limit: str = LIMITS["mem_limit"]) -> dict:
     """Build the document Docker runs from a resolved one (the output of `docker
     compose config`), copying only allowlisted keys and forcing the containment ones:
     one internal network, no host ports, binds only inside `src`, dropped capabilities,
-    no-new-privileges, resource limits, network-less builds. Named volumes are
+    no-new-privileges, resource limits, network-less builds (unless `build_network` is
+    "default", the operator's opt-in). Named volumes are
     recreated empty and project-scoped, so `external:` and `driver_opts` bind devices
     never reach an operator's volume or a host path. Package-hub clients are told they
     are offline, so they fail fast instead of retrying a lookup that cannot succeed."""
@@ -403,7 +513,10 @@ def harden_compose(doc: dict, src: Path, *, network: str = ISOLATED_NET) -> dict
     if not isinstance(services, dict) or not services:
         raise DockerError("compose file has no services")
     named: set[str] = set()
-    out_services = {name: _rebuild_service(str(name), svc, src, network, named)
+    if not _MEM.match(mem_limit):
+        raise ValueError(f"memory limit {mem_limit!r} is not like 2g or 512m")
+    out_services = {name: _rebuild_service(str(name), svc, src, network, named,
+                                           build_network, mem_limit)
                     for name, svc in services.items() if isinstance(svc, dict)}
     out: dict = {"services": out_services,
                  "networks": {network: {"internal": True, "driver": "bridge"}}}
@@ -440,7 +553,10 @@ def check_dockerfiles(doc: dict, src: Path) -> None:
 def _entrypoint(doc: dict) -> tuple[str, int]:
     """The service and container port a probe should address, inferred from a document
     that still has its ports (harden_compose drops them): prefer a service that
-    published or exposed a port, else the first service; default the port to 8080."""
+    published or exposed a port, else the first service; default the port to 8080.
+    A service built from the clone is the project's own code, so it outranks pulled
+    images: VulnLookup publishes kvrocks on 10002 beside its web app on 10001, and
+    `config` lists services alphabetically, so the datastore came first."""
     services = doc.get("services", {})
     if not isinstance(services, dict) or not services:
         raise DockerError("compose file has no services")
@@ -459,21 +575,27 @@ def _entrypoint(doc: dict) -> tuple[str, int]:
                 return int(s)
         return None
 
-    for name, svc in services.items():
-        if isinstance(svc, dict):
+    svcs = [(n, s) for n, s in services.items() if isinstance(s, dict)]
+    for want_build in (True, False):
+        for name, svc in svcs:
+            if want_build and not svc.get("build"):
+                continue
             p = container_port(svc)
             if p is not None:
                 return name, p
-    first = next(iter(services))
-    return first, 8080
+    built = [n for n, s in svcs if s.get("build")]
+    return (built[0] if built else next(iter(services))), 8080
 
 
 def resolve_compose(base: Path, env_file: Path, env: dict[str, str], *,
-                    timeout: int = 60) -> dict:
+                    project_dir: Path | None = None, timeout: int = 60) -> dict:
     """`docker compose config` on the author's file under `env`, with `env_file` in
     place of the target's .env. Interpolation, extends, env_file contents and relative
-    paths are all resolved here, so the document harden_compose sees is final."""
-    cmd = ["docker", "compose", "-f", str(base), "--project-directory", str(base.parent),
+    paths are all resolved here, so the document harden_compose sees is final. Relative
+    paths resolve against `project_dir` (default: the file's own directory), which lets
+    a staged copy of the author's file live outside the clone."""
+    cmd = ["docker", "compose", "-f", str(base),
+           "--project-directory", str(project_dir or base.parent),
            "--env-file", str(env_file), "config", "--format", "json"]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
@@ -494,8 +616,31 @@ class DockerRuntime:
     runs the author's file: `start` runs the document harden_compose wrote."""
     project_prefix: str = "quarry"
     up_timeout: int = 300
+    # A build that installs a real project's dependencies (VulnLookup: apt, poetry and
+    # every Python package) takes far longer than bringing the built stack up.
+    build_timeout: int = 1800
     health_timeout: int = 120
+    # "none" keeps RUN steps offline. "default" is the operator's opt-in (see the module
+    # docstring for what it does and does not expose).
+    build_network: str = "none"
+    # Values the operator supplies for the target's own variables (`--env KEY=VALUE`),
+    # for the placeholders a sample .env ships with. Never read from the shell.
+    env_overrides: dict[str, str] = field(default_factory=dict)
+    # Per service. Raising it does not loosen containment (see _MEM).
+    mem_limit: str = LIMITS["mem_limit"]
     _env: dict[str, str] | None = field(default=None, init=False, repr=False)
+    # What provisioning did that a reader of the run should know: the build network,
+    # whether a sample stood in for .env, and env_file substitutions. run_validation
+    # copies it onto the run page.
+    provisioning: dict = field(default_factory=dict, init=False)
+
+    def __post_init__(self) -> None:
+        if self.build_network not in BUILD_NETWORKS:
+            raise ValueError(f"build network {self.build_network!r} is not one of "
+                             f"{BUILD_NETWORKS}")
+        check_env_overrides(self.env_overrides)
+        if not _MEM.match(self.mem_limit):
+            raise ValueError(f"memory limit {self.mem_limit!r} is not like 2g or 512m")
 
     def detect(self, src: Path) -> RuntimeSpec | None:
         comp = find_compose(src)
@@ -517,15 +662,36 @@ class DockerRuntime:
         file, which lives under `work` (outside the clone), and the service and port a
         probe should address. Needs the docker CLI but not a daemon."""
         work.mkdir(parents=True, exist_ok=True)
-        precheck_compose(yaml.safe_load(base.read_text()) or {}, base.parent, src)
+        author = yaml.safe_load(base.read_text()) or {}
+        precheck_compose(author, base.parent, src)
         if self._env is None:
             self._env = scrubbed_env(work / "home",
                                      docker_host=_operator_docker_host())
         target_env = work / "target.env"
-        target_env.write_text(filtered_dotenv(base.parent, src))
-        resolved = resolve_compose(base, target_env, self._env)
+        dotenv_text = apply_env_overrides(filtered_dotenv(base.parent, src), {},
+                                          self.env_overrides)
+        target_env.write_text(dotenv_text)
+        dotenv = dotenv_path(base.parent, src)
+        staged, notes = stage_env_files(author, base.parent, src)
+        file = base
+        if staged is not author:
+            # The staged copy lives outside the clone; its relative paths still resolve
+            # against the author's directory through --project-directory.
+            file = work / "compose.author.yml"
+            file.write_text(yaml.safe_dump(staged, sort_keys=False))
+        self.provisioning = {
+            "build_network": self.build_network,
+            "dotenv": str(dotenv.relative_to(src)) if dotenv else None,
+            "env_files": notes,
+            # Keys only: a value may be a test credential, and the manifest is shown.
+            "env_overrides": sorted(self.env_overrides),
+            "mem_limit": self.mem_limit,
+        }
+        resolved = resolve_compose(file, target_env, self._env, project_dir=base.parent)
+        apply_env_overrides("", resolved, self.env_overrides)
         service, port = _entrypoint(resolved)
-        doc = harden_compose(resolved, src)
+        doc = harden_compose(resolved, src, build_network=self.build_network,
+                             mem_limit=self.mem_limit)
         check_dockerfiles(doc, src)
         (work / "empty.env").write_text("")
         hardened = work / "compose.hardened.yml"
@@ -563,17 +729,21 @@ class DockerRuntime:
                           timeout=120, check=False)
 
         # Provisioning: image pulls may touch the network; builds may not, because
-        # every build has `network: none`. The contained run that follows cannot either,
-        # because every service is on the internal network. A stack that fails to come
-        # up is torn down here: the caller only gets `stop` on success.
+        # every build has `network: none`, unless the operator opted in. The contained
+        # run that follows cannot either way, because every service is on the internal
+        # network. A stack that fails to come up is torn down here: the caller only
+        # gets `stop` on success.
         base_url = f"http://{service}:{port}"
         try:
-            r = self._compose(project, hardened, "build", timeout=self.up_timeout,
+            r = self._compose(project, hardened, "build", timeout=self.build_timeout,
                               check=False)
             if r.returncode != 0:
-                raise ProvisioningGap(
-                    "build failed with the network disabled (a build that fetches "
-                    f"during RUN cannot be validated): {(r.stderr or '')[-800:]}")
+                tail = (r.stderr or "")[-800:]
+                if self.build_network == "none":
+                    raise ProvisioningGap(
+                        "build failed with the network disabled (a build that fetches "
+                        "during RUN needs --build-network): " + tail)
+                raise ProvisioningGap("build failed: " + tail)
             self._compose(project, hardened, "up", "-d", "--no-build",
                           timeout=self.up_timeout)
             self._pull_sidecar()

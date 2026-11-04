@@ -266,6 +266,28 @@ class ValidationResult:
     verdicts: list[tuple[str, str, str]] = field(default_factory=list)  # finding, lens, verdict
 
 
+def _record_provisioning(con: sqlite3.Connection, run_id: int, runtime) -> None:
+    """Put what provisioning did on the run: the facts in the manifest, and the ones that
+    weaken containment or change how the target booted as run-page warnings. A runtime
+    that keeps no such record (a test double) writes nothing."""
+    prov = getattr(runtime, "provisioning", None)
+    if not prov:
+        return
+    db.update_manifest(con, run_id,
+                       lambda m: m.setdefault("validate", {}).update(provisioning=prov))
+    netted = prov.get("build_network", "none") != "none"
+    sample = prov.get("dotenv") or ""
+    db.set_health(con, run_id, "validate", {
+        "build-network": ["Dockerfile RUN steps had network access while the target "
+                          "was built (--build-network)"] if netted else [],
+        "env": ([f"no .env in the clone; interpolated from {sample}"]
+                if sample and Path(sample).name != ".env" else [])
+               + list(prov.get("env_files") or [])
+               + ([f"set by the operator with --env: {', '.join(prov['env_overrides'])}"]
+                  if prov.get("env_overrides") else []),
+    })
+
+
 def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, *,
                    limit: int = 50, enrich: bool = True) -> ValidationResult:
     """The end-to-end loop: profile the target, select candidates and the probe lenses the
@@ -294,10 +316,12 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
         # A target that cannot be stood up under containment is a recorded gap, not a
         # silent zero: the run page shows it beside the scanner warnings.
         with db.tx(con):
+            _record_provisioning(con, run_id, runtime)
             db.set_health(con, run_id, "validate",
                           {"runtime": [f"{spec.kind}: {type(e).__name__}: {e}"[:600]]})
         raise
     with db.tx(con):
+        _record_provisioning(con, run_id, runtime)
         db.set_health(con, run_id, "validate", {"runtime": []})
     try:
         def exec_fn(argv):

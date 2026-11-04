@@ -186,6 +186,31 @@ def test_a_target_that_will_not_come_up_is_recorded_on_the_run(scanned):
     assert db.read_manifest(con, 1)["health"]["validate"] == {}
 
 
+def test_provisioning_choices_are_recorded_on_the_run(scanned):
+    con, rundir = scanned
+
+    class Provisioned(FakeRuntime):
+        provisioning = {"build_network": "default", "dotenv": ".env.sample",
+                        "env_files": ["service 'web': env_file .env is missing; "
+                                      "used .env.sample"],
+                        "env_overrides": ["INSTANCE_UUID"]}
+
+    run_validation(con, 1, rundir, Provisioned({"/secret": "200"}))
+    m = db.read_manifest(con, 1)
+    assert m["validate"]["provisioning"]["build_network"] == "default"
+    health = m["health"]["validate"]
+    assert "--build-network" in health["build-network"][0]
+    assert health["env"][0] == "no .env in the clone; interpolated from .env.sample"
+    assert "env_file .env is missing" in health["env"][1]
+    assert health["env"][2] == "set by the operator with --env: INSTANCE_UUID"
+
+    class Offline(FakeRuntime):
+        provisioning = {"build_network": "none", "dotenv": ".env", "env_files": []}
+
+    run_validation(con, 1, rundir, Offline({"/secret": "200"}))
+    assert db.read_manifest(con, 1)["health"]["validate"] == {}
+
+
 def _candidate_ids(con):
     from quarry.dynamic.validate import select_candidates
     return [c.finding_id for c in select_candidates(con, 1)]
