@@ -211,6 +211,41 @@ def test_provisioning_choices_are_recorded_on_the_run(scanned):
     assert db.read_manifest(con, 1)["health"]["validate"] == {}
 
 
+def test_seeding_runs_the_targets_commands_and_carries_inputs_to_probes(scanned):
+    con, rundir = scanned
+    from quarry.dynamic.seed import SeedRecipe, SeedStep
+
+    class Seeding(FakeRuntime):
+        def __init__(self, status):
+            super().__init__(status)
+            self.seeded = []
+            self.running = None
+
+        def start(self, spec, rundir):
+            self.running = RunningTarget("http://web:8080", stop=self._stop, network="net",
+                                         project="p", compose_file="/x/compose.yml")
+            return self.running
+
+        def service_exec(self, running, argv, *, service="", timeout=900):
+            self.seeded.append(argv)
+            if "getkey" in argv:
+                return 0, "APIKEY=abcdef0123456789\n"
+            return 0, "ok"
+
+    recipe = SeedRecipe(name="t", param_values={"vulnerability_id": "CVE-2021-44228"},
+                        steps=(SeedStep(argv=("mkadmin", "--password", "{password}")),
+                               SeedStep(argv=("getkey",), capture=r"APIKEY=(\w+)",
+                                        capture_as="admin_api_key")))
+    rt = Seeding({"/secret": "401"})
+    run_validation(con, 1, rundir, rt, seed=recipe)
+    assert ["mkadmin", "--password"] == rt.seeded[0][:2]
+    assert "{password}" not in rt.seeded[0]                      # generated, not literal
+    assert rt.running.param_values["vulnerability_id"] == "CVE-2021-44228"
+    assert rt.running.credentials["admin_api_key"] == "abcdef0123456789"
+    seed_notes = db.read_manifest(con, 1)["health"]["validate"]["seed"]
+    assert any("captured admin_api_key" in n for n in seed_notes)
+
+
 def _candidate_ids(con):
     from quarry.dynamic.validate import select_candidates
     return [c.finding_id for c in select_candidates(con, 1)]

@@ -645,3 +645,33 @@ def test_a_build_step_cannot_reach_the_network(tmp_path):
     runtime = DockerRuntime(health_timeout=30, up_timeout=300)
     with pytest.raises(rt.ProvisioningGap, match="network disabled"):
         runtime.start(runtime.detect(src), tmp_path)
+
+
+def test_service_exec_targets_the_service_container_not_a_sidecar(monkeypatch):
+    from quarry.dynamic.validate import RunningTarget
+    runtime = DockerRuntime()
+    runtime._env = {"PATH": "/usr/bin"}
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return rt.subprocess.CompletedProcess(cmd, 0, stdout="apikey123", stderr="")
+
+    monkeypatch.setattr(rt.subprocess, "run", fake_run)
+    running = RunningTarget("http://web:10001", stop=lambda: None, network="net",
+                            service="web", project="quarry-run-3",
+                            compose_file="/tmp/compose/compose.hardened.yml")
+    rc, out = runtime.service_exec(running, ["flask", "user_get_api_key"], service="web")
+    assert rc == 0 and out == "apikey123"
+    c = seen["cmd"]
+    assert c[:3] == ["docker", "compose", "-p"] and "quarry-run-3" in c
+    assert c[c.index("exec") + 1:] == ["-T", "web", "flask", "user_get_api_key"]
+    assert "run" not in c[:3] and "--network" not in c         # not a sidecar run
+
+
+def test_service_exec_refuses_without_a_recorded_project(monkeypatch):
+    from quarry.dynamic.validate import RunningTarget
+    runtime = DockerRuntime()
+    running = RunningTarget("http://web:10001", stop=lambda: None, network="net")
+    with pytest.raises(rt.DockerError, match="service containers"):
+        runtime.service_exec(running, ["echo", "hi"])

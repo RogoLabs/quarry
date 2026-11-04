@@ -437,7 +437,10 @@ def validate(run_id: int = typer.Argument(..., help="a scanned + funnelled run")
                  help="KEY=VALUE for one of the target's own variables, such as a "
                       "placeholder its sample .env ships; repeatable"),
              memory: str = typer.Option(
-                 "2g", help="memory cap for each of the target's services, like 6g")
+                 "2g", help="memory cap for each of the target's services, like 6g"),
+             seed: str = typer.Option(
+                 "", help="run a named seed recipe's setup commands (the target's own) "
+                          "in the contained instance before probing, e.g. vulnlookup")
              ) -> None:
     """Layer 3: stand the target up and probe surviving findings into
     confirmed-or-killed verdicts. Which probes run is chosen from what the codebase is.
@@ -479,9 +482,20 @@ def validate(run_id: int = typer.Argument(..., help="a scanned + funnelled run")
     if build_network:
         con_out.print("[yellow]--build-network[/]: RUN steps can reach the internet, the "
                       "LAN and this Mac while the target builds")
+    recipe = None
+    if seed:
+        from .dynamic import seed as seed_mod
+        recipe = seed_mod.get(seed)
+        if recipe is None:
+            con_out.print(f"[red]no seed recipe {_e(seed)}[/]; known: "
+                          f"{_e(', '.join(seed_mod.names()) or 'none')}")
+            raise typer.Exit(2)
+        con_out.print(f"[yellow]--seed {_e(seed)}[/]: runs the target's own setup "
+                      f"commands in the contained instance ({_e(recipe.description)})")
     try:
         with con_out.status("standing the target up and probing…"):
-            res = run_validation(connection, run_id, vol.mount, runtime, limit=limit)
+            res = run_validation(connection, run_id, vol.mount, runtime, limit=limit,
+                                 seed=recipe)
     except runtime_docker.DockerError as e:
         # run_validation has already put this on the run page as a health warning.
         kind = ("refused" if isinstance(e, runtime_docker.ComposeRefused)

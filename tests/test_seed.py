@@ -1,0 +1,96 @@
+"""Seeding runs the target's own documented commands in the contained instance to make
+it testable: test accounts (and their API keys) and real probe inputs. A step failure is
+recorded, never fatal, and the probes stay read-only.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from quarry.dynamic import seed as S                               # noqa: E402
+from quarry.dynamic.seed import SeedRecipe, SeedStep, run_seed, SeedError  # noqa: E402
+
+
+class FakeRuntime:
+    """Records service_exec calls and answers from a canned map keyed by the command."""
+    def __init__(self, answers=None):
+        self.calls: list[tuple[str, list[str]]] = []
+        self.answers = answers or {}
+
+    def service_exec(self, running, argv, *, service="", timeout=900):
+        self.calls.append((service, argv))
+        for key, (rc, out) in self.answers.items():
+            if key in argv:
+                return rc, out
+        return 0, ""
+
+
+def _recipe(**kw):
+    base = dict(name="t", steps=(SeedStep(argv=("echo", "hi"), describe="hi"),))
+    base.update(kw)
+    return SeedRecipe(**base)
+
+
+def test_captures_a_value_and_substitutes_the_generated_password():
+    recipe = SeedRecipe(name="t", param_values={"id": "CVE-1"}, steps=(
+        SeedStep(argv=("mkuser", "--password", "{password}"), describe="make user"),
+        SeedStep(argv=("getkey", "admin"), capture=r"([0-9A-Za-z]{10,})",
+                 capture_as="admin_api_key", describe="get key"),
+    ))
+    rt = FakeRuntime({"getkey": (0, "key=ABC123def456XYZ\n")})
+    res = run_seed(rt, object(), recipe)
+    assert res.param_values == {"id": "CVE-1"}
+    assert res.credentials == {"admin_api_key": "ABC123def456XYZ"}
+    # {password} was replaced by a real secret, the same one across steps, never literal.
+    pw_arg = rt.calls[0][1][-1]
+    assert pw_arg != "{password}" and len(pw_arg) >= 16
+
+
+def test_an_optional_step_failure_is_recorded_not_fatal():
+    recipe = _recipe(steps=(
+        SeedStep(argv=("boom",), describe="boom", optional=True),
+        SeedStep(argv=("fine",), describe="fine"),
+    ))
+    rt = FakeRuntime({"boom": (3, "nope")})
+    res = run_seed(rt, object(), recipe)
+    assert any("boom" in n and "rc=3" in n for n in res.notes)
+    assert ("", ["fine"]) in rt.calls              # kept going after the failure
+
+
+def test_a_required_step_failure_raises():
+    recipe = _recipe(steps=(SeedStep(argv=("boom",), optional=False, describe="boom"),))
+    with pytest.raises(SeedError):
+        run_seed(FakeRuntime({"boom": (1, "x")}), object(), recipe)
+
+
+def test_a_runtime_without_service_exec_is_a_recorded_gap():
+    class NoExec:
+        pass
+    res = run_seed(NoExec(), object(), _recipe())
+    assert res.credentials == {} and any("service exec" in n for n in res.notes)
+
+
+def test_a_capture_that_does_not_match_is_noted_without_inventing_a_value():
+    recipe = _recipe(steps=(SeedStep(argv=("getkey",), capture=r"KEY=(\w+)",
+                                     capture_as="admin_api_key", describe="get key"),))
+    res = run_seed(FakeRuntime({"getkey": (0, "No such user.")}), object(), recipe)
+    assert "admin_api_key" not in res.credentials
+    assert any("not found" in n for n in res.notes)
+
+
+def test_the_vulnlookup_recipe_uses_the_projects_own_commands():
+    r = S.get("vulnlookup")
+    assert r is not None and "vulnlookup" in S.names()
+    cmds = [st.argv for st in r.steps]
+    assert any("create_admin" in a for a in cmds)
+    assert any("create_user" in a for a in cmds)
+    assert sum("user_get_api_key" in a for a in cmds) == 2    # one per account
+    # Every step runs the project's own Flask CLI; nothing reaches into a datastore.
+    assert all(a[:5] == ("poetry", "run", "flask", "--app", "website.app") for a in cmds)
+    assert r.param_values.get("vulnerability_id", "").startswith("CVE-")
+    # No credential is hard-coded: accounts use the generated {password} placeholder.
+    assert all("{password}" in a or "user_get_api_key" in a for a in cmds)

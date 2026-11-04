@@ -756,7 +756,8 @@ class DockerRuntime:
             raise
 
         return RunningTarget(base_url=base_url, stop=stop, network=net,
-                             service=service, port=port)
+                             service=service, port=port,
+                             project=project, compose_file=str(hardened))
 
     def _save_logs(self, project: str, file: Path, rundir: Path) -> Path | None:
         """Write every service's logs into the run's logs/ before teardown removes them,
@@ -790,6 +791,23 @@ class DockerRuntime:
     def _pull_sidecar(self) -> None:
         subprocess.run(["docker", "pull", SIDECAR_IMAGE],
                        capture_output=True, text=True, timeout=180, env=self._env)
+
+    def service_exec(self, running: RunningTarget, argv: list[str], *,
+                     service: str = "", timeout: int = 900) -> tuple[int, str]:
+        """Run a command inside one of the target's own service containers, for operator
+        setup steps a seed recipe declares (the project's documented importer or
+        create-user commands). Unlike probe_exec, this runs in the service, not a sidecar,
+        so it reaches the target's database on the internal network and nothing beyond it.
+        Returns (returncode, combined output)."""
+        if not running.compose_file or not running.project:
+            raise DockerError("runtime did not record how to reach its service containers")
+        cmd = ["docker", "compose", "-p", running.project, "-f", running.compose_file,
+               "--project-directory", str(Path(running.compose_file).parent),
+               "--env-file", str(Path(running.compose_file).parent / "empty.env"),
+               "exec", "-T", service or running.service, *argv]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           env=self._env)
+        return r.returncode, (r.stdout + r.stderr)
 
     def probe_exec(self, running: RunningTarget, argv: list[str], *,
                    image: str = SIDECAR_IMAGE, timeout: int = 60) -> tuple[int, str]:

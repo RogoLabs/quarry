@@ -92,8 +92,15 @@ keys and a GitHub token.
   with `--env KEY=VALUE`, which you type; nothing is read from your shell. `--memory`
   raises the per-service memory cap (2g by default), which is a resource guard rather
   than a containment control.
+- `validate --seed <name>` runs a named recipe's setup commands before probing, so an
+  empty instance becomes testable. A recipe runs the target's *own* documented commands
+  (its create-user command, its importer) inside the contained container; Quarry adds no
+  data itself and touches no datastore directly. It establishes test accounts, captures
+  their API keys in memory for an authenticated probe, and sets real parameter values so
+  a probe addresses a record that exists. A seed step that fails is recorded on the run,
+  not fatal, and the probes stay read-only. `vulnlookup` is the first recipe.
 
-The test suite (587 tests) asserts these against a hostile fixture repo and real
+The test suite (596 tests) asserts these against a hostile fixture repo and real
 `sandbox-exec`. A profile with no test is a comment.
 
 ## Requirements

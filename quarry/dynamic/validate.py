@@ -132,6 +132,14 @@ class RunningTarget:
     # instead of the placeholder `1`. Keyed by parameter name (vulnerability_id, uid).
     # Empty means every parameter falls back to `1`, the old behaviour.
     param_values: dict[str, str] = field(default_factory=dict)
+    # Test credentials a seed recipe created with the target's own commands, by name
+    # (e.g. {"admin_api_key": "..."}). In memory only, for authenticated probes; never
+    # stored or rendered. Empty unless a recipe ran.
+    credentials: dict[str, str] = field(default_factory=dict)
+    # How to reach the target's own service containers for operator setup steps. Set by
+    # the Docker runtime; a sidecar probe does not need them.
+    project: str = ""
+    compose_file: str = ""
 
 
 # Probe lenses and their selection live in lenses.py, keyed to the repo profile. The
@@ -293,13 +301,15 @@ def _record_provisioning(con: sqlite3.Connection, run_id: int, runtime) -> None:
 
 
 def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, *,
-                   limit: int = 50, enrich: bool = True) -> ValidationResult:
+                   limit: int = 50, enrich: bool = True, seed=None) -> ValidationResult:
     """The end-to-end loop: profile the target, select candidates and the probe lenses the
-    codebase supports, stand the target up under containment, probe each candidate against
-    its routes, and record a verdict. Every target is torn down even on error."""
+    codebase supports, stand the target up under containment, optionally seed it to a
+    testable state with the target's own commands, probe each candidate against its routes,
+    and record a verdict. Every target is torn down even on error."""
     from ..research.profile import profile_repo
     from .lenses import select_probe_lenses
     from .routes import build_route_map, crawl_routes, fetch_openapi_routes
+    from .seed import run_seed
 
     rundir = Path(rundir)
     src = rundir / "src"
@@ -330,6 +340,16 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
     try:
         def exec_fn(argv):
             return runtime.probe_exec(running, argv)
+        if seed is not None:
+            # Run the target's own setup commands in the contained instance, then carry
+            # what they established onto `running` for the probes. A seed failure is a
+            # recorded gap, never a stopped validation.
+            sr = run_seed(runtime, running, seed)
+            running.param_values = {**running.param_values, **sr.param_values}
+            running.credentials = {**running.credentials, **sr.credentials}
+            with db.tx(con):
+                db.set_health(con, run_id, "validate",
+                              {"seed": sr.notes or []})
         if enrich:
             # Best-effort, and both read-only: a served OpenAPI document, then a bounded
             # GET-only crawl. Neither knows a handler file, so each only adds to a static
