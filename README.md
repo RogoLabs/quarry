@@ -29,6 +29,9 @@ quarry serve                    # dashboard on 127.0.0.1:8099
 ```
 
 The scanners are opengrep, bandit, gitleaks, zizmor, osv-scanner, trivy and checkov.
+Opengrep runs all its rule trees at once, but if the engine crashes on one tree or file
+and writes nothing, the scan falls back to one invocation per tree so a single bad
+ruleset cannot zero the others' findings; a crashing tree is recorded, not hidden.
 `quarry deep` adds an optional review pass by local models through Ollama; cloud model
 names are refused.
 
@@ -90,7 +93,7 @@ keys and a GitHub token.
   raises the per-service memory cap (2g by default), which is a resource guard rather
   than a containment control.
 
-The test suite (584 tests) asserts these against a hostile fixture repo and real
+The test suite (587 tests) asserts these against a hostile fixture repo and real
 `sandbox-exec`. A profile with no test is a comment.
 
 ## Requirements

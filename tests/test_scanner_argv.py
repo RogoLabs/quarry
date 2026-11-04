@@ -54,3 +54,93 @@ def test_checkov_paths_are_relative_to_the_clone(tmp_path):
     paths = {r.path for r in outcome.records}
     assert paths == {"Dockerfile", "docker/Dockerfile", "src/Dockerfile"}
     assert all((src / p).is_file() for p in paths)
+
+
+# --- opengrep: one crashing rule tree must not zero the whole tool ---------------
+# MEASURED on VulnLookup: the `generic` tree crashed opengrep-core ("exited with
+# unexpected output") and the combined run wrote an empty SARIF, losing the other 24
+# trees' 645 findings while reporting success. The adapter now falls back to one
+# invocation per tree, so a crash costs only that tree.
+
+def test_opengrep_argv_single_config_is_the_same_shape():
+    og = tools.Opengrep()
+    one = og._argv(SRC, OUT, [Path("/rules/python")])
+    assert one.count("--config") == 1 and one[-1] == str(SRC)
+    assert "--taint-intrafile" in one and "--quiet" in one
+
+
+def test_opengrep_recovers_per_tree_when_the_combined_run_crashes(tmp_path, monkeypatch):
+    from quarry.scanners import base, tools as T
+    (tmp_path / "out").mkdir()
+    (tmp_path / "src").mkdir()
+    trees = [tmp_path / "rules" / n for n in ("python", "generic", "javascript")]
+    for t in trees:
+        t.mkdir(parents=True)
+    og = T.Opengrep()
+    monkeypatch.setattr(og, "available", lambda: "/usr/bin/opengrep")
+    monkeypatch.setattr(og, "config_paths", lambda: trees)
+    monkeypatch.setattr(og, "workdir", lambda rundir, src: src)
+
+    class R:
+        def __init__(self, rc):
+            self.returncode, self.duration_s = rc, 1.0
+
+        def stderr_bytes(self):
+            return b""
+
+    def fake_tier1(rundir, argv, *, name, cwd, timeout):
+        out = Path(argv[argv.index("--sarif-output") + 1])
+        out.write_text("{}")
+        if argv.count("--config") != 1:              # combined run: core crash, nothing
+            return R(2)
+        tree = Path(argv[argv.index("--config") + 1]).name
+        return R(2) if tree == "generic" else R(0)   # one tree crashes, the rest are fine
+
+    monkeypatch.setattr(base, "tier1", fake_tier1)
+    monkeypatch.setattr(T, "tier1", fake_tier1)
+
+    def fake_parse(out, src):
+        name = Path(out).stem                         # opengrep / opengrep-python / ...
+        tree = name.split("-", 1)[1] if "-" in name else "combined"
+        if tree in ("python", "javascript"):
+            return [base.Record(tool="opengrep", rule_id=f"{tree}.rule", path="app.py")]
+        return []                                     # combined and generic yield nothing
+
+    monkeypatch.setattr(og, "parse", fake_parse)
+
+    outcome = og.run(tmp_path, tmp_path / "src", timeout=300)
+    assert outcome.ok and outcome.returncode == 0
+    assert {r.rule_id for r in outcome.records} == {"python.rule", "javascript.rule"}
+    assert "generic" in outcome.note and "1 of 3" in outcome.note
+
+
+def test_opengrep_keeps_combined_result_when_it_does_not_crash(tmp_path, monkeypatch):
+    from quarry.scanners import base, tools as T
+    (tmp_path / "out").mkdir()
+    (tmp_path / "src").mkdir()
+    og = T.Opengrep()
+    monkeypatch.setattr(og, "available", lambda: "/usr/bin/opengrep")
+    monkeypatch.setattr(og, "config_paths", lambda: [tmp_path / "rules" / "python"])
+    monkeypatch.setattr(og, "workdir", lambda rundir, src: src)
+    per_tree = {"n": 0}
+
+    class R:
+        def __init__(self, rc):
+            self.returncode, self.duration_s = rc, 1.0
+
+        def stderr_bytes(self):
+            return b""
+
+    def fake_tier1(rundir, argv, *, name, cwd, timeout):
+        if argv.count("--config") == 1 and "opengrep-" in argv[argv.index("--sarif-output") + 1]:
+            per_tree["n"] += 1
+        Path(argv[argv.index("--sarif-output") + 1]).write_text("{}")
+        return R(0)
+
+    monkeypatch.setattr(base, "tier1", fake_tier1)
+    monkeypatch.setattr(T, "tier1", fake_tier1)
+    monkeypatch.setattr(og, "parse",
+                        lambda out, src: [base.Record(tool="opengrep", rule_id="r", path="a")])
+    outcome = og.run(tmp_path, tmp_path / "src", timeout=300)
+    assert outcome.ok and len(outcome.records) == 1 and outcome.note == ""
+    assert per_tree["n"] == 0                          # no fallback when combined succeeds

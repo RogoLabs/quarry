@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import Iterable
 
 from .. import taint
-from ..sandbox.spawn import rules_dir as _sandbox_rules_dir
-from .base import Record, Scanner, rel_or_none, sarif_records, score_band, strip_source
+from ..sandbox.spawn import rules_dir as _sandbox_rules_dir, tier1
+from .base import (Record, ScanOutcome, Scanner, rel_or_none, sarif_records,
+                   score_band, strip_source)
 
 RULES_ENV = "QUARRY_RULES"
 
@@ -37,10 +38,13 @@ class Opengrep(Scanner):
         return [pack / t for t in self.RULE_TREES if (pack / t).is_dir()]
 
     def argv(self, src: Path, out: Path) -> list[str]:
-        configs: list[str] = []
-        for c in self.config_paths():
-            configs += ["--config", str(c)]
-        return [self.binary, "scan", *configs,
+        return self._argv(src, out, self.config_paths())
+
+    def _argv(self, src: Path, out: Path, configs: list[Path]) -> list[str]:
+        flags: list[str] = []
+        for c in configs:
+            flags += ["--config", str(c)]
+        return [self.binary, "scan", *flags,
                 "--sarif-output", str(out),
                 "--disable-version-check",
                 # D14: suppressions are parsed, never obeyed.
@@ -48,6 +52,58 @@ class Opengrep(Scanner):
                 "--taint-intrafile",
                 "--timeout", "20", "--max-target-bytes", "2000000",
                 "--quiet", str(src)]
+
+    def run(self, rundir: Path, src: Path, *, timeout: int = 1800) -> ScanOutcome:
+        """One combined invocation is the fast normal path. But opengrep-core can abort a
+        whole run ("exited with unexpected output") on a single ruleset or a single file
+        it cannot parse, and in a combined run that one crash writes an empty SARIF and
+        zeros every finding from every tree. MEASURED on VulnLookup: the `generic` tree
+        crashed and took the other 24 trees' 645 findings with it, and `--quiet` hid why
+        while the run still reported success. So when the combined run comes back failed
+        with nothing, fall back to one invocation per rule tree, where a crashing tree
+        costs only its own findings and is recorded, not the whole tool's output."""
+        outcome = super().run(rundir, src, timeout=timeout)
+        if outcome.records or outcome.returncode == 0 or outcome.skipped:
+            return outcome
+        return self._per_tree(rundir, src, timeout)
+
+    def _per_tree(self, rundir: Path, src: Path, timeout: int) -> ScanOutcome:
+        import time
+        binpath = self.available()
+        outdir = rundir / "out"
+        trees = self.config_paths()
+        per = max(60, timeout // max(1, len(trees)))   # bound a single hung tree
+        records: list[Record] = []
+        failed: list[str] = []
+        t0 = time.time()
+        for c in trees:
+            out = outdir / f"{self.name}-{c.name}.json"
+            for stale in self.outputs(out):
+                stale.unlink(missing_ok=True)
+            argv = [binpath, *self._argv(src, out, [c])[1:]]
+            res = tier1(rundir, argv, name=self.name,
+                        cwd=self.workdir(rundir, src), timeout=per)
+            if res.returncode < 0 or not out.exists():
+                failed.append(c.name)
+                continue
+            try:
+                recs = list(self.parse(out, src))
+            except Exception:                           # noqa: BLE001 - a bad tree is data
+                failed.append(c.name)
+                continue
+            if res.returncode and not recs:             # crashed: no usable output
+                failed.append(c.name)
+                continue
+            records.extend(recs)
+        note = ""
+        if failed:
+            note = (f"combined run crashed; recovered per tree. "
+                    f"{len(failed)} of {len(trees)} rule tree(s) produced no usable "
+                    f"output and were skipped: {', '.join(sorted(failed))}")
+        # A tree that crashes is a recorded gap, not a zeroed tool: ok as long as the
+        # per-tree pass recovered findings or nothing actually failed.
+        return ScanOutcome(self.name, True, 0 if records or not failed else 2,
+                           round(time.time() - t0, 1), records, note=note)
 
     # Opengrep derives a rule id from the --config path, so an absolute config path
     # produces machine-specific ids like
