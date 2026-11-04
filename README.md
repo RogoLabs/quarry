@@ -90,7 +90,7 @@ keys and a GitHub token.
   raises the per-service memory cap (2g by default), which is a resource guard rather
   than a containment control.
 
-The test suite (583 tests) asserts these against a hostile fixture repo and real
+The test suite (584 tests) asserts these against a hostile fixture repo and real
 `sandbox-exec`. A profile with no test is a comment.
 
 ## Requirements

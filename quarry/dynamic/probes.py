@@ -30,9 +30,27 @@ AUTH_HINTS = ("login", "signin", "sign-in", "sign_in", "auth", "token", "session
 _REAL = {"200", "201", "204", "400", "401", "403", "409", "422", "429"}
 
 
-def _concrete(path: str) -> str:
-    """Substitute a benign value for every path parameter so the URL is requestable."""
-    return "/" + PATH_PARAM.sub("1", path).strip("/")
+def _fill(running: RunningTarget, path: str, *, first: str | None = None) -> str:
+    """Substitute a value for every path parameter so the URL is requestable. A parameter
+    named in `running.param_values` (vulnerability_id -> CVE-2024-3094) gets that value,
+    so a probe reaches a record that exists; the rest fall back to the benign `1`. With
+    `first`, the first parameter instead gets that payload (the injection case)."""
+    pv = running.param_values or {}
+    state = {"n": 0}
+
+    def repl(m) -> str:
+        state["n"] += 1
+        if first is not None and state["n"] == 1:
+            return first
+        name = next(g for g in m.groups() if g)
+        return pv.get(name, "1")
+
+    return PATH_PARAM.sub(repl, path).strip("/")
+
+
+def _concrete(running: RunningTarget, path: str) -> str:
+    """The path with every parameter filled, leading slash kept, for a requestable URL."""
+    return "/" + _fill(running, path)
 
 
 def _status(exec_fn, url: str) -> str:
@@ -69,17 +87,11 @@ def _inject(running: RunningTarget, route, payload: str) -> str:
     route has none. Read-only: the result is a single GET URL."""
     base = running.base_url.rstrip("/")
     if PATH_PARAM.search(route.path):
-        # one pass: first param gets the payload, the rest get a benign value, so the
-        # payload is never re-scanned (an angle-bracket payload would look like a param).
-        seen = {"n": 0}
-
-        def repl(_m):
-            seen["n"] += 1
-            return payload if seen["n"] == 1 else "1"
-
-        return base + "/" + PATH_PARAM.sub(repl, route.path).strip("/")
+        # First param gets the payload in one pass (so an angle-bracket payload is not
+        # re-scanned as a param); the rest get their real value or the benign `1`.
+        return base + "/" + _fill(running, route.path, first=payload)
     sep = "&" if "?" in route.path else "?"
-    return base + _concrete(route.path) + f"{sep}q={payload}"
+    return base + _concrete(running, route.path) + f"{sep}q={payload}"
 
 
 def _marker() -> str:
@@ -118,7 +130,7 @@ def probe_broken_authz(running: RunningTarget, candidate: Candidate,
 
     denied = 0
     for r in protected:
-        url = running.base_url.rstrip("/") + _concrete(r.path)
+        url = running.base_url.rstrip("/") + _concrete(running, r.path)
         code = _status(exec_fn, url)
         if code and code[0] == "2":
             return ProbeEvidence(
@@ -151,7 +163,7 @@ def probe_missing_rate_limit(running: RunningTarget, candidate: Candidate,
         return ProbeEvidence(reproduced=False, determinism="unknown",
                              summary="no route in the finding's file to exercise")
     r = targets[0]
-    url = running.base_url.rstrip("/") + _concrete(r.path)
+    url = running.base_url.rstrip("/") + _concrete(running, r.path)
     statuses: list[str] = []
     for _ in range(burst):
         code = _status(exec_fn, url)
@@ -192,7 +204,7 @@ def probe_auth_timing_oracle(running: RunningTarget, candidate: Candidate,
     if auth is None:
         return ProbeEvidence(reproduced=False, determinism="unknown",
                              summary="no auth-like route in the finding's file to time")
-    base = running.base_url.rstrip("/") + _concrete(auth.path)
+    base = running.base_url.rstrip("/") + _concrete(running, auth.path)
     sep = "&" if "?" in base else "?"
     present = f"{base}{sep}username=admin"
     absent = f"{base}{sep}username=zzqq-no-such-user-000"

@@ -279,10 +279,25 @@ def test_flask_converters_normalise_and_name_their_parameter():
 def test_probe_urls_fill_converter_parameters_once():
     from quarry.dynamic.probes import _concrete, _inject
     from quarry.dynamic.validate import RunningTarget
-    assert _concrete("/api/browse/<string:vendor>/products") == "/api/browse/1/products"
     running = RunningTarget("http://web:10001", stop=lambda: None, network="n")
+    assert _concrete(running, "/api/browse/<string:vendor>/products") == "/api/browse/1/products"
     route = Route("GET", "/api/c/<string:a>/<int:b>")
     assert _inject(running, route, "MARK") == "http://web:10001/api/c/MARK/1"
+
+
+def test_probe_urls_use_real_parameter_values_when_known():
+    from quarry.dynamic.probes import _concrete, _inject
+    from quarry.dynamic.validate import RunningTarget
+    running = RunningTarget("http://web:10001", stop=lambda: None, network="n",
+                            param_values={"vulnerability_id": "CVE-2024-3094", "b": "7"})
+    assert _concrete(running, "/api/vulnerability/<string:vulnerability_id>") == \
+        "/api/vulnerability/CVE-2024-3094"
+    # The injected param still gets the payload; a sibling uses its real value, not "1".
+    route = Route("GET", "/api/c/<string:a>/<int:b>")
+    assert _inject(running, route, "MARK") == "http://web:10001/api/c/MARK/7"
+    # A route with no path param keeps the known value out of the way; query stays benign.
+    plain = Route("GET", "/api/vulnerability/<string:vulnerability_id>")
+    assert _inject(running, plain, "X'") == "http://web:10001/api/vulnerability/X'"
 
 
 def test_openapi_base_path_and_server_path_prefix_every_route():

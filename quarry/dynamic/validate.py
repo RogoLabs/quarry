@@ -128,6 +128,10 @@ class RunningTarget:
     network: str = ""            # the isolated docker network a probe joins to reach it
     service: str = ""
     port: int = 0
+    # Real values for named path parameters, so a probe addresses a record that exists
+    # instead of the placeholder `1`. Keyed by parameter name (vulnerability_id, uid).
+    # Empty means every parameter falls back to `1`, the old behaviour.
+    param_values: dict[str, str] = field(default_factory=dict)
 
 
 # Probe lenses and their selection live in lenses.py, keyed to the repo profile. The
