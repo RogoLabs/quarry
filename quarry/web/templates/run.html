@@ -99,12 +99,21 @@
           <td class="mono sm">{{ t.tool }}</td>
           <td>{% if t.skipped %}<span class="pill incomplete">skipped</span>
             {% elif not t.ok %}<span class="pill alarm">failed</span>
-            {% elif t.note %}<span class="pill inert">nothing to scan</span>
+            {% elif t.nothing_to_scan %}<span class="pill inert">nothing to scan</span>
             {% else %}<span class="pill inert">ran</span>{% endif %}</td>
           <td class="n">{{ t.records }}</td>
           <td class="n">{% if t.lined %}{{ t.captured }}/{{ t.lined }}{% else %}·{% endif %}</td>
           <td class="n">{{ t.seconds }}</td>
-          <td class="dim">{{ (t.skipped or t.error or t.note or '')|visible }}</td>
+          <td class="dim">{{ (t.skipped or t.error or t.note or '')|visible }}
+            {%- if t.coverage is mapping %}
+            {%- set cov = t.coverage %}
+            <div class="sm">{{ cov.scanned|int }} file(s) scanned; {{ cov.expected|int }}
+              source file(s) in the tree
+              {%- if cov.unexplained is mapping and cov.unexplained.n %}; {{ cov.unexplained.n|int }} neither
+              scanned nor reported skipped{% endif %}
+              {%- if cov.unreported %}; {{ cov.unreported|length }} invocation(s) wrote no
+              target report{% endif %}</div>
+            {%- endif %}</td>
         </tr>
       {% endfor %}
       {% if not run.scan_tools %}

@@ -441,6 +441,11 @@ def run_summary(con: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
     tools = (m.get("scan") or {}).get("tools") or {}
     d["scan_tools"] = [{"tool": t, **i} for t, i in sorted(tools.items())
                        if isinstance(i, dict)]
+    for t in d["scan_tools"]:
+        # Runs scanned before `nothing_to_scan` was recorded: any note read as
+        # "nothing to scan", which mislabelled opengrep's per-tree recovery. A note
+        # with zero records is the closest reading of those older rows.
+        t.setdefault("nothing_to_scan", bool(t.get("note")) and not t.get("records"))
     d["health"] = [{"source": src, "tool": tool, "message": msg}
                    for src, by_tool in sorted((m.get("health") or {}).items())
                    if isinstance(by_tool, dict)

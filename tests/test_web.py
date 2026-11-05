@@ -803,3 +803,31 @@ def test_run_page_shows_each_scanner_and_any_health_warning(seeded):
     assert "Check before trusting this run" in page
     assert "failed: timed out after 5s" in page
     assert '<span class="pill alarm">failed</span>' in page
+
+
+def test_a_tool_note_is_not_read_as_nothing_to_scan(seeded):
+    """IMPROVEMENT-PLAN item 24. Any note showed the `nothing to scan` pill, so an
+    opengrep run recovered per tree, with hundreds of findings, read as an empty one."""
+    client, con = seeded
+    recovered = {"ok": True, "rc": 0, "seconds": 9.0, "records": 312, "skipped": "",
+                 "error": "", "nothing_to_scan": False,
+                 "note": "combined run crashed; recovered per tree. 1 of 25 rule tree(s) "
+                         "produced no usable output and were skipped: generic",
+                 "coverage": {"scanned": 123, "expected": 71, "skipped": {}, "errors": {},
+                              "unexplained": {"n": 2, "examples": ["a.py", "b.py"]},
+                              "unreported": ["generic"]}}
+    empty = {"ok": True, "rc": 128, "seconds": 1.0, "records": 0, "skipped": "",
+             "error": "", "note": "no package manifests to scan", "nothing_to_scan": True}
+    legacy = {"ok": True, "rc": 128, "seconds": 1.0, "records": 0, "skipped": "",
+              "error": "", "note": "no package manifests to scan"}   # before the field
+    db.update_manifest(con, 1, lambda m: m.setdefault("scan", {}).setdefault("tools", {})
+                       .update({"opengrep": recovered, "osv-scanner": empty,
+                                "trivy": legacy}))
+    page = client.get("/runs/1").text
+    rows = {t: page.split(f'<td class="mono sm">{t}</td>', 1)[1].split("</tr>", 1)[0]
+            for t in ("opengrep", "osv-scanner", "trivy")}
+    assert "nothing to scan" not in rows["opengrep"] and ">ran<" in rows["opengrep"]
+    assert "123 file(s) scanned; 71" in rows["opengrep"]
+    assert "2 neither" in rows["opengrep"] and "1 invocation(s) wrote no" in rows["opengrep"]
+    assert "nothing to scan</span>" in rows["osv-scanner"]
+    assert "nothing to scan</span>" in rows["trivy"]

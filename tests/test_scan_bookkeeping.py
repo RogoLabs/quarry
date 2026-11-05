@@ -265,6 +265,61 @@ def test_a_tool_whose_paths_miss_the_clone_is_flagged(tmp_path, monkeypatch):
     assert "evidence captured for 0 of 3" in s.health["checkov"][0]
 
 
+def test_a_tool_that_skips_files_silently_is_flagged(tmp_path, monkeypatch):
+    """IMPROVEMENT-PLAN item 15. Opengrep skipped every tests/ and vendor/ file and
+    the run said done; 0 of 904 opengrep hits across runs 1 to 3 were under test
+    paths. The tool's own target report is compared with the tree."""
+    cov = base.Coverage(
+        scanned={"app.py", "lib/huge.py"},
+        skipped={"exceeded_size_limit": {"lib/big.py"},
+                 "analysis_failed_parser_or_internal_error": {"lib/huge.py"}},
+        errors={"Timeout": 3})
+    tools = {"opengrep": _Canned("opengrep", lambda: base.ScanOutcome(
+        "opengrep", True, 0, 1.0, [Record("opengrep", "r", "app.py", 1)], coverage=cov))}
+    c, paths = _scan_env(tmp_path, monkeypatch, tools)
+    src = tmp_path / "vol" / "src"
+    for rel in ("lib/big.py", "lib/huge.py", "tests/test_app.py", "vendor/x/y.go",
+                "README.md"):
+        (src / rel).parent.mkdir(parents=True, exist_ok=True)
+        (src / rel).write_text("x\n")
+
+    s = orchestrator.scan(paths, c, 1)
+
+    kept = db.read_manifest(c, 1)["scan"]["tools"]["opengrep"]["coverage"]
+    assert (kept["scanned"], kept["expected"]) == (2, 5)        # README.md is not source
+    assert kept["unexplained"] == {"n": 2, "examples": ["tests/test_app.py",
+                                                        "vendor/x/y.go"]}
+    assert kept["skipped"]["exceeded_size_limit"] == {"n": 1, "examples": ["lib/big.py"]}
+    msgs = s.health["opengrep"]
+    assert any("2 of 5 source file(s) were neither scanned nor reported skipped" in m
+               for m in msgs)
+    assert any("larger than --max-target-bytes, e.g. lib/big.py" in m for m in msgs)
+    assert any("per-file timeout" in m for m in msgs)
+    assert any("Timeout 3" in m for m in msgs)
+    assert db.read_manifest(c, 1)["health"]["scan"]["opengrep"] == msgs
+
+
+def test_a_skipped_directory_explains_the_files_under_it():
+    """Opengrep names an ignored tree once (`vendor`), not file by file; those files
+    must not be reported a second time as unexplained."""
+    cov = base.Coverage(scanned={"app/a.py"},
+                        skipped={"semgrepignore_patterns_match": {"vendor", "tests"}})
+    s = orchestrator.coverage_summary(
+        cov, {"app/a.py", "vendor/lib/v.py", "tests/t.py", "testsuite/x.py"})
+    assert s["unexplained"] == {"n": 1, "examples": ["testsuite/x.py"]}
+    msgs = orchestrator.coverage_health(s)
+    assert msgs[0].startswith("2 path(s) skipped by an ignore list")
+
+
+def test_full_coverage_raises_no_warning_and_a_missing_report_does():
+    clean = {"scanned": 4, "expected": 4, "skipped": {}, "errors": {},
+             "unexplained": {"n": 0, "examples": []}, "unreported": []}
+    assert orchestrator.coverage_health(clean) == []
+    gone = {**clean, "scanned": 0, "unreported": ["combined"]}
+    assert "no target report from 1 invocation(s) (combined)" in \
+        orchestrator.coverage_health(gone)[0]
+
+
 def test_osv_with_lockfiles_and_no_findings_is_questioned():
     h = orchestrator.scan_health(
         {"osv-scanner": {"ok": True, "records": 0, "note": ""}}, lockfiles=2)

@@ -7,8 +7,8 @@ from typing import Iterable
 
 from .. import taint
 from ..sandbox.spawn import rules_dir as _sandbox_rules_dir, tier1
-from .base import (Record, ScanOutcome, Scanner, rel_or_none, sarif_records,
-                   score_band, strip_source)
+from .base import (Coverage, Record, ScanOutcome, Scanner, rel_or_none, sarif_records,
+                   score_band, strip_source, write_tool_config)
 
 RULES_ENV = "QUARRY_RULES"
 
@@ -40,18 +40,43 @@ class Opengrep(Scanner):
     def argv(self, src: Path, out: Path) -> list[str]:
         return self._argv(src, out, self.config_paths())
 
+    @staticmethod
+    def targets_path(out: Path) -> Path:
+        return out.with_name(f"{out.stem}.targets.json")
+
+    def outputs(self, out: Path) -> list[Path]:
+        return [out, self.targets_path(out)]
+
     def _argv(self, src: Path, out: Path, configs: list[Path]) -> list[str]:
         flags: list[str] = []
         for c in configs:
             flags += ["--config", str(c)]
         return [self.binary, "scan", *flags,
                 "--sarif-output", str(out),
+                # The same run writes a second report. Its `paths` block lists every
+                # file scanned and, with --verbose, every file skipped and why. SARIF
+                # carries neither, so coverage is read from here (base.Coverage).
+                "--json-output", str(self.targets_path(out)),
                 "--disable-version-check",
                 # D14: suppressions are parsed, never obeyed.
                 "--disable-nosem",
+                # IMPROVEMENT-PLAN item 15. Ingest quarantines the target's
+                # .semgrepignore (D14), and with none present opengrep applies a
+                # built-in list: test/, tests/, vendor/, build/, dist/, node_modules/,
+                # *.min.js, *_test.go and more. Those files were skipped without a word.
+                # MEASURED, opengrep 1.27.1: 1 of 5 fixture files scanned without this
+                # flag, 5 of 5 with it; across runs 1 to 3, 0 of 904 opengrep hits sat
+                # under test/ or tests/ while bandit had 687, 250 and 4,982 there. An
+                # empty .semgrepignore did not help. `--x-` options are internal and
+                # may be removed, so the target report below is also the canary: if
+                # the flag stops working, the skips show up as health warnings.
+                "--x-ignore-semgrepignore-files",
                 "--taint-intrafile",
                 "--timeout", "20", "--max-target-bytes", "2000000",
-                "--quiet", str(src)]
+                # Not --quiet: without --verbose the JSON report omits `skipped`, and
+                # stderr (a file on the run volume) is the only record of why a run
+                # crashed. Its skip lists are capped at 100 entries by opengrep.
+                "--verbose", str(src)]
 
     def run(self, rundir: Path, src: Path, *, timeout: int = 1800) -> ScanOutcome:
         """One combined invocation is the fast normal path. But opengrep-core can abort a
@@ -63,9 +88,44 @@ class Opengrep(Scanner):
         with nothing, fall back to one invocation per rule tree, where a crashing tree
         costs only its own findings and is recorded, not the whole tool's output."""
         outcome = super().run(rundir, src, timeout=timeout)
-        if outcome.records or outcome.returncode == 0 or outcome.skipped:
+        if outcome.skipped:
+            return outcome
+        if outcome.records or outcome.returncode == 0:
+            outcome.coverage = self.coverage(rundir / "out" / f"{self.name}.json", src,
+                                             label="combined")
             return outcome
         return self._per_tree(rundir, src, timeout)
+
+    def coverage(self, out: Path, src: Path, *, label: str) -> Coverage:
+        """Read the target report one invocation wrote. A missing or unreadable report
+        is recorded under `unreported`, never read as "scanned nothing"."""
+        try:
+            doc = taint.load_json(self.targets_path(out))
+        except (taint.TaintError, OSError):
+            doc = None
+        paths = doc.get("paths") if isinstance(doc, dict) else None
+        if not isinstance(paths, dict):
+            return Coverage(unreported=[label])
+        cov = Coverage()
+        for uri in paths.get("scanned") or []:
+            if isinstance(uri, str) and (p := rel_or_none(uri, src)):
+                cov.scanned.add(p)
+        for s in paths.get("skipped") or []:
+            if not isinstance(s, dict):
+                continue
+            p = rel_or_none(s.get("path"), src) if isinstance(s.get("path"), str) else None
+            if p:
+                reason = taint.scrub_text(s.get("reason") or "unknown", 80)
+                cov.skipped.setdefault(reason, set()).add(p)
+        for e in doc.get("errors") or []:
+            if not isinstance(e, dict):
+                continue
+            # `type` is a string ("Timeout") or a list (["PartialParsing", [spans]]).
+            t = e.get("type")
+            t = t[0] if isinstance(t, list) and t else t
+            kind = taint.scrub_text(t if isinstance(t, str) else "unknown", 80)
+            cov.errors[kind] = cov.errors.get(kind, 0) + 1
+        return cov
 
     def _per_tree(self, rundir: Path, src: Path, timeout: int) -> ScanOutcome:
         import time
@@ -75,14 +135,19 @@ class Opengrep(Scanner):
         per = max(60, timeout // max(1, len(trees)))   # bound a single hung tree
         records: list[Record] = []
         failed: list[str] = []
+        cov = Coverage()
         t0 = time.time()
         for c in trees:
             out = outdir / f"{self.name}-{c.name}.json"
             for stale in self.outputs(out):
                 stale.unlink(missing_ok=True)
             argv = [binpath, *self._argv(src, out, [c])[1:]]
-            res = tier1(rundir, argv, name=self.name,
+            # Own log per tree: one shared name was unlinked and recreated by every
+            # tree, so the combined run's crash log and all but the last tree's were
+            # gone by the time anyone looked (IMPROVEMENT-PLAN item 24).
+            res = tier1(rundir, argv, name=f"{self.name}-{c.name}",
                         cwd=self.workdir(rundir, src), timeout=per)
+            cov.merge(self.coverage(out, src, label=c.name))
             if res.returncode < 0 or not out.exists():
                 failed.append(c.name)
                 continue
@@ -95,6 +160,15 @@ class Opengrep(Scanner):
                 failed.append(c.name)
                 continue
             records.extend(recs)
+        if trees and len(failed) == len(trees):
+            # Every tree failed, so nothing was scanned. MEASURED: an option opengrep
+            # 1.27.1 rejects made every invocation exit 2 with no output, and this
+            # returned ok with a note, which reads as a clean scan.
+            return ScanOutcome(self.name, False, 2, round(time.time() - t0, 1),
+                               error=f"every rule tree failed ({len(trees)} of "
+                                     f"{len(trees)}); see logs/{self.name}.stderr and "
+                                     f"logs/{self.name}-<tree>.stderr",
+                               coverage=cov)
         note = ""
         if failed:
             note = (f"combined run crashed; recovered per tree. "
@@ -103,7 +177,7 @@ class Opengrep(Scanner):
         # A tree that crashes is a recorded gap, not a zeroed tool: ok as long as the
         # per-tree pass recovered findings or nothing actually failed.
         return ScanOutcome(self.name, True, 0 if records or not failed else 2,
-                           round(time.time() - t0, 1), records, note=note)
+                           round(time.time() - t0, 1), records, note=note, coverage=cov)
 
     # Opengrep derives a rule id from the --config path, so an absolute config path
     # produces machine-specific ids like
@@ -136,8 +210,17 @@ class Bandit(Scanner):
 
     def argv(self, src: Path, out: Path) -> list[str]:
         # --ignore-nosec: D14 — suppressions are parsed, never obeyed.
+        # -x: IMPROVEMENT-PLAN item 23. Bandit's default exclude list is the bare
+        # strings .svn, CVS, .bzr, .hg, .git, __pycache__, .tox, .eggs, *.egg. Each
+        # becomes a `<name>/*` glob only if ./<name> is a directory in the *cwd*;
+        # otherwise it is matched as a substring of every path. Quarry's cwd is the
+        # run's out/ dir, so `.git` matched `.github/` and `CVS` matched `CVSS.py`.
+        # MEASURED, bandit 1.9.4: .github/scripts/x.py, lib/CVSS.py and .gitlab/ci.py
+        # were skipped without a word. An explicit -x replaces that list. The trailing
+        # `/*` keeps this one a glob: bandit never sees it as a directory, and the
+        # literal `*` cannot occur in a real path, so the substring test never fires.
         return [self.binary, "-r", str(src), "-f", "json", "-o", str(out),
-                "--ignore-nosec", "-q"]
+                "-x", f"{src}/.git/*", "--ignore-nosec", "-q"]
 
     def parse(self, out: Path, src: Path) -> Iterable[Record]:
         doc = taint.load_json(out)
@@ -156,16 +239,28 @@ class Bandit(Scanner):
             )
 
 
+GITLEAKS_CONFIG_NAME = "gitleaks-config.toml"
+
+
 class Gitleaks(Scanner):
     """Secrets. D16: the match never reaches the database in plaintext — the adapter
     hands it over on `Record.secret` and the writer stores (prefix, sha256)."""
     name = "gitleaks"
     binary = "gitleaks"
 
+    def run(self, rundir: Path, src: Path, *, timeout: int = 1800) -> "ScanOutcome":
+        # IMPROVEMENT-PLAN item 23: Gitleaks' default rules without its global path
+        # allowlist (node_modules/, lockfiles, vendored trees, virtualenvs). See
+        # gitleaks_config.py. Copied into out/, which Tier 1 can read, like OSV's.
+        from .gitleaks_config import CONFIG
+        write_tool_config(rundir, GITLEAKS_CONFIG_NAME, CONFIG.read_text())
+        return super().run(rundir, src, timeout=timeout)
+
     def argv(self, src: Path, out: Path) -> list[str]:
         # --ignore-gitleaks-allow: D14, an inline `gitleaks:allow` is the target
         # telling the scanner what not to report.
         return [self.binary, "detect", "--source", str(src), "--no-git",
+                "--config", str(out.parent / GITLEAKS_CONFIG_NAME),
                 "--report-format", "json", "--report-path", str(out),
                 "--redact=0", "--exit-code", "0", "--no-banner",
                 "--ignore-gitleaks-allow"]
@@ -233,7 +328,7 @@ class OSVScanner(Scanner):
 
     def run(self, rundir: Path, src: Path, *, timeout: int = 1800) -> "ScanOutcome":
         # Written into the per-run out/ dir, which is readable inside Tier 1; see argv.
-        (rundir / "out" / OSV_CONFIG_NAME).write_text(OSV_CONFIG_TOML)
+        write_tool_config(rundir, OSV_CONFIG_NAME, OSV_CONFIG_TOML)
         return super().run(rundir, src, timeout=timeout)
 
     def argv(self, src: Path, out: Path) -> list[str]:
@@ -327,6 +422,17 @@ class Checkov(Scanner):
                 "--output-file-path", str(out.parent),
                 "--download-external-modules", "false",
                 "--skip-download", "--compact", "--quiet"]
+
+    def env(self) -> dict[str, str]:
+        # IMPROVEMENT-PLAN item 23. Checkov drops directories named node_modules,
+        # .terraform or .serverless, and every directory whose name starts with a
+        # dot, so a Docker container action's .github/actions/<name>/Dockerfile was
+        # never read. Both rules are set only by environment variable. MEASURED: a
+        # Dockerfile under node_modules/, .venv/ or .github/ produced nothing; with
+        # these values, all three produce findings. (A root .gitlab-ci.yml is read
+        # either way.) Keep only .git out; the match is on the exact directory name.
+        return {"CKV_IGNORED_DIRECTORIES": ".git",
+                "CKV_IGNORE_HIDDEN_DIRECTORIES": "false"}
 
     def outputs(self, out: Path) -> list[Path]:
         return [out, out.parent / "results_sarif.sarif"]

@@ -238,16 +238,98 @@ def trivy_inline_ignores(src: Path, *, cap: int = 1024 * 1024) -> list[str]:
     return sorted(hits)
 
 
+# Source extensions every opengrep rule pack run is expected to read. MEASURED with the
+# installed pack (opengrep 1.27.1, all 25 trees): one file of each extension below was
+# in `paths.scanned`. The `generic` tree targets every file, .md and .txt included, so
+# this list undercounts on purpose; it is a denominator, not a language map.
+SOURCE_EXTS = frozenset({
+    ".py", ".pyi", ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts",
+    ".go", ".java", ".rb", ".php", ".rs", ".scala", ".kt", ".kts", ".cs", ".c", ".h",
+    ".cpp", ".swift", ".sol", ".ex", ".exs", ".clj", ".cljs", ".ml", ".mli", ".sh",
+    ".bash", ".tf", ".hcl",
+})
+_EXAMPLES = 10
+
+
+def source_files(src: Path) -> set[str]:
+    """Clone-relative paths of every source file in the tree, by extension. Walks the
+    tree without following links and reads no content. Everything but .git counts:
+    a vendored or test file is still code a scanner was supposed to read."""
+    found: set[str] = set()
+    for root, dirs, files in os.walk(src, followlinks=False):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        for name in files:
+            if os.path.splitext(name)[1].lower() in SOURCE_EXTS:
+                found.add((Path(root) / name).relative_to(src).as_posix())
+    return found
+
+
+def coverage_summary(cov: Any, expected: set[str]) -> dict[str, Any]:
+    """The manifest form of a tool's Coverage: counts, plus a few example paths for
+    each gap so the run page can name them. `unexplained` is a source file the tool
+    neither scanned nor reported skipping, which is the silent kind of loss."""
+    # A skip can name a directory: opengrep reports an ignored tree as `vendor`, not
+    # file by file. A file under a reported directory is explained.
+    reported = set().union(*cov.skipped.values()) if cov.skipped else set()
+    unexplained = sorted(
+        f for f in expected - cov.scanned
+        if f not in reported
+        and not any(p.as_posix() in reported for p in Path(f).parents))
+    return {
+        "scanned": len(cov.scanned),
+        "expected": len(expected),
+        "skipped": {r: {"n": len(ps), "examples": sorted(ps)[:_EXAMPLES]}
+                    for r, ps in sorted(cov.skipped.items())},
+        "errors": dict(sorted(cov.errors.items())),
+        "unexplained": {"n": len(unexplained), "examples": unexplained[:_EXAMPLES]},
+        "unreported": list(cov.unreported),
+    }
+
+
+# How each opengrep skip reason reads in a health warning. An unknown reason is shown
+# as the tool wrote it.
+_SKIP_WORDS = {
+    "semgrepignore_patterns_match": "skipped by an ignore list",
+    "exceeded_size_limit": "skipped as larger than --max-target-bytes",
+    "analysis_failed_parser_or_internal_error":
+        "only partly analyzed (parse error, or a per-file timeout that stops the "
+        "remaining rules on that file)",
+}
+
+
+def coverage_health(cov: dict[str, Any]) -> list[str]:
+    msgs: list[str] = []
+    if cov.get("unreported"):
+        msgs.append(f"no target report from {len(cov['unreported'])} invocation(s) "
+                    f"({', '.join(cov['unreported'][:5])}); what they scanned is unknown.")
+    for reason, s in (cov.get("skipped") or {}).items():
+        eg = ", ".join(s["examples"][:3])
+        msgs.append(f"{s['n']} path(s) {_SKIP_WORDS.get(reason, f'skipped ({reason})')}"
+                    f", e.g. {eg}")
+    if errs := cov.get("errors"):
+        msgs.append("rule errors on scanned files: "
+                    + ", ".join(f"{k} {v}" for k, v in errs.items()))
+    un = cov.get("unexplained") or {}
+    if un.get("n"):
+        msgs.append(f"{un['n']} of {cov.get('expected', '?')} source file(s) were neither "
+                    f"scanned nor reported skipped, e.g. {', '.join(un['examples'][:3])}")
+    return msgs
+
+
 def scan_health(per_tool: dict[str, dict[str, Any]], lockfiles: int) -> dict[str, list[str]]:
     """Ways a tool can lose its output while the run still reports success. Each one
     has happened: Checkov's paths left every finding without an evidence window (21 of
-    21 killed), and osv-scanner returned nothing for a whole run because one GIT
-    dependency aborted it. A warning here is a question to answer, not a verdict."""
+    21 killed), osv-scanner returned nothing for a whole run because one GIT
+    dependency aborted it, and opengrep's built-in ignore list skipped every test/,
+    vendor/, build/ and dist/ file. A warning here is a question to answer, not a
+    verdict."""
     out: dict[str, list[str]] = {}
     for tool, info in per_tool.items():
         msgs = []
         if info.get("error"):
             msgs.append(f"failed: {info['error']}")
+        if isinstance(info.get("coverage"), dict):
+            msgs += coverage_health(info["coverage"])
         lined, got = info.get("lined", 0), info.get("captured", 0)
         if lined and got / lined < 0.5:
             msgs.append(f"evidence captured for {got} of {lined} located finding(s); "
@@ -298,6 +380,7 @@ def scan(paths: Paths, con: sqlite3.Connection, run_id: int, *,
     # with the report an earlier scan left on the volume.
     chosen.sort(key=lambda s: s.name != "gitleaks")
     secrets: set[str] = set(taint.run_secrets(vol.mount))
+    expected: set[str] | None = None
 
     for sc in chosen:
         outcome = sc.run(vol.mount, src, timeout=timeout)
@@ -309,8 +392,14 @@ def scan(paths: Paths, con: sqlite3.Connection, run_id: int, *,
             "seconds": round(outcome.duration_s, 1),
             "records": len(outcome.records),
             "skipped": outcome.skipped, "error": outcome.error, "note": outcome.note,
+            "nothing_to_scan": outcome.nothing_to_scan,
             "lined": 0, "captured": 0,
         }
+        if outcome.coverage is not None:
+            if expected is None:
+                expected = source_files(src)
+            summary.per_tool[sc.name]["coverage"] = coverage_summary(outcome.coverage,
+                                                                     expected)
         if outcome.ok:
             _persist(con, run_id, target, git_sha, src, sc.name, outcome.records, summary,
                      secrets=frozenset(secrets))

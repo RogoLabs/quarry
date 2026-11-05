@@ -15,6 +15,7 @@ improves, and Seat 1 made it a condition of endorsement.
 """
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,6 +43,28 @@ class Record:
 
 
 @dataclass
+class Coverage:
+    """What a tool says it looked at, read from the tool's own report.
+
+    Zero findings from a tool is not evidence that it read a file: Opengrep's built-in
+    ignore list dropped every test/, vendor/, build/ and dist/ file without a word
+    (IMPROVEMENT-PLAN item 15). A tool that can say which files it scanned and which it
+    skipped carries that here, so the orchestrator can compare it with the tree."""
+    scanned: set[str] = field(default_factory=set)            # clone-relative paths
+    skipped: dict[str, set[str]] = field(default_factory=dict)  # reason -> paths
+    errors: dict[str, int] = field(default_factory=dict)        # error type -> count
+    unreported: list[str] = field(default_factory=list)         # invocations with no report
+
+    def merge(self, other: "Coverage") -> None:
+        self.scanned |= other.scanned
+        for reason, ps in other.skipped.items():
+            self.skipped.setdefault(reason, set()).update(ps)
+        for kind, n in other.errors.items():
+            self.errors[kind] = self.errors.get(kind, 0) + n
+        self.unreported += other.unreported
+
+
+@dataclass
 class ScanOutcome:
     tool: str
     ok: bool
@@ -51,6 +74,11 @@ class ScanOutcome:
     error: str = ""
     skipped: str = ""               # non-empty => the tool did not run, and why
     note: str = ""                  # ran cleanly, but say something (e.g. nothing to scan)
+    coverage: Coverage | None = None  # None => the tool cannot report what it scanned
+    # The note means the target had nothing this tool reads. Kept apart from `note`,
+    # which the run page read as "nothing to scan" for any note at all, including
+    # opengrep's "recovered per tree" on a run with hundreds of findings.
+    nothing_to_scan: bool = False
 
 
 class Scanner:
@@ -80,6 +108,11 @@ class Scanner:
         """The child's cwd. Must be inside the run volume or the profile denies getcwd()."""
         return rundir / "out"
 
+    def env(self) -> dict[str, str]:
+        """Extra environment for the child, on top of the sandbox's own. Used for
+        tools whose directory skips are switched by environment variable only."""
+        return {}
+
     def nothing_to_scan(self, returncode: int, out: Path, stderr: bytes) -> str:
         """Non-empty when the tool exited non-zero only because the target has
         nothing it can read. Without this, an absent output file reads as refused output."""
@@ -100,8 +133,10 @@ class Scanner:
         for stale in self.outputs(out):
             stale.unlink(missing_ok=True)
         argv = [binpath, *self.argv(src, out)[1:]]
+        # Only pass env when there is some: the test doubles for tier1 predate it.
+        extra = {"env": e} if (e := self.env()) else {}
         res = tier1(rundir, argv, name=self.name, cwd=self.workdir(rundir, src),
-                    timeout=timeout)
+                    timeout=timeout, **extra)
         # A negative code is a signal; tier1 reports its own timeout as -9. Either way
         # the output is partial, and partial output parses as a clean result.
         if res.returncode < 0:
@@ -114,7 +149,8 @@ class Scanner:
         except Exception:                   # noqa: BLE001 - a missing log is not a verdict
             stderr = b""
         if why := self.nothing_to_scan(res.returncode, out, stderr):
-            return ScanOutcome(self.name, True, res.returncode, res.duration_s, note=why)
+            return ScanOutcome(self.name, True, res.returncode, res.duration_s, note=why,
+                               nothing_to_scan=True)
 
         try:
             records = list(self.parse(out, src))
@@ -128,6 +164,24 @@ class Scanner:
 
 
 # ---------------------------------------------------------------- helpers
+
+def write_tool_config(rundir: Path, name: str, text: str) -> Path:
+    """Write a Quarry-owned config into the run's out/ dir for a sandboxed tool to read.
+
+    Tier 0 writes here, into a directory every earlier sandboxed tool could write to.
+    A plain write_text follows a symlink a child left at the path, which would turn a
+    compromised scanner into a write anywhere the operator can write. So the file is
+    created the way logs are: unlinked first, then O_EXCL and never through a link."""
+    from ..sandbox.spawn import _create_log
+    out = rundir / "out"
+    if out.is_symlink():
+        out.unlink()
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / name
+    with os.fdopen(_create_log(path), "w") as fh:
+        fh.write(text)
+    return path
+
 
 def rel_or_none(uri: str | None, src: Path) -> str | None:
     """Validate a tool-emitted path against the clone root, or drop the finding.
