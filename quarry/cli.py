@@ -238,6 +238,84 @@ def deep(run_id: int = typer.Argument(..., help="an ingested run"),
     con_out.print(f"[dim]watch it at http://127.0.0.1:8099/research/{rid}[/]")
 
 
+@app.command("deep-verdict")
+def deep_verdict(research_finding_id: int = typer.Argument(
+                     ..., help="a research finding id (quarry deep-survivors lists them)"),
+                 verdict: str = typer.Argument(..., help="intended | real | unclear"),
+                 note: str = typer.Option(..., "--note",
+                                          help="why; a later run shows it to the refuter"),
+                 by: str = typer.Option("operator", "--by", help="who judged it")) -> None:
+    """Record a human verdict on a Layer 2 deep-review finding.
+
+    Appended, never overwritten: the newest verdict on a finding is its current one. The
+    next deep run on the same target matches its findings against this one (same lens and
+    file, and a matching quote or enclosing symbol). An `intended` match is shown to the
+    refuter, and if it survives it is listed as previously judged intended, not as new.
+    """
+    from .research import verdicts
+    _, connection = _open()
+    try:
+        vid = verdicts.record(connection, research_finding_id, verdict, note, actor=by)
+    except verdicts.VerdictError as e:
+        con_out.print(f"[red]refusing:[/] {_e(e)}")
+        raise typer.Exit(1)
+    rf = connection.execute("SELECT lens, file, quote_verified, n_survived "
+                            "FROM research_findings WHERE id=?",
+                            (research_finding_id,)).fetchone()
+    con_out.print(f"verdict {vid}: research finding {research_finding_id} "
+                  f"({_e(rf['lens'])}, {_e(rf['file'])}) is "
+                  f"[bold]{_e(verdict.strip().lower())}[/]")
+    if not (rf["quote_verified"] and rf["n_survived"]):
+        con_out.print("[yellow]note:[/] this finding is not a Layer 2 survivor (quote not "
+                      "verified, or no cross-family model defended it); recorded anyway")
+
+
+@app.command("deep-survivors")
+def deep_survivors(run_id: int = typer.Argument(..., help="a run with a deep review")) -> None:
+    """List a run's Layer 2 survivors with their human verdicts.
+
+    A survivor clears the bar the report digest uses: the quote verified, and a model of
+    another family defended it. Survivors that matched an earlier human verdict are
+    listed apart from new ones, so a finding already judged intended is not presented as
+    new."""
+    from .research import verdicts
+    _, connection = _open()
+    rows = verdicts.survivors(connection, run_id)
+    if not rows:
+        con_out.print(f"[dim]no deep-review survivors for run {run_id}[/]")
+        return
+    groups = (("new", [r for r in rows if not r["prior_verdict"]]),
+              ("previously judged intended",
+               [r for r in rows if r["prior_verdict"] == "intended"]),
+              ("previously judged real or unclear",
+               [r for r in rows if r["prior_verdict"] in ("real", "unclear")]))
+    for label, group in groups:
+        if not group:
+            continue
+        t = Table(title=f"{len(group)} {label}", show_header=True, header_style="bold")
+        for c in ("id", "lens", "file", "title", "vote", "verdict", "prior"):
+            t.add_column(c)
+        for r in group:
+            prior = f"{r['prior_verdict']} (#{r['prior_rf']})" if r["prior_verdict"] else "-"
+            t.add_row(str(r["id"]), _e(r["lens"]), _e(r["file"]), _e(r["title"]),
+                      f"{r['n_survived']} defended / {r['n_refuted']} refuted",
+                      _e(r["verdict"] or "-"), _e(prior))
+        con_out.print(t)
+    for r in rows:
+        if r["verdict"]:
+            con_out.print(f"  #{r['id']} {_e(r['verdict'])} ({_e(r['verdict_at'])} UTC, "
+                          f"{_e(r['verdict_by'])}): {_e(r['note'])}")
+        if r["prior_verdict"]:
+            con_out.print(f"  #{r['id']} matched #{r['prior_rf']} ({_e(r['prior_match'])}), "
+                          f"judged {_e(r['prior_verdict'])} {_e(r['prior_at'])} UTC: "
+                          f"{_e(r['prior_note'])}")
+    con_out.print(f"[dim]{len(rows)} survivor(s): {len(groups[0][1])} new, "
+                  f"{len(groups[1][1])} previously judged intended, "
+                  f"{sum(1 for r in rows if not r['verdict'])} without a verdict of their "
+                  f"own. Record one with: quarry deep-verdict <id> intended|real|unclear "
+                  f"--note \"...\"[/]")
+
+
 @app.command()
 def doctor() -> None:
     """Check the environment: data root, containment, and which tools are present."""

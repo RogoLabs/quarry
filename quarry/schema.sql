@@ -214,3 +214,17 @@ WHERE NOT EXISTS (
       AND f.id > COALESCE((SELECT MAX(r.id) FROM funnel_events r
                            WHERE r.occurrence_id = o.id AND r.action = 'resurrect'), 0)
 );
+
+-- ---------------------------------------------------------------- defined by migrations
+-- This script is the v0 schema, and every database runs it first. Later tables and
+-- columns are created by quarry/migrations.py, gated on PRAGMA user_version, so a fresh
+-- database and an upgraded one end in the same state. Not repeated here, so there is
+-- one definition of each:
+--   v5  targets
+--   v6  research_runs, research_units, research_findings (Layer 2 deep review)
+--   v7  research_runs.pid, .host, .heartbeat
+--   v8  advisories
+--   v9  deep_verdicts (human verdicts on Layer 2 findings: intended | real | unclear,
+--       append-only, newest row per finding is current), and research_findings.symbol,
+--       .prior_verdict_id, .prior_match (the earlier verdict a later run matched)
+-- v4 also redefines live_occurrences above to treat defer and merge like kill.

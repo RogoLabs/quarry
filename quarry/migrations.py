@@ -233,9 +233,46 @@ def _v8_advisories(con: sqlite3.Connection) -> None:
     """)
 
 
+def _v9_deep_verdicts(con: sqlite3.Connection) -> None:
+    """Human verdicts on Layer 2 findings, and what a later deep run matched them to.
+
+    Run 1's two survivors were judged deliberate behaviour in a Markdown file, which no
+    later run could read (IMPROVEMENT-PLAN item 20). `deep_verdicts` is append-only, like
+    the funnel ledger: a changed mind is a new row, and the newest row per research
+    finding is current. The vocabulary (intended, real, unclear) is checked in Python, not
+    by a CHECK, for v1's reason.
+
+    On `research_findings`: `symbol` is the definition enclosing the quote (a function,
+    a class method, or an Express route), computed against the run's own clone at persist
+    time, because the clone may be gone by the time anyone compares runs.
+    `prior_verdict_id` and `prior_match` say which earlier human verdict this finding was
+    matched to and why, so a survivor that a human already called intended is shown as
+    such instead of as new. Rows from before v9 keep NULL in all three."""
+    con.executescript("""
+        CREATE TABLE IF NOT EXISTS deep_verdicts (
+            id                  INTEGER PRIMARY KEY,
+            research_finding_id INTEGER NOT NULL REFERENCES research_findings(id),
+            verdict             TEXT    NOT NULL,
+            note                TEXT    NOT NULL,
+            actor               TEXT    NOT NULL DEFAULT 'operator',
+            created_at          TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_deep_verdicts_rf
+            ON deep_verdicts(research_finding_id);
+    """)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(research_findings)")}
+    for name, decl in (("symbol", "TEXT"),
+                       ("prior_verdict_id", "INTEGER REFERENCES deep_verdicts(id)"),
+                       ("prior_match", "TEXT")):
+        if name not in cols:
+            con.execute(f"ALTER TABLE research_findings ADD COLUMN {name} {decl}")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_rfind_lens_file "
+                "ON research_findings(lens, file)")
+
+
 MIGRATIONS = (_v1_funnel_actions, _v2_rank_view, _v3_issue_membership,
               _v4_repair_views, _v5_targets, _v6_research, _v7_research_liveness,
-              _v8_advisories)
+              _v8_advisories, _v9_deep_verdicts)
 
 
 def migrate(con: sqlite3.Connection) -> int:
