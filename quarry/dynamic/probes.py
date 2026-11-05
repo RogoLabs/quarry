@@ -1,7 +1,11 @@
 """Concrete probe bodies, each with its own control.
 
 Every probe is non-destructive by construction: it observes, it does not mutate or
-delete data, and it does not try to take the target down.
+delete data that existed before it ran, and it does not try to take the target down.
+One exception is bounded and stated in its verdict: the cross-user probe may create two
+records of its own through the target's API, as a seeded test account, inside the
+contained throwaway instance, and its delete and modify checks only ever address those
+two records, by ids the probe generated.
 
 The adjudication contract (validate.adjudicate_with_reason) is the same for every class:
 
@@ -27,6 +31,10 @@ Per class, the control and what decides:
     credential, which a working check refuses. Baseline: a valid seeded credential,
     whose body the anonymous response must match. It never rejects: an anonymous refusal
     shows authentication, not whether one account can reach another's records.
+  * authz, cross-user: seeded account B creates two canary records; the anonymous client
+    (control) and account A (probe) address them; B's own request is the baseline.
+    Confirms when A gets B's result and the control was refused; rejects when A is
+    refused like the control while B's own request worked.
   * rate limit: a lone request (baseline), then a bounded burst in one curl run. The
     finding is a missing defence, so it reproduces on sameness (reproduces_when="same").
   * XSS: a benign alphanumeric token (control) and a markup marker on the same parameter.
@@ -47,11 +55,12 @@ import hashlib
 import os
 import re
 import statistics
+import uuid as _uuid
 from dataclasses import dataclass
 from urllib.parse import quote
 
 from ..cwe import probe_class
-from .routes import PATH_PARAM
+from .routes import PATH_PARAM, _norm_path
 from .validate import Candidate, ProbeEvidence, RunningTarget
 
 ExecFn = "Callable[[list[str]], tuple[int, str]]"
@@ -410,6 +419,301 @@ def _anonymous_served(running, cand, r, url, anon: _Resp, exec_fn, own) -> Probe
                        f"with no credential at all ({anon.status})"
                        + (", byte for byte the response a valid credential gets"
                           if good is not None else ""))
+
+
+# ------------------------------------------------------------------ authz, cross-user
+
+def _template(text: str, subs: dict[str, str]) -> str:
+    for k, v in subs.items():
+        text = text.replace("{" + k + "}", v)
+    return text
+
+
+def _cross_user_target(spec, routes: list, cand: Candidate):
+    """(resource, check, route, own) for the first declared resource one of the finding's
+    routes addresses: its item GET (read), item DELETE (delete), or the request that
+    modifies it. The finding's own routes are matched first."""
+    def checks(res) -> dict:
+        item, coll = _norm_path(res.item), _norm_path(res.collection)
+        out = {("GET", item): "read", ("DELETE", item): "delete"}
+        if res.modify == "post-collection":
+            out[("POST", coll)] = "modify"
+        elif res.modify in ("put-item", "patch-item"):
+            out[(res.modify.split("-")[0].upper(), item)] = "modify"
+        return out
+    for pool, own in ((_own(routes, cand), True), (routes, False)):
+        for r in pool:
+            for res in spec.resources:
+                if (check := checks(res).get(r.key)):
+                    return res, check, r, own
+    return None
+
+
+class _CrossUser:
+    """One run of the cross-user check: two canaries made by the owner, the requests
+    sent, and their cleanup. Every request line in `log` names the account, never its
+    key, so it is safe to store and replay with fresh keys."""
+
+    def __init__(self, running, spec, res, exec_fn):
+        self.running, self.spec, self.res, self.exec_fn = running, spec, res, exec_fn
+        creds = running.credentials or {}
+        self.keys = {res.owner: creds.get(res.owner, ""), res.other: creds.get(res.other, "")}
+        self.owner = spec.accounts.get(res.owner, res.owner)
+        self.other = spec.accounts.get(res.other, res.other)
+        self.ids = (str(_uuid.uuid4()), str(_uuid.uuid4()))   # baseline canary, probe canary
+        self.log: list[str] = []
+        self.made: list[str] = []
+
+    def as_(self, who: str) -> list[str]:
+        key = self.keys.get(who, "")
+        return [_cred_header(self.spec.header, key)] if key else []
+
+    def call(self, who: str, method: str, path: str, data: str | None = None) -> _Resp:
+        label = {self.res.owner: self.owner, self.res.other: self.other}.get(who, who)
+        if who in self.keys:
+            label = f"{label} ({_cred_label(self.spec.header, label + ' key')})"
+        resp = _fetch(self.exec_fn, self.running.base_url.rstrip("/") + path,
+                      method=method, headers=self.as_(who), data=data)
+        self.log.append(f"{method} {path} as {label} -> {resp.status or 'no response'}")
+        return resp
+
+    def item(self, i: str) -> str:
+        return _template(self.res.item, {"id": i})
+
+    def body(self, tmpl: str, i: str, marker: str) -> str:
+        return _template(tmpl, {**(self.running.param_values or {}),
+                                "id": i, "marker": marker})
+
+    def create(self) -> bool:
+        for i in self.ids:
+            if self.call(self.res.owner, "POST", self.res.collection,
+                         self.body(self.res.body, i, _marker())).ok:
+                self.made.append(i)
+        return len(self.made) == 2
+
+    def cleanup(self, gone: tuple[str, ...] = ()) -> str:
+        """Delete, as the owner, every canary this run made that is not already gone.
+        Returns a note for the verdict naming any that could not be removed."""
+        left = []
+        for i in self.made:
+            if i in gone:
+                continue
+            d = self.call(self.res.owner, "DELETE", self.item(i))
+            if not (d.ok or d.status == "404"):
+                left.append(i)
+        return (f"; canary {', '.join(left)} could not be deleted and remains in the "
+                "throwaway instance" if left else "")
+
+    def setup_note(self) -> str:
+        return (f"created {self.res.name} canaries {self.ids[0]} (baseline) and "
+                f"{self.ids[1]} (probe) as {self.owner} through POST "
+                f"{self.res.collection}, in the contained throwaway instance")
+
+
+def probe_cross_user(running: RunningTarget, candidate: Candidate,
+                     routes: list, exec_fn) -> ProbeEvidence | None:
+    """Account A addressing account B's record, against B's own request (baseline) and the
+    anonymous client (control), on the per-user resources a seed recipe declared. None
+    when no declared resource is served by a route in the finding's file, so the caller
+    falls back to the anonymous probe."""
+    spec = getattr(running, "cross_user", None)
+    if spec is None or not getattr(spec, "resources", ()):
+        return None
+    hit = _cross_user_target(spec, routes, candidate)
+    if hit is None:
+        return None
+    res, check, route, own = hit
+    xu = _CrossUser(running, spec, res, exec_fn)
+    missing = [k for k, v in xu.keys.items() if not v]
+    if missing:
+        return ProbeEvidence(
+            reproduced=False, determinism="unknown",
+            summary=f"cross-user {check} check on {res.name} needs the seeded "
+                    f"credentials {missing}, which the seed did not capture")
+    if not xu.create():
+        note = xu.cleanup()
+        return ProbeEvidence(
+            reproduced=False, determinism="unknown", request="; ".join(xu.log),
+            summary=f"cross-user {check} check on {res.name}: {xu.owner} could not create "
+                    f"both canary records, so there is nothing to compare{note}")
+    run = {"read": _xu_read, "delete": _xu_delete, "modify": _xu_modify}[check]
+    return run(xu, route, candidate, own)
+
+
+def _xu_evidence(xu: _CrossUser, route, cand, own, *, note: str = "", **kw) -> ProbeEvidence:
+    kw["summary"] = f"{kw['summary']} ({xu.setup_note()}{note})"
+    kw.setdefault("request", "; ".join(xu.log))
+    kw.setdefault("determinism", "deterministic")
+    return _ev(own, route, cand, **kw)
+
+
+def _xu_read(xu: _CrossUser, route, cand, own) -> ProbeEvidence:
+    _, a = xu.ids
+    g_o = xu.call(xu.res.owner, "GET", xu.item(a))
+    g_x = xu.call(xu.res.other, "GET", xu.item(a))
+    g_n = xu.call("anonymous", "GET", xu.item(a))
+    note = xu.cleanup()
+    baseline = (f"{xu.owner} reading its own record: {g_o.describe()}; anonymous: "
+                f"{g_n.describe()}")
+    observed = f"{xu.other} reading {xu.owner}'s record: {g_x.describe()}"
+    if not g_o.ok:
+        return _xu_evidence(xu, route, cand, own, note=note, reproduced=False,
+                            determinism="unknown", observed=observed, baseline=baseline,
+                            summary=f"{xu.owner} cannot read its own {xu.res.name} "
+                                    f"({g_o.status or 'no response'}), so the read check "
+                                    "has no baseline")
+    if g_n.ok:
+        return _xu_evidence(xu, route, cand, own, note=note, reproduced=False,
+                            determinism="unknown", observed=observed, baseline=baseline,
+                            summary=f"{xu.res.name} records are served to anonymous "
+                                    "clients, so reading one as another account crosses "
+                                    "no boundary; whether they should be private is a "
+                                    "design question")
+    if not g_n.refused:
+        return _xu_evidence(xu, route, cand, own, note=note, reproduced=False,
+                            determinism="unknown", observed=observed, baseline=baseline,
+                            summary=f"the anonymous control answered {g_n.status or 'nothing'}"
+                                    ", neither served nor refused; inconclusive")
+    if g_x.ok and _sha(g_x.body) == _sha(g_o.body):
+        return _xu_evidence(xu, route, cand, own, note=note, reproduced=True,
+                            observed=observed, baseline=baseline,
+                            differs_from_baseline=True, handled=True,
+                            summary=f"{xu.other} read {xu.owner}'s {xu.res.name} and got "
+                                    "the owner's exact response, while the anonymous "
+                                    "control was refused")
+    if g_x.refused or g_x.status == "404":
+        return _xu_evidence(xu, route, cand, own, note=note, reproduced=False,
+                            observed=observed, baseline=baseline,
+                            differs_from_baseline=False, handled=True,
+                            summary=f"{xu.other} was refused {xu.owner}'s {xu.res.name} "
+                                    f"({g_x.status}) like the anonymous control, while "
+                                    "the owner read it")
+    return _xu_evidence(xu, route, cand, own, note=note, reproduced=False,
+                        determinism="unknown", observed=observed, baseline=baseline,
+                        summary=f"{xu.other}'s read answered {g_x.status or 'nothing'}, "
+                                "neither the owner's response nor a refusal; inconclusive")
+
+
+def _xu_delete(xu: _CrossUser, route, cand, own) -> ProbeEvidence:
+    o, a = xu.ids
+    d_n = xu.call("anonymous", "DELETE", xu.item(o))
+    d_o = xu.call(xu.res.owner, "DELETE", xu.item(o))       # baseline, and removes o
+    d_x = xu.call(xu.res.other, "DELETE", xu.item(a))
+    d_after = xu.call(xu.res.owner, "DELETE", xu.item(a))   # effect check, and removes a
+    gone = tuple(i for i, d in ((o, d_o), (a, d_after)) if d.ok or d.status == "404")
+    note = xu.cleanup(gone=gone)
+    baseline = (f"{xu.owner} deleting its own baseline canary: {d_o.status or 'no response'}"
+                f"; anonymous deleting it first: {d_n.status or 'no response'}")
+    observed = (f"{xu.other} deleting {xu.owner}'s probe canary: "
+                f"{d_x.status or 'no response'}; {xu.owner} deleting it afterwards: "
+                f"{d_after.status or 'no response'} (404 means it was already gone)")
+    common = dict(observed=observed, baseline=baseline, note=note)
+    if d_n.ok:
+        return _xu_evidence(xu, route, cand, own, reproduced=True, **common,
+                            summary=f"an anonymous DELETE removed {xu.owner}'s "
+                                    f"{xu.res.name}: the route deletes without "
+                                    "authentication. Held for review because the anonymous "
+                                    "request is this probe's negative control")
+    if not d_o.ok:
+        return _xu_evidence(xu, route, cand, own, reproduced=False, determinism="unknown",
+                            handled=d_o.reached or None, **common,
+                            summary=f"{xu.owner} could not delete its own {xu.res.name} "
+                                    f"({d_o.status or 'no response'}), so a refusal to "
+                                    f"{xu.other} would mean nothing")
+    # d_o worked, so the baseline canary existed through the anonymous attempt: a 404
+    # to the anonymous client hid an existing record, which is a refusal.
+    if not (d_n.refused or d_n.status == "404"):
+        return _xu_evidence(xu, route, cand, own, reproduced=False, determinism="unknown",
+                            **common,
+                            summary=f"the anonymous control answered {d_n.status}, neither "
+                                    "a deletion nor a refusal; inconclusive")
+    if d_x.ok and d_after.status == "404":
+        return _xu_evidence(xu, route, cand, own, reproduced=True,
+                            differs_from_baseline=True, handled=True, **common,
+                            summary=f"{xu.other} deleted {xu.owner}'s {xu.res.name} "
+                                    f"({d_x.status}; the owner then got 404), while the "
+                                    f"anonymous control was refused ({d_n.status})")
+    if (d_x.refused or d_x.status == "404") and d_after.ok:
+        return _xu_evidence(xu, route, cand, own, reproduced=False,
+                            differs_from_baseline=False, handled=True, **common,
+                            summary=f"{xu.other} was refused deletion of {xu.owner}'s "
+                                    f"{xu.res.name} ({d_x.status}) like the anonymous "
+                                    f"control ({d_n.status}); the record survived and its "
+                                    "owner deleted it")
+    return _xu_evidence(xu, route, cand, own, reproduced=False, determinism="unknown",
+                        **common,
+                        summary=f"{xu.other}'s DELETE answered {d_x.status or 'nothing'} "
+                                f"and the record then answered {d_after.status or 'nothing'}"
+                                " to its owner; status and effect disagree, inconclusive")
+
+
+def _xu_modify(xu: _CrossUser, route, cand, own) -> ProbeEvidence:
+    o, a = xu.ids
+    mk_n, mk_o, mk_x = _marker(), _marker(), _marker()
+    tmpl = xu.res.modify_body or xu.res.body
+    if xu.res.modify == "post-collection":
+        def send(who, i, mk):
+            return xu.call(who, "POST", xu.res.collection, xu.body(tmpl, i, mk))
+    else:
+        verb = xu.res.modify.split("-")[0].upper()
+
+        def send(who, i, mk):
+            return xu.call(who, verb, xu.item(i), xu.body(tmpl, i, mk))
+    m_n = send("anonymous", o, mk_n)
+    m_o = send(xu.res.owner, o, mk_o)
+    m_x = send(xu.res.other, a, mk_x)
+    g_o = xu.call(xu.res.owner, "GET", xu.item(o))
+    g_a = xu.call(xu.res.owner, "GET", xu.item(a))
+    note = xu.cleanup()
+    baseline = (f"{xu.owner} changing its own baseline canary: {m_o.status or 'no response'}"
+                f", change {'visible' if mk_o in g_o.body else 'not visible'} on read-back; "
+                f"anonymous changing it: {m_n.status or 'no response'}")
+    observed = (f"{xu.other} changing {xu.owner}'s probe canary: "
+                f"{m_x.status or 'no response'}; {xu.owner} reading it back: "
+                f"{g_a.describe()}, {xu.other}'s change "
+                f"{'present' if mk_x in g_a.body else 'absent'}")
+    common = dict(observed=observed, baseline=baseline, note=note)
+    if not (m_o.ok and g_o.ok and mk_o in g_o.body):
+        return _xu_evidence(xu, route, cand, own, reproduced=False, determinism="unknown",
+                            **common,
+                            summary=f"{xu.owner}'s own change to its {xu.res.name} did not "
+                                    "show on read-back, so the modify request has no "
+                                    "baseline")
+    if m_n.ok:
+        return _xu_evidence(xu, route, cand, own, reproduced=True, **common,
+                            summary=f"an anonymous request to change {xu.owner}'s "
+                                    f"{xu.res.name} answered {m_n.status}. Held for review "
+                                    "because the anonymous request is this probe's "
+                                    "negative control")
+    if not (m_n.refused or m_n.status == "404") or not g_a.ok:
+        return _xu_evidence(xu, route, cand, own, reproduced=False, determinism="unknown",
+                            **common,
+                            summary="the anonymous control or the owner's read-back of the "
+                                    "probe canary was inconclusive")
+    if mk_x in g_a.body:
+        return _xu_evidence(xu, route, cand, own, reproduced=True,
+                            differs_from_baseline=True, handled=True, **common,
+                            summary=f"{xu.other}'s change to {xu.owner}'s {xu.res.name} "
+                                    f"was stored (answered {m_x.status}), while the "
+                                    f"anonymous control was refused ({m_n.status})")
+    if m_x.refused or m_x.status == "404":
+        return _xu_evidence(xu, route, cand, own, reproduced=False,
+                            differs_from_baseline=False, handled=True, **common,
+                            summary=f"{xu.other} was refused a change to {xu.owner}'s "
+                                    f"{xu.res.name} ({m_x.status}) like the anonymous "
+                                    "control, and the record was unchanged on read-back")
+    return _xu_evidence(xu, route, cand, own, reproduced=False, determinism="unknown",
+                        **common,
+                        summary=f"{xu.other}'s change answered {m_x.status or 'nothing'} but "
+                                "did not show on read-back; inconclusive")
+
+
+def probe_authz(running: RunningTarget, candidate: Candidate,
+                routes: list, exec_fn) -> ProbeEvidence:
+    """The broken-authz lens: the cross-user check when a seed recipe declared a per-user
+    resource that a route in the finding's file serves, otherwise the anonymous one."""
+    return (probe_cross_user(running, candidate, routes, exec_fn)
+            or probe_broken_authz(running, candidate, routes, exec_fn))
 
 
 # ------------------------------------------------------------------ rate limit

@@ -154,6 +154,10 @@ class RunningTarget:
     # the Docker runtime; a sidecar probe does not need them.
     project: str = ""
     compose_file: str = ""
+    # The per-user resources a seed recipe declared for the cross-user authz probe
+    # (seed.CrossUser): which test account owns what, and how the target's own API
+    # creates, reads and deletes it. None unless a recipe that declares them ran.
+    cross_user: Any = None
 
 
 # Probe lenses and their selection live in lenses.py, keyed to the repo profile. The
@@ -361,6 +365,7 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
             sr = run_seed(runtime, running, seed)
             running.param_values = {**running.param_values, **sr.param_values}
             running.credentials = {**running.credentials, **sr.credentials}
+            running.cross_user = getattr(sr, "cross_user", None) or running.cross_user
             with db.tx(con):
                 db.set_health(con, run_id, "validate",
                               {"seed": sr.notes or []})

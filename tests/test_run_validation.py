@@ -304,3 +304,89 @@ def test_dependency_findings_are_not_probe_candidates(scanned):
     assert "f-osv" not in ids and "f-trivy" not in ids
     assert "f-secret" in ids
 
+
+# ------------------------------------------------------------------ cross-user, end to end
+
+SIGHTING_PY = (
+    "ns = Namespace('sighting')\n"
+    "@ns.route('/<uuid:sighting_uuid>')\n"
+    "class SightingItem(Resource):\n"
+    "    def get(self, sighting_uuid):\n"
+    "        return {}\n"
+    "\n"
+    "    @auth_func\n"
+    "    def delete(self, sighting_uuid):\n"
+    "        obj = Sighting.query.get(sighting_uuid)  # the flagged line\n"
+    "        return {}, 200\n"
+    "@ns.route('/')\n"
+    "class Sightings(Resource):\n"
+    "    def post(self):\n"
+    "        return {}, 201\n")
+
+
+@pytest.mark.parametrize("delete_any, verdict", [(False, "rejected"), (True, "confirmed")])
+def test_a_seeded_cross_user_run_decides_on_the_findings_own_handler(tmp_path, delete_any,
+                                                                     verdict):
+    """Seed three accounts with the target's own commands, then let the authz lens test
+    the flagged DELETE handler as another account. The verdict names the canaries it
+    made and no key, and the precision ledger counts it."""
+    from test_probes_cross_user import VL, CREDS, SPEC as XU
+    from quarry.dynamic.seed import SeedRecipe, SeedStep
+
+    src = tmp_path / "src"
+    (src / "website" / "api").mkdir(parents=True)
+    (src / "website" / "api" / "__init__.py").write_text(
+        "bp = Blueprint('apiv1', __name__, url_prefix='/api')\n"
+        "def setup():\n"
+        "    api = Api(bp)\n"
+        "    from website.api import sighting\n"
+        "    api.add_namespace(sighting.ns, path='/sighting')\n")
+    (src / "website" / "api" / "sighting.py").write_text(SIGHTING_PY)
+    (src / "website" / "app.py").write_text(            # enough routes to profile a service
+        "@app.get('/health')\ndef h(): ...\n@app.get('/v')\ndef v(): ...\n"
+        "@app.post('/x')\ndef x(): ...\n")
+    (src / "docker-compose.yml").write_text("services:\n  web:\n    image: x\n")
+    flagged = SIGHTING_PY.splitlines().index(
+        "        obj = Sighting.query.get(sighting_uuid)  # the flagged line") + 1
+    p = tmp_path / "quarry.db"
+    db.init(p)
+    con = db.connect(p)
+    with db.tx(con):
+        con.execute("INSERT INTO runs (id, target, clone_url) VALUES (1,'o/r','https://x')")
+        con.execute("""INSERT INTO producers (id,tool,rule_id,cwe,n_adjudicated,n_confirmed)
+                       VALUES ('t:idor','opengrep','idor','CWE-639',0,0)""")
+        con.execute("""INSERT INTO findings (id,target,path,producer_id,first_seen_run,
+                       last_seen_run) VALUES ('f-idor','o/r','website/api/sighting.py',
+                       't:idor',1,1)""")
+        con.execute("""INSERT INTO occurrences (id,run_id,finding_id,producer_id,path,
+                       start_line,message) VALUES (10,1,'f-idor','t:idor',
+                       'website/api/sighting.py',?,'idor')""", (flagged,))
+
+    vl = VL(delete_any=delete_any)
+
+    class Seeded(FakeRuntime):
+        def start(self, spec, rundir):
+            return RunningTarget("http://web:10001", stop=self._stop, network="net",
+                                 project="p", compose_file="/x/compose.yml")
+
+        def service_exec(self, running, argv, *, service="", timeout=900):
+            return 0, CREDS.get(argv[-1], "ok")       # `getkey <name>` prints the key
+
+        def probe_exec(self, running, argv):
+            return vl.fake(argv) if "-w" in argv else (0, "")
+
+    recipe = SeedRecipe(
+        name="t", param_values={"vulnerability_id": "CVE-2021-44228"}, cross_user=XU,
+        steps=tuple(SeedStep(argv=("getkey", k), capture=r"(\S{16,})", capture_as=k)
+                    for k in CREDS))
+    res = run_validation(con, 1, tmp_path, Seeded({}), seed=recipe)
+    assert res.verdicts == [("f-idor", "broken-authz-idor", verdict)]
+    row = dict(con.execute("SELECT * FROM verdicts WHERE finding_id='f-idor'").fetchone())
+    stored = json.loads(row["rationale"])
+    assert row["verdict"] == verdict and row["reason"] == "deterministic"
+    assert "contained throwaway instance" in stored["summary"]
+    assert stored["reproduces_when"] == "differs"
+    assert not any(k in row["rationale"] for k in CREDS.values())    # no key stored
+    assert vl.records == {}                                          # canaries cleaned up
+    assert tuple(con.execute("SELECT n_adjudicated FROM producers WHERE id='t:idor'")
+                 .fetchone()) == (1,)

@@ -88,9 +88,38 @@ def test_the_vulnlookup_recipe_uses_the_projects_own_commands():
     cmds = [st.argv for st in r.steps]
     assert any("create_admin" in a for a in cmds)
     assert any("create_user" in a for a in cmds)
-    assert sum("user_get_api_key" in a for a in cmds) == 2    # one per account
+    assert sum("user_get_api_key" in a for a in cmds) == 3    # one per account
     # Every step runs the project's own Flask CLI; nothing reaches into a datastore.
     assert all(a[:5] == ("poetry", "run", "flask", "--app", "website.app") for a in cmds)
     assert r.param_values.get("vulnerability_id", "").startswith("CVE-")
     # No credential is hard-coded: accounts use the generated {password} placeholder.
     assert all("{password}" in a or "user_get_api_key" in a for a in cmds)
+
+
+def test_the_vulnlookup_cross_user_spec_uses_only_keys_the_recipe_captures():
+    import json
+    r = S.get("vulnlookup")
+    captured = {st.capture_as for st in r.steps if st.capture_as}
+    spec = r.cross_user
+    assert spec is not None and spec.header == "X-API-KEY"
+    assert set(spec.accounts) == captured
+    for res in spec.resources:
+        assert {res.owner, res.other} <= captured and res.owner != res.other
+        assert "{id}" in res.item and res.collection.endswith("/")
+        # The body is valid JSON once filled, carries the probe's own id, and puts no CVE
+        # id in free text (a bundle would turn that into automatic sightings).
+        filled = res.body.replace("{id}", "00000000-0000-4000-8000-000000000000") \
+                         .replace("{marker}", "qz00").replace("{vulnerability_id}", "CVE-1")
+        doc = json.loads(filled)
+        assert doc["uuid"].startswith("00000000")
+        assert "CVE" not in doc.get("description", "") + doc.get("name", "")
+    # Peers for the records plain users can create; the admin's bundle against a user.
+    owners = {res.name: (res.owner, res.other) for res in spec.resources}
+    assert owners["sighting"] == owners["comment"] == ("user_api_key", "user2_api_key")
+    assert owners["bundle"] == ("admin_api_key", "user_api_key")
+
+
+def test_a_recipe_hands_its_cross_user_spec_to_the_probes():
+    spec = S.CrossUser(header="X-API-KEY")
+    res = run_seed(FakeRuntime(), object(), _recipe(cross_user=spec))
+    assert res.cross_user is spec
