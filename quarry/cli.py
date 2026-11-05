@@ -519,7 +519,7 @@ def report(run_id: int = typer.Argument(..., help="a validated run"),
     project's security contact, or paste it into GitHub's Report a vulnerability (GHSA) form."""
     from pathlib import Path
     from .ingest import RunVolume
-    from .disclosure import draft_reports, draft_research_digest
+    from .disclosure import draft_reports, draft_research_digest, record_digest
 
     paths, connection = _open()
     vol = RunVolume.attach_existing(run_id, paths.runs)
@@ -539,6 +539,10 @@ def report(run_id: int = typer.Argument(..., help="a validated run"),
         for d in drafts:
             db.advisory(connection, run_id, d.finding_id, str(d.path.resolve()),
                         d.sha256, verdict_id=d.verdict_id)
+        # The digest is many findings with no dynamic verdict, so it is not an
+        # advisories row; the run manifest records it for the dashboard instead.
+        if digest is not None:
+            record_digest(connection, run_id, digest)
     if drafts:
         con_out.print(f"[bold]{len(drafts)} confirmed-dynamic advisory draft(s)[/] in "
                       f"{_e(out_dir)}:")

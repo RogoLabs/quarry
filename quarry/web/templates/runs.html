@@ -36,7 +36,8 @@
           <td class="num r"><a class="plain" href="/runs/{{ r.id }}/triage">{{ r.live }}</a></td>
           <td class="num r"><a class="plain" href="/runs/{{ r.id }}/validation">{{ r.n_verdicts }}</a>{% if r.n_confirmed %}
             <a class="pill verified" href="/runs/{{ r.id }}/validation?state=confirmed">{{ r.n_confirmed }} confirmed</a>{% endif %}</td>
-          <td class="num r"><a class="plain" href="/runs/{{ r.id }}/advisories">{{ r.n_advisories }}</a></td>
+          <td class="num r"><a class="plain" href="/runs/{{ r.id }}/advisories">{{ r.n_advisories }}</a>{% if r.has_digest %}
+            <a class="pill inert" href="/runs/{{ r.id }}/digest">digest</a>{% endif %}</td>
           <td class="mono sm dim">{{ r.started_at|local }}</td>
         </tr>
       {% else %}

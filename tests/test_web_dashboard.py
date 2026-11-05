@@ -480,6 +480,91 @@ def test_the_centring_script_binds_once_however_often_it_is_swapped_in(seeded):
     assert "window.quarryCentreBound" in page
 
 
+# ============================================================ 6. the Layer 2 digest
+
+def _write_digest(run_id=1, text="# Deep-review candidates\n\n<script>x</script>‮\n"):
+    from quarry import config
+    from quarry.disclosure import digest_name
+    d = config.paths().root / "reports" / str(run_id)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / digest_name(run_id)
+    p.write_bytes(text.encode())
+    return p
+
+
+def test_a_digest_on_disk_is_listed_with_the_advisories(seeded):
+    """P3 item 6. `quarry report` wrote reports/2/2-deep-review-candidates.md and the
+    page said "0 drafts"."""
+    client, con = seeded
+    assert "No digest for this run" in client.get("/runs/1/advisories").text
+    assert client.get("/runs/1/digest").status_code == 404
+    _write_digest()
+    page = client.get("/runs/1/advisories").text
+    section = page.split('id="digests"', 1)[1]
+    assert 'href="/runs/1/digest"' in section and "1-deep-review-candidates.md" in section
+    assert "not\n            recorded" in section or "not recorded" in section
+    assert 'href="/runs/1/digest"' in client.get("/advisories").text
+    assert 'href="/runs/1/digest"' in client.get("/runs").text
+    from quarry import config
+    strip = q.pipeline(con, q.run_summary(con, 1), config.paths().root / "reports")
+    assert strip[-1]["unit"] == "drafts; deep-review digest"
+    assert "drafts; deep-review digest" in client.get("/runs/1").text
+
+    body = client.get("/runs/1/digest").text
+    assert "Candidates for triage, not confirmed vulnerabilities" in body
+    assert "<script>x" not in body and "&lt;script&gt;x" in body
+    assert "‮" not in body and "‹U+202E›" in body
+    assert "nothing to check the file against" in body
+
+
+def test_a_recorded_digest_is_checked_against_its_hash(seeded):
+    import hashlib
+    from quarry import db
+    from quarry.disclosure import ResearchDigest, record_digest
+    client, con = seeded
+    p = _write_digest(text="# three candidates\n")
+    with db.tx(con):
+        record_digest(con, 1, ResearchDigest(path=p, n_findings=3,
+                                             sha256=hashlib.sha256(p.read_bytes()).hexdigest()))
+    d = q.digest(con, 1, None)
+    assert d["recorded"] and d["n_findings"] == 3 and d["path"] == str(p.resolve())
+    assert "matches the file" in client.get("/runs/1/digest").text
+    p.write_text("# edited afterwards\n")
+    assert "file changed since it was written" in client.get("/runs/1/digest").text
+
+
+def test_a_digest_path_outside_reports_is_refused(seeded, tmp_path):
+    """The path is in the manifest and `quarry report --out` accepts anywhere."""
+    from quarry import db
+    from quarry.disclosure import ResearchDigest, record_digest
+    client, con = seeded
+    secret = tmp_path / "secret.md"
+    secret.write_text("TOP SECRET\n")
+    with db.tx(con):
+        record_digest(con, 1, ResearchDigest(path=secret, n_findings=1, sha256="0" * 64))
+    page = client.get("/runs/1/digest").text
+    assert "TOP SECRET" not in page and "does not open it" in page
+
+
+def test_quarry_report_records_the_digest_it_writes(seeded, monkeypatch, tmp_path):
+    """The CLI wiring: the digest `report` writes lands in the run manifest."""
+    import hashlib
+    from typer.testing import CliRunner
+    from quarry import cli, disclosure, ingest
+    _, con = seeded
+    p = _write_digest(text="# two\n")
+    dg = disclosure.ResearchDigest(path=p, n_findings=2,
+                                   sha256=hashlib.sha256(p.read_bytes()).hexdigest())
+    monkeypatch.setattr(ingest.RunVolume, "attach_existing",
+                        classmethod(lambda cls, *a, **k: type("V", (), {"src": tmp_path})()))
+    monkeypatch.setattr(disclosure, "draft_reports", lambda *a, **k: [])
+    monkeypatch.setattr(disclosure, "draft_research_digest", lambda *a, **k: dg)
+    r = CliRunner().invoke(cli.app, ["report", "1"], env={"COLUMNS": "200"})
+    assert r.exit_code == 0, r.output
+    d = q.digest(con, 1, None)
+    assert d and d["recorded"] and d["sha256"] == dg.sha256 and d["n_findings"] == 2
+
+
 def test_a_scanner_occurrence_has_no_deep_review_section(seeded):
     client, con = seeded
     oid = con.execute("SELECT id FROM live_occurrences WHERE run_id=1 LIMIT 1"

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% set nav = 'advisories' %}
+{% set nav_run = run.id %}
+{% block title %}Deep-review digest · {{ run.target }} · Quarry{% endblock %}
+{% block body %}
+<div class="page"><div class="wrap">
+  <h1>Deep-review digest</h1>
+  <p class="sub"><a href="/runs/{{ run.id }}">run {{ run.id }}</a> · {{ run.target|visible }}
+    · <a href="/runs/{{ run.id }}/advisories">advisories</a></p>
+
+  {#  Said first, in the page's own words, because a person may read this next to the
+      advisory drafts and send it the same way. #}
+  <div class="banner hl" role="note">
+    <b>Candidates for triage, not confirmed vulnerabilities.</b> Each one is a Layer 2
+    finding whose quote matched the source and that a model of another family defended
+    after being told to refute it. No probe stood the target up and reproduced any of
+    them. Read, confirm and only then report.
+  </div>
+
+  <dl class="facts mt-4">
+    <dt>File</dt><dd class="mono sm">{{ d.path|visible }}</dd>
+    <dt>Candidates</dt><dd>{{ d.n_findings if d.n_findings is not none else 'not recorded' }}</dd>
+    <dt>SHA-256</dt><dd class="mono sm">{% if d.sha256 %}{{ d.sha256 }}
+      {% if f.ok %}{% if f.sha256 == d.sha256 %}<span class="pill verified">matches the file</span>
+      {% else %}<span class="pill alarm">file changed since it was written</span>{% endif %}{% endif %}
+      {% else %}<span class="pill unmeasured">not recorded</span>
+      <span class="dim">written before digests were recorded; nothing to check the file against</span>{% endif %}</dd>
+  </dl>
+
+  {% if f.ok %}
+  {#  Escaped preformatted text, never Markdown rendered to HTML: the digest quotes
+      model output about attacker-supplied code. #}
+  <div class="row mt-4" x-data="{ copied: false }">
+    <h2 class="as-text">Digest <span class="dim sm">{{ f.bytes }} bytes, Markdown source</span></h2>
+    <div class="spacer"></div>
+    <button type="button"
+            x-on:click="navigator.clipboard.writeText(document.getElementById('advtext').textContent).then(() => { copied = true; setTimeout(() => copied = false, 2000) })">
+      Copy Markdown</button>
+    <span class="sr-only" role="status" x-text="copied ? 'Copied to clipboard' : ''"></span>
+    <span class="note" x-show="copied" x-cloak aria-hidden="true">copied</span>
+  </div>
+  <pre class="advtext mt-2" id="advtext" tabindex="0" role="region"
+       aria-label="Deep-review digest, Markdown source">{{ f.text|visible }}</pre>
+  {% else %}
+  <div class="card mt-4 mark"><p class="dim">{{ f.why }}</p></div>
+  {% endif %}
+</div></div>
+{% endblock %}

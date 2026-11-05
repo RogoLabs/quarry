@@ -43,5 +43,37 @@
       </tbody>
     </table>
   </div>
+
+  {#  The Layer 2 digest sits in the same directory as the drafts, and the page said
+      "0 drafts" beside it. It is listed separately because it is a different kind of
+      file: model-found candidates for triage, none of them dynamically confirmed. #}
+  <h2 class="h-sec" id="digests">Deep-review digest: candidates for triage, not confirmed</h2>
+  <div class="tbl">
+    <table>
+      <caption class="sr-only">Layer 2 deep-review digests{% if run %} for run {{ run.id }}{% endif %}</caption>
+      <thead><tr><th scope="col">Run</th><th scope="col">File</th>
+        <th scope="col" class="r">Candidates</th><th scope="col">Written</th></tr></thead>
+      <tbody>
+      {% for d in digests %}
+        <tr>
+          <td class="nowrap"><a href="/runs/{{ d.run_id }}">{{ d.run_id }}</a></td>
+          <td class="mono sm nowrap"><a href="/runs/{{ d.run_id }}/digest">{{ d.path.rsplit('/', 1)[-1]|visible }}</a></td>
+          <td class="r num">{{ d.n_findings if d.n_findings is not none else '?' }}</td>
+          <td class="mono sm dim nowrap">{% if d.recorded %}{{ d.written_at|local }}{% else %}not
+            recorded{% endif %}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="4" class="dim">No digest{% if run %} for this run{% endif %}.
+          <code>quarry report &lt;run&gt;</code> writes one when a deep review left
+          candidates that a model of another family defended.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if digests|rejectattr('recorded')|list %}
+  <p class="note">"Not recorded": written by a <code>quarry report</code> from before
+    digests were recorded, so there is no hash to check the file against and no
+    candidate count. Running <code>quarry report</code> again records it.</p>
+  {% endif %}
 </div></div>
 {% endblock %}

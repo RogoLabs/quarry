@@ -17,6 +17,7 @@ import json
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .. import db, dismissals
@@ -1163,6 +1164,32 @@ def advisory(con: sqlite3.Connection, aid: int) -> dict[str, Any] | None:
     return dict(r) if r else None
 
 
+def digest(con: sqlite3.Connection, run_id: int,
+           reports_root: "Path | None") -> dict[str, Any] | None:
+    """The Layer 2 deep-review digest `quarry report` wrote for a run, or None.
+
+    `quarry report` writes it beside the advisory drafts, and the dashboard said
+    "0 drafts" next to it because no table recorded it. The run manifest now does
+    (`disclosure.record_digest`), with the hash of what was written. A digest written
+    before that is found at its default path and shown as unrecorded, with no hash to
+    compare. Whether the file may be read is not decided here: the page that opens it
+    applies the same confinement to <data root>/reports as an advisory.
+    """
+    from ..disclosure.report import digest_name
+    rec = (db.read_manifest(con, run_id).get("report") or {})
+    rec = rec.get("digest") if isinstance(rec, dict) else None
+    if isinstance(rec, dict) and rec.get("path"):
+        return {"run_id": run_id, "path": str(rec["path"]), "sha256": rec.get("sha256"),
+                "n_findings": rec.get("n_findings"), "written_at": rec.get("written_at"),
+                "recorded": True}
+    if reports_root is not None:
+        p = reports_root / str(run_id) / digest_name(run_id)
+        if p.is_file():
+            return {"run_id": run_id, "path": str(p), "sha256": None, "n_findings": None,
+                    "written_at": None, "recorded": False}
+    return None
+
+
 def advisory_count(con: sqlite3.Connection, run_id: int) -> int:
     return con.execute("SELECT COUNT(*) c FROM advisories WHERE run_id=?",
                        (run_id,)).fetchone()["c"]
@@ -1179,13 +1206,15 @@ def run_urls(rid: int) -> dict[str, str]:
             "advisories": f"/runs/{rid}/advisories"}
 
 
-def pipeline(con: sqlite3.Connection, run: dict[str, Any]) -> list[dict[str, Any]]:
+def pipeline(con: sqlite3.Connection, run: dict[str, Any],
+             reports_root: "Path | None" = None) -> list[dict[str, Any]]:
     """The five stages of one run, each with its count and the set that count opens.
 
     Every count is a link, like every other number in the product. Ingest counts what
     it quarantined; scan counts raw occurrences and the tools that produced them; the
     funnel counts what is still live; validate counts latest-verdict slots; report
-    counts advisory drafts recorded for the run.
+    counts advisory drafts recorded for the run, and says when a deep-review digest
+    sits beside them (found through `reports_root`, when given).
     """
     rid = run["id"]
     u = run_urls(rid)
@@ -1210,6 +1239,8 @@ def pipeline(con: sqlite3.Connection, run: dict[str, Any]) -> list[dict[str, Any
          "href": u["triage"], "page": "triage"},
         {"name": "Validate", "n": vc["total"], "unit": f"verdicts, {vc['confirmed']} confirmed",
          "href": u["validation"], "page": "validation"},
-        {"name": "Report", "n": advisory_count(con, rid), "unit": "drafts",
+        {"name": "Report", "n": advisory_count(con, rid),
+         "unit": "drafts" + ("; deep-review digest" if digest(con, rid, reports_root)
+                             else ""),
          "href": u["advisories"], "page": "advisories"},
     ]

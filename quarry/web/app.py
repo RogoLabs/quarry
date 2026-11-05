@@ -260,6 +260,8 @@ def _finalize(value):
 
 def create_app() -> FastAPI:
     paths = config.paths()
+    #: The only directory the dashboard reads report files from (see read_advisory).
+    reports_root = paths.root / "reports"
 
     # Per process, never persisted. A form rendered by a previous server process is
     # refused and the operator reloads; that is the whole cost.
@@ -530,7 +532,7 @@ def create_app() -> FastAPI:
                 "base": here + "?" + (urlencode(keep) + "&" if keep else ""),
                 "verdict_counts": q.verdict_counts(c, run_id),
                 "verdict_states": q.VERDICT_STATES,
-                "pipeline": q.pipeline(c, summary),
+                "pipeline": q.pipeline(c, summary, reports_root),
             }, c)
 
     @app.post("/producers/{producer_id:path}/dismiss")
@@ -775,7 +777,10 @@ def create_app() -> FastAPI:
     @app.get("/runs", response_class=HTMLResponse)
     def runs_list(request: Request):
         with opened() as c:
-            return render(request, "runs.html", {"runs": q.all_runs(c)}, c)
+            runs = q.all_runs(c)
+            for r in runs:
+                r["has_digest"] = q.digest(c, r["id"], reports_root) is not None
+            return render(request, "runs.html", {"runs": runs}, c)
 
     @app.get("/runs/{run_id}", response_class=HTMLResponse)
     def run_detail(request: Request, run_id: int, stage: str | None = None,
@@ -812,7 +817,7 @@ def create_app() -> FastAPI:
                     "SELECT kind,original_path,detail FROM quarantined WHERE run_id=?",
                     (run_id,))],
                 "led": q.egress_ledger(c, run_id),
-                "pipeline": q.pipeline(c, summary),
+                "pipeline": q.pipeline(c, summary, reports_root),
                 "vc": q.verdict_counts(c, run_id),
                 "dismissals": q.dismissals_for_run(c, run_id),
             }, c)
@@ -863,12 +868,10 @@ def create_app() -> FastAPI:
                 "rows": rows, "counts": counts, "state": state, "run": run_row,
                 "states": q.VERDICT_STATES, "shown_total": shown_total,
                 "here": q.run_urls(run)["validation"] if run is not None else "/validation",
-                "pipeline": q.pipeline(c, run_row) if run_row else None,
+                "pipeline": q.pipeline(c, run_row, reports_root) if run_row else None,
             }, c)
 
     # ------------------------------------------------------------ advisories
-
-    reports_root = paths.root / "reports"
 
     #: Larger than any advisory the template can produce by two orders of magnitude.
     ADVISORY_MAX_BYTES = 2 * 1024 * 1024
@@ -917,10 +920,28 @@ def create_app() -> FastAPI:
                 run_row = q.run_summary(c, run)
                 if run_row is None:
                     raise HTTPException(404, "No such run.")
+            run_ids = [run] if run is not None else [
+                r["id"] for r in c.execute("SELECT id FROM runs ORDER BY id DESC")]
+            digests = [d for d in (q.digest(c, rid, reports_root) for rid in run_ids) if d]
             return render(request, "advisories.html", {
-                "rows": q.advisories(c, run), "run": run_row,
-                "pipeline": q.pipeline(c, run_row) if run_row else None,
+                "rows": q.advisories(c, run), "run": run_row, "digests": digests,
+                "pipeline": q.pipeline(c, run_row, reports_root) if run_row else None,
             }, c)
+
+    @app.get("/runs/{run_id}/digest", response_class=HTMLResponse)
+    def digest_detail(request: Request, run_id: int):
+        """The Layer 2 digest, as escaped text like an advisory draft, read through the
+        same confinement to <data root>/reports. Its path comes from the run manifest,
+        which `quarry report --out` can point anywhere."""
+        with opened() as c:
+            run = q.run_summary(c, row_id(run_id))
+            if run is None:
+                raise HTTPException(404, "No such run.")
+            d = q.digest(c, run_id, reports_root)
+            if d is None:
+                raise HTTPException(404, "No deep-review digest was written for this run.")
+            return render(request, "digest.html", {"d": d, "run": run,
+                                                   "f": read_advisory(d["path"])}, c)
 
     @app.get("/advisories/{aid}", response_class=HTMLResponse)
     def advisory_detail(request: Request, aid: int):
