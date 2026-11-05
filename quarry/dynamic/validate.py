@@ -300,6 +300,17 @@ def _record_provisioning(con: sqlite3.Connection, run_id: int, runtime) -> None:
     })
 
 
+def _record_conditions(con: sqlite3.Connection, run_id: int, running, seed) -> None:
+    """Put on the run what an advisory's Conditions section reads back: the seed recipe
+    asked for and the service the probes addressed. `seed` is written as None when no
+    recipe was asked for, so a draft can tell "not seeded" from "not recorded". Names
+    only: a recipe's captured keys and generated password stay on the RunningTarget, in
+    memory, and never reach the manifest."""
+    db.update_manifest(con, run_id, lambda m: m.setdefault("validate", {}).update(
+        seed=getattr(seed, "name", None) or None,
+        service=getattr(running, "service", "") or None))
+
+
 def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, *,
                    limit: int = 50, enrich: bool = True, seed=None) -> ValidationResult:
     """The end-to-end loop: profile the target, select candidates and the probe lenses the
@@ -336,6 +347,7 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
         raise
     with db.tx(con):
         _record_provisioning(con, run_id, runtime)
+        _record_conditions(con, run_id, running, seed)
         db.set_health(con, run_id, "validate", {"runtime": []})
     try:
         def exec_fn(argv):
