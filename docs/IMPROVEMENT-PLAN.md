@@ -17,8 +17,10 @@ items 1, 4 and 8 (1f72355), item 2's interim gate and item 3 (97f7175), items 5 
 (d442aad), item 2's compose rebuild (48f3191), items 7 and 9 to 14 (6f2b1b4) except
 item 14's Grype entry (decision A), Layer 3 against VulnLookup (e9b8e94, 141a1e0,
 febc240), the opengrep per-tree fallback (ef62ff2), and items 15, 23 and 24 (b707e82).
-Items 16 to 22 and the open parts of items 2 and 3 are in progress from 2026-11-05.
-The suite collects 613 and passes 610, with 3 skipped because setuptools is absent.
+On 2026-11-05 the rest of the list followed, each recorded under its item: items 16
+to 22, the open parts of items 2, 3 and 5, P3, P4, and decisions A, B, D and E. Open
+decisions are F to J. The suite collects 972 and passes 969, with 3 skipped because
+setuptools is absent.
 
 Every item says where its evidence came from:
 
@@ -513,6 +515,24 @@ The dashboard's own security held up: CSRF token plus Origin check, a Host allow
 no state-changing GETs, no `|safe` on stored data, and advisory reads confined to
 `reports/`.
 
+**Done 2026-11-05, items 1 to 9 (merged in 233a3c5).** Triage, validation and
+advisories live at `/runs/{id}/...`, each with the pipeline strip, and the old `?run=N`
+URLs redirect. Triage lists a deep candidate only after a funnel pass has seen it and
+states the held count; the detail pane and the research card link to each other. The
+run page shows each database's age at scan time, and the scan card no longer counts
+deep as a tool. Repo dismissals are keyed on the target through a producer-level ledger
+row that later funnel passes honour, the note field is on the form, and restore undoes
+the funnel's `producer dismissed` kills; no row is deleted. Below 720px the key handler
+refuses, row moves are htmx swaps with `hx-push-url`, and htmx's localStorage history
+cache is off, since it would have stored findings and the form token. `quarry report`
+records the deep-review digest in the run manifest and the advisories pages list it.
+Resume claims the research run in the database before it spawns. A Setup page and a
+per-run terminal table give each CLI-only stage a state and a command to copy, with no
+buttons that run anything. Item 9's four defects are fixed. After all six branches were
+merged, 15 pages rendered 200 against a copy of the post-funnel live DB. Not done: a
+parallel race test for the resume claim; `quarry deep --resume` from a terminal does
+not take the claim. Open: decision J below.
+
 ---
 
 ## P4: code health
@@ -528,7 +548,13 @@ no state-changing GETs, no `|safe` on stored data, and advisory reads confined t
   - `valid_refutations` with a forged `model` key;
   - curl path normalisation (`--path-as-is`).
 
-**Done 2026-11-05 (merged in 40650cd).** All six, in six new test files (123 tests).
+**Done 2026-11-05, the split (merged in 233a3c5).** `app.py` now only assembles the
+app, with `security.py`, `present.py`, `context.py`, `writes.py` and `routes/` around
+it; inline reads moved to `queries.py`, every write to `writes.py`, and one Jinja macro
+serves each status-pill vocabulary. Checked on its branch: 104 of 104 rendered pages
+identical before and after on a DB copy.
+
+**Done 2026-11-05, the tests (merged in 40650cd).** All six, in six new test files (123 tests).
 Three exposed real bugs, fixed in the same commits. `rel_or_none` raised on a `uri`
 that was not a string, so one malformed SARIF entry failed the whole tool instead of
 costing one finding. `valid_refutations` counted every stored record, so a pre-fix
@@ -578,6 +604,10 @@ be told from a genuine one.
   that must verify against the source, as claims already must); or let one surviving
   family keep a finding alive instead of requiring a defence. My default: require a
   verified counter-quote for any "it is guarded" refutation, then rerun the replay.
+- **J. Dismissal reach.** Neither "dismiss for this repo" nor "dismiss everywhere"
+  touches findings already live in other existing runs; both apply to later funnel
+  passes. A repo dismissal can be withdrawn from any run of the target, the corpus
+  switch only from the run that set it. The default taken: leave other runs alone.
 - **G. Run 1's two deep survivors.** Record your reading with
   `quarry deep-verdict 1 intended --note "..."` and the same for 141, if it is still
   that both are intended behaviour.

@@ -2,7 +2,7 @@
 
 Plan: [`PLAN.md`](PLAN.md) · Research: [`RESEARCH.md`](RESEARCH.md) · Panel: [`panel/`](panel/)
 
-**613 tests green.** `quarry doctor · db sync · targets score · ingest · scan · funnel · killed · validate · report · serve`
+**972 tests green.** `quarry doctor · db sync · targets score · ingest · scan · funnel · killed · validate · report · serve`
 
 ---
 

@@ -22,6 +22,10 @@ quarry scan 1                   # seven scanners under sandbox-exec, no network,
 quarry funnel 1                 # thirteen ordered stages; nothing is deleted
 quarry killed 1                 # audit what the funnel suppressed, and why
 quarry status 1                 # the run page as text, one fact per line (or --json)
+quarry deep 1                   # Layer 2: local-model review with cross-family refutation
+quarry deep-survivors 1         # Layer 2 survivors, new or previously judged by a human
+quarry deep-verdict 141 intended --note "..."   # record a human verdict on one
+quarry deep-replay              # score a Layer 2 change on the fixed planted-bug corpus
 quarry validate 1 --dry-run     # plan which probes fit this codebase
 quarry validate 1               # stand the target up in Docker and probe the survivors
 # a real-world target usually needs more, e.g. VulnLookup:
@@ -107,7 +111,7 @@ keys and a GitHub token.
   a probe addresses a record that exists. A seed step that fails is recorded on the run,
   not fatal, and the probes stay read-only. `vulnlookup` is the first recipe.
 
-The test suite (613 tests) asserts these against a hostile fixture repo and real
+The test suite (972 tests) asserts these against a hostile fixture repo and real
 `sandbox-exec`. A profile with no test is a comment.
 
 ## Requirements
