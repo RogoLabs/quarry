@@ -17,6 +17,7 @@ from quarry import db                                              # noqa: E402
 from quarry.dynamic import lenses, probes                          # noqa: E402
 from quarry.dynamic.validate import (                              # noqa: E402
     NO_BASELINE, NO_CONTROL, RuntimeSpec, RunningTarget, run_validation)
+from fakecurl import Reply, curl                                   # noqa: E402
 
 SPEC = {"openapi": "3.0.0", "paths": {
     "/secret": {"get": {"security": [{"b": []}]}},
@@ -29,6 +30,7 @@ class FakeRuntime:
     def __init__(self, status):
         self.status = status
         self.stopped = False
+        self.http = curl(self.handle)
 
     def detect(self, src):
         return RuntimeSpec("compose", "docker-compose.yml", base_url="http://web:8080")
@@ -39,16 +41,19 @@ class FakeRuntime:
     def _stop(self):
         self.stopped = True
 
+    def handle(self, req):
+        if req.path == "/openapi.json":                   # spec fetch
+            return Reply(200, json.dumps(SPEC), "application/json")
+        for suffix, code in self.status.items():
+            if req.path.endswith(suffix):
+                return Reply(int(code), "record", "application/json")
+        return Reply(404, "", "text/plain")
+
     def probe_exec(self, running, argv):
-        url = argv[-1]
-        if "-w" in argv:                                  # status probe
-            for suffix, code in self.status.items():
-                if url.endswith(suffix):
-                    return 0, code
-            return 0, "404"
-        if url.endswith("/openapi.json"):                 # spec fetch
-            return 0, json.dumps(SPEC)
-        return 0, ""
+        if "-w" not in argv:                              # the fetch/crawl helpers
+            url = argv[-1]
+            return 0, json.dumps(SPEC) if url.endswith("/openapi.json") else ""
+        return self.http(argv)
 
 
 @pytest.fixture
@@ -298,3 +303,4 @@ def test_dependency_findings_are_not_probe_candidates(scanned):
     ids = _candidate_ids(con)
     assert "f-osv" not in ids and "f-trivy" not in ids
     assert "f-secret" in ids
+

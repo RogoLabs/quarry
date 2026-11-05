@@ -312,6 +312,19 @@ def test_build_reports_skips_confirmed_without_stored_baseline(tmp_path):
     assert build_reports(con, 1, src, out_dir=tmp_path / "reports") == []
 
 
+def test_build_reports_reads_a_missing_defence_confirmation_the_right_way_round(tmp_path):
+    # The rate-limit probe confirms on sameness (reproduces_when "same"): the burst was
+    # answered like the lone request. Its supporting comparison is differs False, and a
+    # "same" record with differs True (a throttle appeared) is no confirmation.
+    con, src = _db(tmp_path)
+    same = {**json.loads(CONFIRMED_EVIDENCE), "reproduces_when": "same",
+            "baseline": "lone GET /login -> HTTP 401 in 4 ms"}
+    _confirm(con, "f1", rationale=json.dumps({**same, "differs_from_baseline": False}))
+    _confirm(con, "f2", rationale=json.dumps({**same, "differs_from_baseline": True}))
+    written = build_reports(con, 1, src, out_dir=tmp_path / "reports")
+    assert [p.name.endswith("-f1.md") for p in written] == [True]
+
+
 # ---- Layer 2 -> report bridge: the deep-review digest ------------------------------
 # A deep run writes research_findings that `validate` and `report` never read. The bridge
 # lets `report` emit a triage digest of the survivors so the night's real output is not

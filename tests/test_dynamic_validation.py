@@ -184,6 +184,39 @@ def test_a_rejection_needs_a_handled_control(ev):
     assert validate.adjudicate_with_reason(ev) == ("needs-review", validate.NO_CONTROL)
 
 
+@pytest.mark.parametrize("ev, outcome", [
+    # A missing defence reproduces on sameness: the burst answered like the lone request.
+    (ProbeEvidence(True, "no throttling", determinism="statistical", handled=True,
+                   baseline="lone GET /login -> 401", differs_from_baseline=False,
+                   reproduces_when="same"), ("confirmed", "statistical")),
+    # The defence appeared (a 429): the burst departed from the lone request.
+    (ProbeEvidence(False, "429 at request 4", determinism="deterministic", handled=True,
+                   baseline="lone GET /login -> 401", differs_from_baseline=True,
+                   reproduces_when="same"), ("rejected", "deterministic")),
+    # The same "same" evidence without a handled lone request cannot reject.
+    (ProbeEvidence(False, "429 at request 4", determinism="deterministic", handled=False,
+                   baseline="lone GET /login -> 401", differs_from_baseline=True,
+                   reproduces_when="same"), ("needs-review", "no control comparison recorded")),
+    # And a "same" reproduction whose burst differed is not a confirmation.
+    (ProbeEvidence(True, "x", determinism="statistical", baseline="lone -> 401",
+                   differs_from_baseline=True, reproduces_when="same"),
+     ("needs-review", "no baseline comparison recorded")),
+], ids=["same-confirms", "same-rejects", "same-unhandled", "same-wrong-way"])
+def test_a_missing_defence_reproduces_on_sameness(ev, outcome):
+    assert validate.adjudicate_with_reason(ev) == outcome
+
+
+def test_the_comparison_direction_is_stored_with_the_verdict(con):
+    import json as _json
+    cand = Candidate("f-live", 10, "o/r", "app/x.py", 5, "t:auth", "CWE-862", "x")
+    vid = validate.record_verdict(con, cand, 1, ProbeEvidence(
+        True, "no throttling", determinism="statistical", handled=True,
+        baseline="lone -> 401", differs_from_baseline=False, reproduces_when="same"))
+    row = dict(con.execute("SELECT * FROM verdicts WHERE id=?", (vid,)).fetchone())
+    assert row["verdict"] == "confirmed"
+    assert _json.loads(row["rationale"])["reproduces_when"] == "same"
+
+
 def test_plan_validation_is_honest_without_a_runtime(con, tmp_path):
     # tmp_path is an empty dir: profiles as a non-service, so no probe lens applies and
     # no runtime is registered. The plan says so rather than pretending.

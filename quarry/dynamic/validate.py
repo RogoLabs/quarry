@@ -82,15 +82,29 @@ class ProbeEvidence:
     baseline: str = ""           # the control's result: same route, benign input / creds
     differs_from_baseline: bool | None = None  # True/False only when measured against baseline
     handled: bool | None = None  # True only when a handler answered (not 404/405/nothing)
+    # What a reproduction looks like next to the control. "differs" for almost every
+    # probe: the finding's effect is something the control lacks (a SQL error the plain
+    # value did not raise, a cross-user delete the anonymous control was refused). "same"
+    # for a finding that is the absence of a defence: a missing rate limit reproduces
+    # when the tenth request of a burst is answered exactly like a lone request, and the
+    # defence shows as a difference (a 429). Stored in the rationale, so the disclosure
+    # step reads a "same" confirmation the right way round.
+    reproduces_when: str = "differs"
+
+    @property
+    def _supporting(self) -> bool:
+        """The value of differs_from_baseline that supports the finding."""
+        return self.reproduces_when != "same"
 
     @property
     def has_baseline_comparison(self) -> bool:
-        return bool(self.baseline) and self.differs_from_baseline is True
+        return bool(self.baseline) and self.differs_from_baseline is self._supporting
 
     @property
     def has_negative_control(self) -> bool:
-        """The attack input was handled and behaved like the control did."""
-        return (bool(self.baseline) and self.differs_from_baseline is False
+        """The attack input was handled and behaved like the control did (for a "same"
+        probe: the defence appeared, which the lone control request did not need)."""
+        return (bool(self.baseline) and self.differs_from_baseline is (not self._supporting)
                 and self.handled is True)
 
 
@@ -399,6 +413,7 @@ def record_verdict(con: sqlite3.Connection, candidate: Candidate, run_id: int,
         "baseline": evidence.baseline,
         "differs_from_baseline": evidence.differs_from_baseline,
         "handled": evidence.handled,
+        "reproduces_when": evidence.reproduces_when,
     }, sort_keys=True)
     return db.verdict(
         con, candidate.finding_id, run_id, verdict=v, seat="dynamic", model=model,
