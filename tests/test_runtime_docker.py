@@ -4,6 +4,8 @@ internet (docker-gated).
 """
 from __future__ import annotations
 
+import dataclasses
+
 import sys
 from pathlib import Path
 
@@ -312,7 +314,7 @@ def test_start_tears_down_and_keeps_logs_when_target_never_gets_healthy(tmp_path
         "services:\n  api:\n    image: x\n    restart: always\n    ports: ['8000:8000']\n")
     calls = _fake_start(monkeypatch)
 
-    def never_healthy(self, net, base_url):
+    def never_healthy(self, net, base_url, ready_paths=()):
         raise rt.DockerError(f"target did not become healthy at {base_url} (last='000')")
 
     monkeypatch.setattr(DockerRuntime, "_await_health", never_healthy)
@@ -325,6 +327,86 @@ def test_start_tears_down_and_keeps_logs_when_target_never_gets_healthy(tmp_path
     hardened = rt.yaml.safe_load((tmp_path / "compose" / "compose.hardened.yml").read_text())
     assert hardened["services"]["api"]["restart"] == "no"
     assert not (src / "quarry-compose.hardened.yml").exists()   # nothing written to the clone
+
+
+# --- IMPROVEMENT-PLAN item 16: readiness must identify the target ----------------
+
+def _readiness(monkeypatch, answers, **kw):
+    """Run _await_health against canned sidecar answers: {path: [(status, body), ...]}.
+    A path's last answer repeats. Any other path answers 404."""
+    seen = []
+    runtime = DockerRuntime(health_timeout=kw.pop("timeout", 3))
+    monkeypatch.setattr(rt.time, "sleep", lambda s: None)
+
+    def get(self, net, url):
+        path = "/" + url.split("://", 1)[1].split("/", 1)[1] if url.count("/") > 2 else "/"
+        seen.append(path)
+        if path.startswith("/quarry-readiness-"):
+            return answers.get("stray", (404, b"not found"))
+        queue = answers.get(path)
+        if not queue:
+            return (404, b"not found")
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+    monkeypatch.setattr(DockerRuntime, "_sidecar_get", get)
+    return runtime, seen
+
+
+def test_a_proxy_502_while_the_app_boots_is_not_ready(monkeypatch):
+    runtime, seen = _readiness(monkeypatch, {
+        "/": [(502, b"bad gateway"), (502, b"bad gateway"), (200, b"<html>app</html>")],
+        "/api/health": [(503, b""), (200, b'{"ok": true}')]})
+    ev = runtime._await_health("n", "http://web:8000", ("/api/health",))
+    assert seen[:3] == ["/", "/", "/"]                   # waited out both 502s
+    assert ev["basis"] == "known-route" and ev["request"] == "GET /api/health"
+    assert ev["status"] == 200 and ev["discriminates"] is True
+    assert ev["tried"]["/api/health"] == 200
+
+
+def test_a_service_that_is_not_the_target_is_refused(monkeypatch):
+    """Something answers on the port, but none of the clone's own routes exist there."""
+    runtime, _ = _readiness(monkeypatch, {"/": [(200, b"nginx welcome")]}, timeout=1)
+    with pytest.raises(rt.DockerError, match="none of the clone's 2 known route"):
+        runtime._await_health("n", "http://web:80", ("/api/users", "/login"))
+
+
+def test_no_route_to_ask_means_no_probing(monkeypatch):
+    runtime, _ = _readiness(monkeypatch, {"/": [(200, b"hi")]})
+    with pytest.raises(rt.DockerError, match="no parameter-free GET route"):
+        runtime._await_health("n", "http://web:80", ())
+
+
+def test_a_catch_all_is_recorded_as_not_discriminating(monkeypatch):
+    runtime, _ = _readiness(monkeypatch, {"/": [(200, b"index")], "/login": [(200, b"index")],
+                                          "stray": (200, b"index")})
+    ev = runtime._await_health("n", "http://web:80", ("/login",))
+    assert ev["status"] == 200 and ev["discriminates"] is False
+
+
+def test_readiness_paths_are_parameter_free_gets_spec_first():
+    from quarry.dynamic.routes import Route, RouteMap
+    from quarry.dynamic.validate import readiness_paths
+    m = RouteMap()
+    m.add_all([Route("GET", "/users/<int:uid>", "a.py"), Route("POST", "/login", "a.py"),
+               Route("GET", "/static/*", "a.py"), Route("GET", "/about", "a.py"),
+               Route("GET", "/api/stats", source="openapi"), Route("GET", "/", "a.py"),
+               Route("GET", "/api/{id}", source="openapi")])
+    assert readiness_paths(m) == ("/api/stats", "/", "/about")
+
+
+def test_readiness_evidence_lands_in_the_manifest_and_a_catch_all_warns(tmp_path):
+    from types import SimpleNamespace
+    from quarry import db
+    from quarry.dynamic.validate import _record_provisioning
+    con = db.init(tmp_path / "t.db")
+    con.execute("INSERT INTO runs (id,target,clone_url,status) VALUES (1,'o/r','x','done')")
+    ready = {"basis": "known-route", "request": "GET /login", "status": 200,
+             "discriminates": False}
+    _record_provisioning(con, 1, SimpleNamespace(provisioning={"build_network": "none",
+                                                               "readiness": ready}))
+    m = db.read_manifest(con, 1)
+    assert m["validate"]["readiness"] == ready
+    assert "readiness" not in m["validate"]["provisioning"]
+    assert "not that it is this target" in m["health"]["validate"]["readiness"][0]
 
 
 def test_a_build_that_needs_the_network_is_a_provisioning_gap(tmp_path, monkeypatch):
@@ -582,7 +664,12 @@ def test_target_is_reachable_on_the_net_but_cannot_egress(tmp_path):
     runtime = DockerRuntime(health_timeout=90, up_timeout=300)
     spec = runtime.detect(src)
     assert spec is not None and spec.base_url == "http://web:8080"
-    running = runtime.start(spec, tmp_path)
+    running = runtime.start(dataclasses.replace(spec, ready_paths=("/",)), tmp_path)
+    # Readiness named the route it used, and a random path answered differently.
+    ready = runtime.provisioning["readiness"]
+    assert ready["basis"] == "known-route" and ready["request"] == "GET /"
+    assert ready["status"] == 200 and ready["unknown_route"]["status"] == 404
+    assert ready["discriminates"] is True and len(ready["body_sha256"]) == 64
     try:
         code, out = runtime.probe_exec(running, [
             "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "5",
@@ -621,7 +708,8 @@ def test_a_hostile_service_runs_with_only_the_kept_capabilities(tmp_path):
         "    volumes: ['./out:/out']\n"
         "    ports: ['18082:8080']\n")
     runtime = DockerRuntime(health_timeout=90, up_timeout=300)
-    running = runtime.start(runtime.detect(src), tmp_path)
+    running = runtime.start(dataclasses.replace(runtime.detect(src), ready_paths=("/",)),
+                            tmp_path)
     try:
         status = dict(line.split(":\t", 1) for line in
                       (src / "out" / "status").read_text().splitlines() if ":\t" in line)

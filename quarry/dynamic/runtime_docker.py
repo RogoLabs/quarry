@@ -747,7 +747,8 @@ class DockerRuntime:
             self._compose(project, hardened, "up", "-d", "--no-build",
                           timeout=self.up_timeout)
             self._pull_sidecar()
-            self._await_health(net, base_url)
+            self.provisioning["readiness"] = self._await_health(net, base_url,
+                                                                  spec.ready_paths)
         except BaseException as e:
             log = self._save_logs(project, hardened, rundir)
             stop()
@@ -818,19 +819,75 @@ class DockerRuntime:
                            env=self._env)
         return r.returncode, (r.stdout + r.stderr)
 
-    def _await_health(self, net: str, base_url: str) -> None:
+    def _sidecar_get(self, net: str, url: str) -> tuple[int, bytes]:
+        """One GET from a sidecar on the isolated network. -> (status, body). Status 0
+        means no HTTP answer at all (refused, reset, timed out)."""
+        r = subprocess.run(["docker", "run", "--rm", "--network", net, SIDECAR_IMAGE,
+                            "-s", "-o", "-", "-w", "\n%{http_code}", "--max-time", "5",
+                            url],
+                           capture_output=True, timeout=30, env=self._env)
+        body, _, code = (r.stdout or b"").rpartition(b"\n")
+        try:
+            return int(code.strip() or 0), body
+        except ValueError:
+            return 0, b""
+
+    def _await_health(self, net: str, base_url: str,
+                      ready_paths: tuple[str, ...] = ()) -> dict:
+        """Wait until the target, not just something on its port, is answering.
+
+        IMPROVEMENT-PLAN item 16. This used to return on any 2xx to 5xx from the base
+        URL, so a reverse proxy's 502 while the app still booted passed, and so did any
+        HTTP service on that port that was not the target. Now: first any answer below
+        500 at the base URL, then one of the clone's own parameter-free GET routes
+        (static or committed spec, chosen by validate.readiness_paths) answering with
+        something other than 404, 405 or 5xx. That request, its status and the sha256
+        of its body are returned for the manifest. A random path is asked too: if it
+        gets the same status and body, the route did not tell the app apart from a
+        catch-all, and the evidence says so. With no route to ask, or none answering
+        before the deadline, this raises and nothing is probed."""
+        import hashlib
+        import secrets as _secrets
         deadline = time.monotonic() + self.health_timeout
-        probe = ["--network", net, SIDECAR_IMAGE, "-s", "-o", "/dev/null",
-                 "-w", "%{http_code}", "--max-time", "5", base_url]
-        last = ""
+        last = 0
         while time.monotonic() < deadline:
-            r = subprocess.run(["docker", "run", "--rm", *probe],
-                               capture_output=True, text=True, timeout=30, env=self._env)
-            last = (r.stdout or "").strip()
-            if last and last[0] in "2345":      # any HTTP response means it is up
-                return
+            last, _ = self._sidecar_get(net, base_url)
+            if 200 <= last < 500:
+                break
             time.sleep(2)
-        raise DockerError(f"target did not become healthy at {base_url} (last={last!r})")
+        else:
+            raise DockerError(f"target did not become healthy at {base_url} "
+                              f"(last status {last or 'none'})")
+        if not ready_paths:
+            raise DockerError(
+                f"{base_url} answered {last}, but the clone's route map has no "
+                f"parameter-free GET route to confirm it is the target; not probing")
+        tried: dict[str, int] = {}
+        while time.monotonic() < deadline:
+            for path in ready_paths:
+                url = base_url.rstrip("/") + path
+                status, body = self._sidecar_get(net, url)
+                tried[path] = status
+                if status == 0 or status in (404, 405) or status >= 500:
+                    continue
+                stray = f"/quarry-readiness-{_secrets.token_hex(6)}"
+                s_status, s_body = self._sidecar_get(net, base_url.rstrip("/") + stray)
+                sha = hashlib.sha256(body).hexdigest()
+                return {
+                    "basis": "known-route",
+                    "request": f"GET {path}",
+                    "status": status,
+                    "body_sha256": sha,
+                    "body_bytes": len(body),
+                    "unknown_route": {"request": f"GET {stray}", "status": s_status,
+                                      "body_sha256": hashlib.sha256(s_body).hexdigest()},
+                    "discriminates": (s_status, s_body) != (status, body),
+                    "tried": tried,
+                }
+            time.sleep(2)
+        raise DockerError(f"{base_url} answered, but none of the clone's "
+                          f"{len(ready_paths)} known route(s) did before the deadline "
+                          f"(status by route: {tried}); not probing")
 
 
 def register() -> DockerRuntime:

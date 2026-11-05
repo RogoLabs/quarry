@@ -27,6 +27,8 @@ route that answered 404 to both timing identifiers was rejected, and stayed reje
 """
 from __future__ import annotations
 
+import dataclasses
+
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -119,6 +121,28 @@ class RuntimeSpec:
     kind: str                    # "command" | "compose" | "dockerfile"
     detail: str
     base_url: str = ""
+    # Parameter-free GET routes from the clone's own route map. Readiness requires one
+    # of them to answer as the app would (IMPROVEMENT-PLAN item 16).
+    ready_paths: tuple[str, ...] = ()
+
+
+def readiness_paths(rmap, limit: int = 6) -> tuple[str, ...]:
+    """Routes that can show the running service is this target: GET, no path parameter
+    to guess, no wildcard. Committed-spec routes first (they describe the deployed
+    API, prefix included), then static ones, shortest first so `/` and `/api/health`
+    style routes lead. Pure: reads the route map, sends nothing."""
+    order = {"openapi": 0, "static": 1}
+    seen: set[str] = set()
+    picks: list[tuple[int, int, str]] = []
+    for r in rmap.routes.values():
+        p = r.path
+        if r.method != "GET" or r.params or any(c in p for c in "{}<>:*"):
+            continue
+        if not p.startswith("/") or p in seen:
+            continue
+        seen.add(p)
+        picks.append((order.get(r.source, 2), len(p), p))
+    return tuple(p for _, _, p in sorted(picks)[:limit])
 
 
 @dataclass
@@ -285,11 +309,18 @@ def _record_provisioning(con: sqlite3.Connection, run_id: int, runtime) -> None:
     prov = getattr(runtime, "provisioning", None)
     if not prov:
         return
+    ready = prov.get("readiness")
     db.update_manifest(con, run_id,
-                       lambda m: m.setdefault("validate", {}).update(provisioning=prov))
+                       lambda m: m.setdefault("validate", {}).update(
+                           provisioning={k: v for k, v in prov.items() if k != "readiness"},
+                           **({"readiness": ready} if ready else {})))
     netted = prov.get("build_network", "none") != "none"
     sample = prov.get("dotenv") or ""
     db.set_health(con, run_id, "validate", {
+        "readiness": ([f"readiness route {ready.get('request')} answered the same as a "
+                       f"random path ({ready.get('status')}); it shows something is "
+                       f"serving, not that it is this target"]
+                      if ready and ready.get("discriminates") is False else []),
         "build-network": ["Dockerfile RUN steps had network access while the target "
                           "was built (--build-network)"] if netted else [],
         "env": ([f"no .env in the clone; interpolated from {sample}"]
@@ -324,6 +355,7 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
         return res
 
     rmap = build_route_map(src)
+    spec = dataclasses.replace(spec, ready_paths=readiness_paths(rmap))
     try:
         running = runtime.start(spec, rundir)
     except Exception as e:
