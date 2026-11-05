@@ -194,7 +194,7 @@ def rel_or_none(uri: str | None, src: Path) -> str | None:
     Returning None rather than raising is deliberate: one malformed path in a 5,000
     result file should cost one finding, not the whole scan.
     """
-    if not uri:
+    if not isinstance(uri, str) or not uri:
         return None
     if uri.startswith("file://"):
         uri = uri[len("file://"):]
