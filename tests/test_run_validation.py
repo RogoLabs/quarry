@@ -246,6 +246,37 @@ def test_seeding_runs_the_targets_commands_and_carries_inputs_to_probes(scanned)
     assert any("captured admin_api_key" in n for n in seed_notes)
 
 
+def test_seed_recipe_and_service_are_recorded_for_the_advisory(scanned):
+    # The advisory's Conditions section reads these back. A run with no recipe records
+    # None, so a draft can say "not seeded" rather than "not recorded".
+    con, rundir = scanned
+    from quarry.dynamic.seed import SeedRecipe, SeedStep
+
+    class Seeding(FakeRuntime):
+        def start(self, spec, rundir):
+            return RunningTarget("http://web:8080", stop=self._stop, network="net",
+                                 service="web", port=8080)
+
+        def service_exec(self, running, argv, *, service="", timeout=900):
+            self.argv = argv
+            return 0, "APIKEY=abcdef0123456789\n"
+
+    rt = Seeding({"/secret": "401"})
+    recipe = SeedRecipe(name="t", steps=(SeedStep(
+        argv=("mkadmin", "--password", "{password}"), capture=r"APIKEY=(\w+)",
+        capture_as="admin_api_key"),))
+    run_validation(con, 1, rundir, rt, seed=recipe)
+    m = db.read_manifest(con, 1)
+    assert m["validate"]["seed"] == "t" and m["validate"]["service"] == "web"
+    # names only: neither the captured key nor the generated password is on the run
+    dumped = json.dumps(m)
+    assert "abcdef0123456789" not in dumped and rt.argv[2] not in dumped
+
+    run_validation(con, 1, rundir, FakeRuntime({"/secret": "401"}))
+    m = db.read_manifest(con, 1)
+    assert m["validate"]["seed"] is None and m["validate"]["service"] is None
+
+
 def _candidate_ids(con):
     from quarry.dynamic.validate import select_candidates
     return [c.finding_id for c in select_candidates(con, 1)]

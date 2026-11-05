@@ -5,6 +5,16 @@ reporter to confirm, never a computed CVSS the tool invented; affected versions 
 as the exact commit the probe ran against, with the range left for the maintainer, since
 the probe observed one revision and inventing a range would be a guess.
 
+It also states the limits of what was verified. Severity is labelled a class default and
+kept apart from Confidence, which comes from the verdict and its replays. Conditions lists
+what had to be true for the observation (commit, route, seed recipe, auth role, `--env`
+names) from the verdict's rationale and the run manifest, and says "not recorded" for
+anything missing. Limitations names the single weakest link. Nothing is fetched: the
+prior-advisory check reads the local OSV copy, and current HEAD is not re-checked, which
+the draft says. `--env` values and a seed recipe's keys and password are never stored,
+so the draft can only name them; it also redacts credential headers and
+credential-shaped query values in the evidence, in case a probe sent one.
+
 Most of what fills the template is target-controlled: route paths from the repo's source
 or the OpenAPI document the running target served, the target and file names, response
 excerpts. A string that closes the PoC fence could append its own headings, links or a
@@ -20,10 +30,11 @@ import hashlib
 import json
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .. import db
 from ..cwe import probe_class
 from ..taint import TaintError, safe_relpath, scrub_text
 
@@ -107,6 +118,19 @@ class DisclosureContext:
     run_id: int
     verdict_time: str
     baseline: str = ""           # the control result the probe's effect differed from
+    # What had to be true for the observation, and how far the evidence goes. Each is
+    # optional: a verdict written before a key existed renders "not recorded", never a
+    # guess. replay/probe/conditions are the rationale keys of the same names;
+    # `validate` is the run manifest's validate block (provisioning, seed, service).
+    verdict: str = "confirmed"
+    verdict_reason: str = ""
+    replay: Any = None
+    probe: Any = None
+    conditions: Any = None
+    validate: Any = None
+    seed_notes: tuple[str, ...] = ()
+    prior: Any = None            # vulndb.PriorCheck; None when no lookup ran
+    security_policy: tuple[str, ...] | None = None   # SECURITY.md paths; None: not checked
 
 
 def guess_ecosystem(primary_language: str) -> str:
@@ -221,6 +245,30 @@ def extract_security_contacts(src: Path) -> list[SecurityContact]:
     return out
 
 
+_POLICY_FILES = ("SECURITY.md", ".github/SECURITY.md", "docs/SECURITY.md")
+
+
+def find_security_policy(src: Path) -> tuple[str, ...] | None:
+    """The SECURITY.md files the clone holds, by Quarry's fixed list of names, read
+    through the taint boundary's path check so a symlink out of the clone does not
+    count. None when the clone is not there to look in, so the draft says "not
+    checked" rather than "absent"."""
+    try:
+        if not Path(src).is_dir():
+            return None
+    except OSError:
+        return None
+    found: list[str] = []
+    for name in _POLICY_FILES:
+        try:
+            p = Path(src).resolve() / safe_relpath(name, Path(src))
+        except TaintError:
+            continue
+        if p.is_file():
+            found.append(name)
+    return tuple(found)
+
+
 def _title(cwe: str | None) -> str:
     return CWE_TITLE.get(probe_class(cwe) or "", "Security vulnerability")
 
@@ -296,22 +344,453 @@ def _render_contacts(contacts) -> str:
     return head + "\n\n" + "\n".join(lines)
 
 
+# ------------------------------------------------------------ conditions and limits
+# A maintainer who cannot reproduce a report closes it, and a reporter who overstates
+# one loses the next. So the draft says what had to be true for the observation, how far
+# the evidence goes, and its single weakest link, from what Quarry recorded. Anything not
+# recorded is said to be not recorded; nothing is filled in from what usually happens.
+
+NOT_RECORDED = "not recorded"
+_MISSING = object()
+
+
+def _count(v: Any) -> int | None:
+    """A non-negative int, and not a bool (True is an int in Python)."""
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
+
+
+def _dict(v: Any) -> dict:
+    return v if isinstance(v, dict) else {}
+
+
+@dataclass(frozen=True)
+class _Replay:
+    state: str                   # absent | unreadable | empty | agreed | disagreed
+    attempts: int = 0
+    reproduced: int = 0
+    control_held: int = 0
+    after_restart: bool | None = None
+
+
+def _replay(raw: Any) -> _Replay:
+    """rationale["replay"], read strictly. A record whose counts do not add up is
+    "unreadable" and counts as no replay, because a reproducibility claim rests on
+    them. A replay that failed after a restart is a disagreement."""
+    if raw is None:
+        return _Replay("absent")
+    if not isinstance(raw, dict):
+        return _Replay("unreadable")
+    n, r, c = (_count(raw.get(k)) for k in ("attempts", "reproduced", "control_held"))
+    restart = raw.get("after_restart")
+    if (n is None or r is None or c is None or r > n or c > n
+            or not (restart is None or isinstance(restart, bool))):
+        return _Replay("unreadable")
+    if n == 0:
+        return _Replay("empty")
+    agreed = r == n and c == n and restart is not False
+    return _Replay("agreed" if agreed else "disagreed", n, r, c, restart)
+
+
+# A recorded override is shown by name only. Anything that is not a plain variable name
+# is withheld, in case it is a value. A role is a short word (admin, user, quarry_admin);
+# one with a digit or over 24 characters is withheld, because that is what a key looks
+# like (the vulnlookup recipe captures keys as 16 or more letters and digits).
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
+_ROLE = re.compile(r"[A-Za-z][A-Za-z_-]{0,23}")
+
+
+def _env_names(raw: Any) -> tuple[list[str], int] | None:
+    """Variable names from a recorded override list, and how many entries were
+    withheld. A dict's values are never read; a `KEY=VALUE` entry keeps only KEY. None
+    when the record is not a list or dict."""
+    if isinstance(raw, dict):
+        items = list(raw)
+    elif isinstance(raw, (list, tuple)):
+        items = list(raw)
+    else:
+        return None
+    names: list[str] = []
+    withheld = 0
+    for it in items:
+        name = it.split("=", 1)[0].strip() if isinstance(it, str) else ""
+        if _ENV_NAME.fullmatch(name):
+            names.append(name)
+        else:
+            withheld += 1
+    return names, withheld
+
+
+@dataclass
+class _Facts:
+    """The conditions, gathered once for the Conditions and Limitations sections. The
+    verdict's own rationale is preferred. The run manifest is the fallback, and it holds
+    the run's latest validation, which may not be the one that wrote this verdict, so a
+    value taken from it is labelled. `missing` is filled while Conditions renders."""
+    seed: Any = _MISSING         # str | None (not seeded) | _MISSING
+    seed_from_run: bool = False
+    auth: Any = _MISSING         # "anonymous" | role | _MISSING
+    env: tuple[list[str], int] | None = None
+    env_from_run: bool = False
+    prov: dict = field(default_factory=dict)
+    service: Any = None
+    missing: list[str] = field(default_factory=list)
+
+
+_FROM_RUN = " (recorded for the run)"
+
+
+def _facts(ctx: DisclosureContext) -> _Facts:
+    cond, val = _dict(ctx.conditions), _dict(ctx.validate)
+    f = _Facts(prov=_dict(val.get("provisioning")), service=val.get("service"))
+    if "seed" in cond:
+        f.seed = cond["seed"]
+    elif "seed" in val:
+        f.seed, f.seed_from_run = val["seed"], True
+    if f.seed is not None and f.seed is not _MISSING and not (
+            isinstance(f.seed, str) and f.seed):
+        f.seed = _MISSING
+    if isinstance(cond.get("auth"), str) and cond["auth"]:
+        f.auth = cond["auth"]
+    if "env_keys" in cond:
+        f.env = _env_names(cond["env_keys"])
+    elif "env_overrides" in f.prov:
+        f.env, f.env_from_run = _env_names(f.prov["env_overrides"]), True
+    return f
+
+
+def _render_conditions(ctx: DisclosureContext, f: _Facts) -> str:
+    probe = _dict(ctx.probe)
+
+    def nr(what: str) -> str:
+        f.missing.append(what)
+        return NOT_RECORDED
+
+    lines = [f"- Commit observed: {_code(ctx.git_sha) if ctx.git_sha else nr('commit')}"]
+    method, route = probe.get("method"), probe.get("route")
+    if isinstance(method, str) and method and isinstance(route, str) and route:
+        lines.append(f"- Route and method: {_code(method.upper())} {_code(route)}")
+    else:
+        lines.append(f"- Route and method: {nr('route and method')} as a field; the "
+                     f"request under Proof of concept is what was sent")
+    pid, psha = probe.get("id"), probe.get("source_sha")
+    if isinstance(pid, str) and pid:
+        lines.append(f"- Probe: {_code(pid)}, source hash "
+                     + (_code(psha[:12]) if isinstance(psha, str) and psha
+                        else NOT_RECORDED))
+    else:
+        lines.append(f"- Probe: {nr('probe identity')}")
+
+    if f.auth is _MISSING:
+        auth = nr("authentication")
+    elif f.auth == "anonymous":
+        auth = "anonymous (the probe sent no credentials)"
+    elif _ROLE.fullmatch(f.auth):
+        auth = (f"a seeded test account with role {_code(f.auth)}"
+                + (f" from recipe {_code(f.seed)}" if isinstance(f.seed, str) else "")
+                + "; its key and password are not in this draft")
+    else:
+        auth = "recorded, but withheld (not a plain role name)"
+    lines.append(f"- Authentication: {auth}")
+
+    if f.seed is _MISSING:
+        seed = nr("seed recipe")
+    elif f.seed is None:
+        seed = "none (the instance was not seeded)"
+    else:
+        seed = (f"{_code(f.seed)} (the project's own setup commands, run by Quarry inside "
+                f"the contained instance)")
+        notes = [_text(n) for n in ctx.seed_notes[:8] if _text(n)]
+        if notes:
+            seed += "; notes recorded on the run: " + "; ".join(notes)
+    if f.seed is not _MISSING and f.seed_from_run:
+        seed += _FROM_RUN
+    lines.append(f"- Seed recipe: {seed}")
+
+    if f.env is None:
+        env = nr("environment overrides")
+    elif not f.env[0] and not f.env[1]:
+        env = "none"
+    else:
+        names, withheld = f.env
+        env = ", ".join(_code(n) for n in names)
+        if withheld:
+            env += ((" and " if names else "")
+                    + f"{withheld} entr{'y' if withheld == 1 else 'ies'} withheld (not a "
+                      f"plain variable name)")
+        env += " (names only; the values are not in this draft)"
+    if f.env is not None and f.env_from_run:
+        env += _FROM_RUN
+    lines.append(f"- Environment overrides used to boot: {env}")
+
+    if not f.prov:
+        lines.append(f"- Build network, memory limit and .env source: "
+                     f"{nr('build settings')}")
+    else:
+        bn = f.prov.get("build_network")
+        lines.append("- Build network: " + (
+            "none (the image was built offline)" if bn == "none" else
+            "default (Dockerfile RUN steps could reach the network while the image was "
+            "built; the running instance could not)" if bn == "default" else
+            _code(bn) if isinstance(bn, str) and bn else nr("build network")))
+        mem = f.prov.get("mem_limit")
+        lines.append("- Memory limit per service: "
+                     + (_code(mem) if isinstance(mem, str) and mem else nr("memory limit")))
+        if "dotenv" in f.prov:
+            de = f.prov["dotenv"]
+            dotenv = (_code(de) if isinstance(de, str) and de else
+                      "none (no .env or sample file in the clone)")
+        else:
+            dotenv = nr(".env source")
+        lines.append(f"- .env file used for interpolation: {dotenv}")
+    svc = f.service
+    lines.append("- Compose service probed: "
+                 + (_code(svc) if isinstance(svc, str) and svc else nr("compose service")))
+    return "\n".join(lines)
+
+
+_ROUTE_LINK = ("Quarry matched the flagged file to the route it probed and did not trace "
+               "whether the flagged code ran for this request. The response could have "
+               "come from other code on the same route.")
+
+
+def _render_limits(ctx: DisclosureContext, f: _Facts, rp: _Replay) -> str:
+    """The single weakest link first, then every other limit that applies. The order of
+    the checks is the order of how badly each gap undercuts a confirmation: a verdict
+    that is not a confirmation, replays that disagree, no replay at all, no replay
+    after a restart, and last the link every probe has today, file to route."""
+    if ctx.verdict != "confirmed":
+        weakest = (f"The verdict is {_text(ctx.verdict)}, not confirmed "
+                   f"({_text(ctx.verdict_reason) or 'no reason recorded'}).")
+    elif rp.state == "disagreed":
+        weakest = (f"Replays disagreed with the first observation: the effect reproduced "
+                   f"{rp.reproduced} of {rp.attempts} times and the control held "
+                   f"{rp.control_held} of {rp.attempts} times"
+                   + ("; after a restart of the target service it did not reproduce"
+                      if rp.after_restart is False else "") + ".")
+    elif rp.state != "agreed":
+        weakest = ("The result was observed once and was not replayed. One observation "
+                   "can come from instance state, timing or a transient error rather than "
+                   "the flaw.")
+    elif rp.after_restart is None:
+        weakest = ("Every replay ran in the same running instance. None ran after a "
+                   "restart of the target service, so state left by an earlier request "
+                   "was not ruled out.")
+    else:
+        weakest = _ROUTE_LINK
+    others = [] if weakest is _ROUTE_LINK else [_ROUTE_LINK]
+    others.append("It was observed at one commit, and current HEAD was not re-checked.")
+    if f.missing:
+        others.append("Not recorded for this verdict: " + ", ".join(f.missing)
+                      + ". A maintainer may need these to reproduce it.")
+    if isinstance(f.seed, str):
+        others.append(f"The instance was seeded with recipe {_code(f.seed)}. A deployment "
+                      f"holding other data or accounts may answer differently.")
+    elif f.seed is None:
+        others.append("The instance was not seeded. A deployment holding data and "
+                      "accounts may answer differently.")
+    if f.env and f.env[0]:
+        others.append("The target was booted with operator overrides for "
+                      + ", ".join(_code(n) for n in f.env[0])
+                      + ". A deployment with other values may behave differently.")
+    others.append("The instance ran in Quarry's contained environment. Anything a "
+                  "deployment puts in front of the application, such as a reverse proxy or "
+                  "gateway that enforces authentication, was not present.")
+    others.append("Severity is the class default for the weakness, not an impact the "
+                  "probe demonstrated (see Severity).")
+    return (f"Weakest link: {weakest}\n\nOther limits:\n\n"
+            + "\n".join(f"- {o}" for o in others))
+
+
+def _confidence(ctx: DisclosureContext, rp: _Replay) -> str:
+    """How sure the evidence lets a reader be, kept apart from Severity so a class
+    default is never read as a measured result."""
+    det = _text(ctx.determinism) or "unknown"
+    if ctx.verdict != "confirmed":
+        return (f"**Needs review** ({_text(ctx.verdict_reason) or 'no reason recorded'}). "
+                f"The probe did not confirm this finding. Do not send it as a confirmation.")
+    restart = {True: "After a restart of the target service it reproduced again.",
+               False: "After a restart of the target service it did not reproduce.",
+               None: "No replay ran after a restart of the target service."}
+    if rp.state == "agreed":
+        return (f"**Confirmed against a control, and replayed.** The confirming request "
+                f"and its control were replayed {rp.attempts} times: the effect reproduced "
+                f"{rp.reproduced} of {rp.attempts} times and the control held "
+                f"{rp.control_held} of {rp.attempts} times. {restart[rp.after_restart]} "
+                f"Signal: {det}.")
+    if rp.state == "disagreed":
+        return (f"**Confirmed once, but replays disagreed.** The effect reproduced "
+                f"{rp.reproduced} of {rp.attempts} times and the control held "
+                f"{rp.control_held} of {rp.attempts} times. {restart[rp.after_restart]} "
+                f"Treat this as needs-review, and do not send it until a human has re-run "
+                f"the request.")
+    out = (f"**Confirmed against a control, on a single observation.** The probe's "
+           f"response differed from a control request ({det} signal). The result was "
+           f"observed once and was not replayed.")
+    if rp.state == "unreadable":
+        out += " A replay record exists but its counts could not be read, so it is not counted."
+    elif rp.state == "empty":
+        out += " The replay record shows no attempts."
+    return out
+
+
+def _how_confirmed(ctx: DisclosureContext, rp: _Replay) -> str:
+    if ctx.verdict != "confirmed":
+        return ("This was probed dynamically against a running instance of the project, "
+                "in an isolated environment with no network egress, and was not confirmed "
+                "(see Confidence).")
+    out = ("This was confirmed dynamically against a running instance of the project, in "
+           "an isolated environment with no network egress. The verdict rests on a "
+           "measured difference between the probe's response and a control request, not "
+           f"on static inference ({_text(ctx.determinism) or 'unknown'} signal).")
+    if rp.state == "agreed":
+        return out + (f" The effect reproduced on {rp.reproduced} of {rp.attempts} "
+                      f"replays.")
+    if rp.state == "disagreed":
+        return out + " Replays of the request did not all agree (see Confidence)."
+    return out + " The result was observed once and was not replayed."
+
+
+_PRIOR_LISTED = 10
+
+
+def _render_prior(prior: Any, cwe: str | None, policy: tuple[str, ...] | None) -> str:
+    """What the local, offline prior-advisory check searched and found, and whether the
+    clone carries a SECURITY.md. Quarry does not reach the network here, so anything it
+    could not search locally is stated as not checked."""
+    from ..vulndb import BASES
+    lines: list[str] = []
+    if prior is None or not getattr(prior, "checked", False):
+        why = _text(getattr(prior, "reason", "")) if prior is not None else ""
+        lines.append("- Prior advisories: not checked (offline"
+                     + (f"; {why}" if why else "") + ").")
+    else:
+        klass = probe_class(cwe)
+        matches = sorted(prior.matches, key=lambda m: m.modified, reverse=True)
+        matches.sort(key=lambda m: (klass not in {probe_class(c) for c in m.cwes},
+                                    BASES.index(m.basis) if m.basis in BASES else 9))
+        by = []
+        if prior.package_ecosystem:
+            by.append(f"package name {_code(prior.package)} in "
+                      f"{_text(prior.package_ecosystem)}")
+        if prior.repo:
+            by.append(f"repository {_code(prior.repo)}")
+        searched = (f"{prior.entries_read:,} records in the local OSV copies for "
+                    f"{', '.join(_text(e) for e in prior.ecosystems)}"
+                    + (f" (oldest copy downloaded {_text(prior.downloaded)})"
+                       if prior.downloaded else "")
+                    + (", by " + " and by ".join(by) if by else ""))
+        if not matches:
+            lines.append(f"- Prior advisories: none found. Searched {searched}.")
+        else:
+            same = sum(1 for m in matches if klass in {probe_class(c) for c in m.cwes})
+            lines.append(f"- Prior advisories: {len(matches)} found, {same} of them "
+                         f"recorded with {_text(cwe or 'this weakness')}. Read each before "
+                         f"sending. Searched {searched}.")
+            for m in matches[:_PRIOR_LISTED]:
+                extra = []
+                if m.aliases:
+                    extra.append("aliases " + ", ".join(_code(a) for a in m.aliases[:3]))
+                if m.cwes:
+                    extra.append(", ".join(_text(c) for c in m.cwes[:3]))
+                extra.append(f"matched by {_text(m.basis)}")
+                summ = _text(m.summary[:160]) if m.summary else ""
+                lines.append(f"  - {_code(m.id)} ({'; '.join(extra)})"
+                             + (f": {summ}" if summ else ""))
+            if len(matches) > _PRIOR_LISTED:
+                lines.append(f"  - and {len(matches) - _PRIOR_LISTED} more not listed here")
+    if policy is None:
+        sec = "not checked (the clone was not available)"
+    elif not policy:
+        sec = ("absent (looked for " + ", ".join(_code(p) for p in _POLICY_FILES) + ")")
+    else:
+        sec = (", ".join(_code(p) for p in policy)
+               + " present; read its reporting policy before sending")
+    lines.append(f"- SECURITY.md in the clone: {sec}")
+    lines.append("")
+    if prior is not None and getattr(prior, "checked", False):
+        lines.append("A miss here does not show the issue is new. The local OSV copy is a "
+                     "snapshot, the repository name may not be the published package name, "
+                     "and reports outside OSV, such as the project's issue tracker or "
+                     "changelog, were not searched.")
+    else:
+        lines.append("Nothing was searched for an earlier report of this issue. Search OSV, "
+                     "GitHub's advisory database and the project's issue tracker before "
+                     "sending.")
+    return "\n".join(lines)
+
+
+# Credentials a request or response can carry: auth headers (and the same names as JSON
+# keys), and secret-looking query parameters. A seeded account's key must never reach a
+# draft a human sends, so the value goes and the name stays, so the maintainer can see a
+# credential was used. A query value is redacted only when it looks like a credential (8
+# or more URL-safe characters with no escape): a `password=` or `token=` parameter is
+# also where an injection probe puts its payload, and the PoC needs that payload intact.
+_CRED_HEADER = re.compile(
+    r"(?i)\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|apikey|"
+    r"x-auth-token|x-access-token|private-token)([\"']?[ \t]*:[ \t]*[\"']?)"
+    r"([^\r\n\"']*[^\s\"'])")
+_AUTH_SCHEME = re.compile(r"(?i)^(?:basic|bearer|token|digest)[ \t]+")
+_CRED_QUERY = re.compile(
+    r"(?i)([?&;](?:api[_-]?key|access[_-]?token|auth[_-]?token|token|password|passwd|"
+    r"secret|client[_-]?secret)=)([A-Za-z0-9._~-]{8,})(?=[&#\s\"']|$)")
+REDACTED = "<redacted>"
+
+
+def _redact(value: Any) -> tuple[str, int]:
+    """The text with credential values replaced by REDACTED, and how many were."""
+    s = scrub_text(value)
+    n = 0
+
+    def header(m: re.Match) -> str:
+        nonlocal n
+        n += 1
+        scheme = _AUTH_SCHEME.match(m.group(3))
+        return m.group(1) + m.group(2) + (scheme.group(0) if scheme else "") + REDACTED
+
+    def query(m: re.Match) -> str:
+        nonlocal n
+        n += 1
+        return m.group(1) + REDACTED
+
+    s = _CRED_QUERY.sub(query, _CRED_HEADER.sub(header, s))
+    return s, n
+
+
 def render_report(ctx: DisclosureContext) -> str:
     cwe = _text(ctx.cwe or "(unclassified)")
     klass = _title(ctx.cwe)
-    severity = CWE_SEVERITY.get(probe_class(ctx.cwe) or "", "To be assessed")
+    severity = CWE_SEVERITY.get(probe_class(ctx.cwe) or "")
     fix = CWE_FIX.get(probe_class(ctx.cwe) or "",
                       "Review and remediate the issue described above.")
     where = _code(ctx.file + (f" ({ctx.symbol})" if ctx.symbol else "")
                   + (f":{int(ctx.line)}" if ctx.line else ""))
     sha = _code(ctx.git_sha or "(working tree)")
     contacts = _render_contacts(ctx.security_contacts)
-    summary = _text(ctx.summary) or "(no summary recorded)"
-    request = _code_block(ctx.request) if ctx.request.strip() else \
+    summary_raw, n_sum = _redact(ctx.summary)
+    summary = _text(summary_raw) or "(no summary recorded)"
+    req, n_req = _redact(ctx.request)
+    obs, n_obs = _redact(ctx.observed)
+    base, n_base = _redact(ctx.baseline)
+    request = _code_block(req) if req.strip() else \
         "(No request was recorded; see the observation below.)"
-    observed = _code_block(ctx.observed) if ctx.observed.strip() else summary
+    observed = _code_block(obs) if obs.strip() else summary
     baseline = (f"\n\nBaseline (the control request the observation differs from):\n\n"
-                f"{_code_block(ctx.baseline)}") if ctx.baseline.strip() else ""
+                f"{_code_block(base)}") if base.strip() else ""
+    redacted = ("\n\nCredential values in this evidence were replaced with "
+                f"{_code(REDACTED)}. The redaction matches credential headers and "
+                "credential-shaped query values only; check the evidence for any other "
+                "secret before sending.") if n_sum + n_req + n_obs + n_base else ""
+    rp = _replay(ctx.replay)
+    facts = _facts(ctx)
+    conditions = _render_conditions(ctx, facts)
+    limits = _render_limits(ctx, facts, rp)
+    if severity:
+        sev = (f"Class default: **{severity}** for {cwe} ({klass}), reporter to confirm "
+               f"with a CVSS vector. Quarry proposes this for every finding of this "
+               f"weakness class; it is not an impact the probe demonstrated.")
+    else:
+        sev = (f"No class default for {cwe} ({klass}). The reporter sets the severity "
+               f"with a CVSS vector before sending.")
 
     return f"""# {klass} in {_text(ctx.package)}
 
@@ -327,13 +806,18 @@ def render_report(ctx: DisclosureContext) -> str:
 
 ## Affected versions
 
-Observed at commit {sha}. The affected version range is for the maintainer to confirm;
+Observed at commit {sha}.
+Current HEAD was not re-checked; confirm the issue reproduces on the latest commit before sending.
+The affected version range is for the maintainer to confirm;
 this report records the single revision the probe ran against, and does not infer a range.
 
 ## Severity
 
-Proposed: **{severity}** (reporter to confirm with a CVSS vector). Weakness: {cwe}
-({klass}).
+{sev}
+
+## Confidence
+
+{_confidence(ctx, rp)}
 
 ## Location
 
@@ -343,9 +827,16 @@ Proposed: **{severity}** (reporter to confirm with a CVSS vector). Weakness: {cw
 
 {summary}
 
-This was confirmed dynamically against a running instance of the project, in an isolated
-environment with no network egress. The verdict is based on a measured, reproducible
-observation rather than static inference ({_text(ctx.determinism)} signal).
+{_how_confirmed(ctx, rp)}
+
+## Conditions
+
+What had to be true for the observation, as Quarry recorded it.
+A field marked "{NOT_RECORDED}" was not recorded for this verdict; nothing here is inferred.
+Build settings, the service, and anything marked "recorded for the run" come from the
+run's latest validation rather than from this verdict's own record.
+
+{conditions}
 
 ## Proof of concept
 
@@ -353,7 +844,15 @@ observation rather than static inference ({_text(ctx.determinism)} signal).
 
 Observed:
 
-{observed}{baseline}
+{observed}{baseline}{redacted}
+
+## Limitations and weakest link
+
+{limits}
+
+## Prior advisories checked
+
+{_render_prior(ctx.prior, ctx.cwe, ctx.security_policy)}
 
 ## Suggested remediation
 
@@ -392,9 +891,10 @@ class Draft:
 
 
 def build_reports(con: sqlite3.Connection, run_id: int, src: Path, *,
-                  out_dir: Path) -> list[Path]:
+                  out_dir: Path, vulndb_root: Path | None = None) -> list[Path]:
     """The paths `draft_reports` wrote. Kept for callers that only need the files."""
-    return [d.path for d in draft_reports(con, run_id, src, out_dir=out_dir)]
+    return [d.path for d in draft_reports(con, run_id, src, out_dir=out_dir,
+                                          vulndb_root=vulndb_root)]
 
 
 # ------------------------------------------------------------ Layer 2 -> report bridge
@@ -526,8 +1026,18 @@ def draft_research_digest(con: sqlite3.Connection, run_id: int, *,
                           sha256=hashlib.sha256(text).hexdigest())
 
 
+def _prior_check(ecosystem: str, package: str, clone_url: str, root: Path | None):
+    """The local OSV lookup, or a PriorCheck saying why it did not run. A failure here
+    must not stop a draft: the section then says "not checked"."""
+    from .. import vulndb
+    try:
+        return vulndb.local_prior_advisories(ecosystem, package, clone_url, root=root)
+    except Exception as e:                       # noqa: BLE001 - a gap, stated in the draft
+        return vulndb.PriorCheck(False, f"lookup failed: {type(e).__name__}")
+
+
 def draft_reports(con: sqlite3.Connection, run_id: int, src: Path, *,
-                  out_dir: Path) -> list[Draft]:
+                  out_dir: Path, vulndb_root: Path | None = None) -> list[Draft]:
     """Write a Markdown advisory for every finding whose latest dynamic verdict in the run
     is confirmed. Returns one Draft per file. Reproducible from the DB: the probe evidence was
     stored on the verdict as JSON.
@@ -537,18 +1047,29 @@ def draft_reports(con: sqlite3.Connection, run_id: int, src: Path, *,
     latest such verdict per finding counts, so a re-run of validate that rejected or held a
     finding withdraws the earlier confirmation. And the stored evidence must carry the
     baseline comparison that confirmation requires (validate.adjudicate), so a verdict
-    written before that rule, or by hand, is not drafted. needs-review is never drafted."""
+    written before that rule, or by hand, is not drafted. needs-review is never drafted.
+
+    The conditions come from the verdict's rationale (replay, probe, conditions, when
+    the probe recorded them) and the run manifest's validate block. The prior-advisory
+    lookup reads the local OSV copy under `vulndb_root` (default: `quarry db sync`'s
+    directory) once per call, and only when there is a draft to write."""
     from ..research.profile import profile_repo
 
     prof = profile_repo(src)
     ecosystem = guess_ecosystem(prof.primary_language)
     contacts = tuple(extract_security_contacts(src))
+    policy = find_security_policy(src)
+    manifest = db.read_manifest(con, run_id)
+    validate = _dict(manifest.get("validate"))
+    seed_notes = tuple(n for n in _dict(_dict(manifest.get("health")).get("validate"))
+                       .get("seed") or [] if isinstance(n, str))
+    prior: Any = None
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rows = con.execute(
         """SELECT v.id AS verdict_id, v.finding_id, v.cwe, v.rationale, v.created_at,
-                  f.path, f.symbol, r.target, r.clone_url, r.git_sha,
+                  v.reason, f.path, f.symbol, r.target, r.clone_url, r.git_sha,
                   (SELECT o.start_line FROM occurrences o
                     WHERE o.finding_id = v.finding_id AND o.run_id = v.run_id
                     LIMIT 1) AS start_line
@@ -572,17 +1093,23 @@ def draft_reports(con: sqlite3.Connection, run_id: int, src: Path, *,
             ev = {}
         if not isinstance(ev, dict) or not _has_baseline(ev):
             continue
+        if prior is None:
+            prior = _prior_check(ecosystem, package, d["clone_url"], vulndb_root)
 
-        def field(key: str, default: str = "") -> str:
+        def ev_text(key: str, default: str = "") -> str:
             return scrub_text(ev.get(key) or default)
         ctx = DisclosureContext(
             target=d["target"], clone_url=d["clone_url"], git_sha=d["git_sha"],
             cwe=d["cwe"], file=d["path"], symbol=d["symbol"], line=d["start_line"],
-            summary=field("summary"), request=field("request"),
-            observed=field("observed"), determinism=field("determinism", "unknown"),
-            baseline=field("baseline"),
+            summary=ev_text("summary"), request=ev_text("request"),
+            observed=ev_text("observed"), determinism=ev_text("determinism", "unknown"),
+            baseline=ev_text("baseline"),
             ecosystem=ecosystem, package=package, security_contacts=contacts,
-            run_id=run_id, verdict_time=d["created_at"])
+            run_id=run_id, verdict_time=d["created_at"],
+            verdict="confirmed", verdict_reason=scrub_text(d["reason"] or ""),
+            replay=ev.get("replay"), probe=ev.get("probe"),
+            conditions=ev.get("conditions"), validate=validate, seed_notes=seed_notes,
+            prior=prior, security_policy=policy)
         path = out_dir / f"{run_id}-{_slug(d['cwe'] or 'finding')}-{d['finding_id'][:8]}.md"
         body = render_report(ctx).encode("utf-8")
         path.write_bytes(body)
