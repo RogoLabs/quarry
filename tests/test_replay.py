@@ -162,7 +162,10 @@ def test_compare_calls_a_tie_a_tie_and_ignores_wall_time():
 
 def test_compare_better_worse_and_mixed():
     a = _result()
-    assert replay.compare(a, _result(missed_ref=3))["verdict"] == "better"
+    one = replay.compare(a, _result(missed_ref=3))
+    assert one["verdict"] == "better" and "repeat both sides" in one["caution"]
+    two = replay.compare(a, _result(missed_ref=2, missed_hunt=0))
+    assert two["verdict"] == "better" and two["caution"] == ""
     assert replay.compare(a, _result(unsupported=(6, 20)))["verdict"] == "worse"
     assert replay.compare(a, _result(missed_hunt=1, unsupported=(6, 20)))[
         "verdict"] == "mixed"

@@ -405,7 +405,8 @@ def deep_replay_compare(before: str = typer.Argument(..., help="earlier result J
     d = replay.compare(a, b)
     colour = {"better": "green", "worse": "red", "tie": "bold",
               "mixed": "yellow"}.get(d["verdict"], "red")
-    con_out.print(f"[{colour}]{_e(d['verdict'])}[/]")
+    con_out.print(f"[{colour}]{_e(d['verdict'])}[/]"
+                  + (f" [yellow]({_e(d['caution'])})[/]" if d["caution"] else ""))
     for k, v in d["deltas"].items():
         con_out.print(f"  {_e(k)}: {v:+}")
     con_out.print(f"  claims: {d['claims'][0]} -> {d['claims'][1]}; unsupported: "

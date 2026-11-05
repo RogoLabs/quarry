@@ -23,6 +23,13 @@ differs, and calls equal scores a tie, which is a valid result.
 
 Never report bare recall (LEGA-CORPUS.md): every result carries claims per repository
 alongside the plants found, because a lens that flags everything finds every plant.
+
+MEASURED 2026-11-05, three replays with qwen3-coder:30b and devstral:24b (details and
+digests in docs/LEGA-CORPUS.md): the hunt found 5 of 7 plants with route intent off (two
+runs) and 6 of 7 with it on (one run); the refute pass killed every one of the 46 claims
+across the three, plants included, so 7 of 7 were missed after refutation each time.
+Two identical intent-off runs differed in 3 of 15 claims and in one unsupported claim
+(3/15 against 2/15), so a one-claim or one-plant move on this set is within noise.
 """
 from __future__ import annotations
 
@@ -334,8 +341,17 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
         verdict = "worse"
     else:
         verdict = "mixed"
-    return {"verdict": verdict, "deltas": deltas, "fixed_differs": fixed,
-            "what_changed": changed,
+    # The verdict is mechanical. On seven plants and a few dozen claims, one plant or one
+    # claim either way is within what a repeat of the same replay can move, so say so
+    # rather than let "better" stand alone.
+    small = (verdict in ("better", "worse", "mixed")
+             and abs(deltas["missed_at_hunt"]) <= 1
+             and abs(deltas["missed_after_refute"]) <= 1
+             and abs(as_["unsupported_claims"]["n"] - bs["unsupported_claims"]["n"]) <= 1)
+    caution = ("within one plant and one unsupported claim: repeat both sides before "
+               "reading this as a change" if small else "")
+    return {"verdict": verdict, "caution": caution, "deltas": deltas,
+            "fixed_differs": fixed, "what_changed": changed,
             "claims": [bs["claims"], as_["claims"]],
             "unsupported_claims": [bs["unsupported_claims"], as_["unsupported_claims"]],
             "missed_after_refute_ids": [bs["missed_after_refute"]["ids"],

@@ -77,3 +77,55 @@ Cost: 10 nights, 0 operator-hours, $0.
 
 Committed to git **before the first `research run`**, per Seat 1's condition and Seat 6's
 pre-registration.
+
+## The replay set: a small fixed corpus in the repo (2026-11-05)
+
+The ten repositories above need cloning and a night each. To measure one Layer 2 change
+(IMPROVEMENT-PLAN item 21), `tests/fixtures/replay/` holds a small set built on the same
+idea, with no cloning and no network: two synthetic services and 7 plants. The answer key,
+`plants.json`, sits beside the repositories and is never copied into what a model reads.
+`quarry deep-replay` runs the set through the real runner (hunt, quote verification,
+persistence, cross-family refutation) on a scratch database, and `quarry
+deep-replay-compare` compares two results. A preflight checks every plant by program first:
+anchors present, the plant's lens selected by the profile, at least two siblings that keep a
+deleted guard, and no answer inside a repository.
+
+| repo | framework | plants | lenses run |
+|---|---|---|---|
+| `notes_app` | Flask | N1 admin route lost `@admin_required` (guard deletion); N2 note read with no ownership check; N3 path traversal; N4 SQL injection | authz, injection, filesystem |
+| `ticket_api` | Express, with an OpenAPI document whose global bearer requirement over-declares | T1 history route lost `auth.requireUser` (guard deletion); T2 role route lost `auth.requireAdmin` (guard deletion); T3 cross-org comment read | authz |
+
+Limits: synthetic and small (about 2.4k tokens per repository), so each is one subsystem and
+packing and subsystem ordering are not exercised; 7 plants is a regression check, not a
+recall estimate, and nothing measured here transfers to the ten repositories above.
+
+### First measurement, 2026-11-05
+
+Three replays. Held fixed: qwen3-coder:30b (digest `06c1097efce0...`) and devstral:24b
+(`9bd74193e939...`), Ollama 0.40.13, unit budget 45,000 tokens, num_ctx 65,536, hunt
+num_predict 8,192, refute num_predict 700, temperature 0, top_k 1, seed 42, lenses authz,
+injection and filesystem. A and B ran at 1ff502d, A2 at 0639110, which changed only the
+replay's scoring; all three are scored with the 0639110 scorer (`--rescore`).
+
+| replay | route intent | plants missed at the hunt | missed after refutation | unsupported claims | hunt / refute / wall |
+|---|---|---|---|---|---|
+| A | off | 2/7 (N1, N2) | 7/7 | 3/15 | 215 / 164 / 378 s |
+| A2, a repeat of A | off | 2/7 (N1, N2) | 7/7 | 2/15 | 217 / 156 / 373 s |
+| B | on | 1/7 (N2) | 7/7 | 3/16 | 253 / 174 / 427 s |
+
+- **The refute pass killed every claim:** 0 of 46 claims survived across the three replays,
+  including every claim on a plant. The refutations cite checks the code does not have:
+  that `download` calls `secure_filename`, that the role route carries `auth.requireAdmin`,
+  that `tickets.history` goes through `visibleTicket`. In B, with the declared access in the
+  prompt, a refuter still said `reset_password` carries `admin_required`. On this set the
+  refuter as prompted has no recall, which is IMPROVEMENT-PLAN item 3's asymmetry showing up
+  in Layer 2.
+- **Route intent:** B's authz hunt found N1, which both intent-off runs missed. That is one
+  plant on one run per side, so it is suggestive, not a measured improvement; compare calls
+  B against A "better" and B against A2 "mixed", and flags both as within noise. B's hunt
+  took 253 s against 215 and 217 s, longer prompts, measured once.
+- **Run to run:** A and A2 had the same configuration and Layer 2 code, and differed in 3 of
+  15 claims by (model, lens, file, enclosing symbol, quote verified) and by one unsupported
+  claim, with the same plants found. Temperature 0 and a fixed seed do not make a replay
+  repeat exactly, so a one-plant or one-claim move here needs a repeat before it means
+  anything.
