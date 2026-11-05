@@ -666,6 +666,108 @@ def test_a_finished_run_has_nothing_to_resume(seeded, monkeypatch):
     assert _row(con)["status"] == "stopped", "a refused resume claims nothing"
 
 
+# ============================================================ 8. CLI-only stages
+
+def test_the_setup_page_shows_each_pre_run_stage_with_its_command(seeded):
+    """P3 item 8. Doctor, db sync and target scores had no UI at all."""
+    client, con = seeded
+    r = client.get("/setup")
+    assert r.status_code == 200
+    page = r.text
+    assert 'href="/setup" class="on" aria-current="page"' in page
+    from quarry.migrations import MIGRATIONS
+    assert f"version {len(MIGRATIONS)} of {len(MIGRATIONS)}" in page
+    for cmd in ("quarry doctor", "quarry db sync", "quarry db status",
+                "quarry targets score owner/repo", "quarry targets list"):
+        assert f"<code>{cmd}</code>" in page, cmd
+    # QUARRY_DBS is an empty directory here: every database reads as unknown and stale
+    table = page.split('id="databases"', 1)[1].split("</table>", 1)[0]
+    for name in ("trivy", "grype", "osv"):
+        assert f'<td class="mono sm">{name}</td>' in table
+    assert table.count("stale") == 3 and "never, per the egress ledger" in table
+    assert "no scanner" in table, "grype has a database and no adapter (decision A)"
+    assert "No target has been scored" in page
+
+
+def test_the_setup_page_starts_nothing(seeded):
+    """Two of these stages reach the network. The page offers copy buttons, never a
+    form, and no route was added that could start one."""
+    client, _ = seeded
+    page = client.get("/setup").text
+    assert "<form" not in page
+    assert 'type="submit"' not in page
+    posts = sorted(r.path for r in client.app.routes if "POST" in getattr(r, "methods", ()))
+    assert posts == ["/producers/{producer_id:path}/dismiss",
+                     "/producers/{producer_id:path}/restore", "/research/start",
+                     "/research/{rid}/resume", "/research/{rid}/stop"]
+
+
+def test_targets_are_listed_with_a_quoted_ingest_command(seeded):
+    """The `targets` table appeared nowhere. A slug is text from a database and the
+    command is pasted into a shell, so it is quoted."""
+    client, con = seeded
+    con.execute("INSERT INTO targets (slug,score,surface,blast_radius,responsiveness,"
+                "language,stratum) VALUES ('good/repo',72,30,25,17,'Python','popular')")
+    con.execute("INSERT INTO targets (slug,score,scanned_run) VALUES ('o/r',50,1)")
+    con.execute("INSERT INTO targets (slug,score) VALUES ('evil/x; rm -rf ~',10)")
+    con.commit()
+    page = client.get("/setup").text
+    table = page.split('id="targets"', 1)[1]
+    assert "3 target(s) scored, 1 of them" in table
+    assert "<code>quarry ingest good/repo</code>" in table
+    assert 'href="/runs/1">run 1</a>' in table
+    assert "<code>quarry ingest &#39;evil/x; rm -rf ~&#39;</code>" in table
+    assert table.index("good/repo") < table.index("evil/x"), "highest score first"
+
+
+def test_shell_quotes_every_argument():
+    assert q.shell("quarry", "ingest", "o/r") == "quarry ingest o/r"
+    assert q.shell("quarry", "ingest", "a b;c") == "quarry ingest 'a b;c'"
+    assert q.shell("quarry", "scan", 3) == "quarry scan 3"
+
+
+def test_the_run_page_gives_each_terminal_stage_a_state_and_a_command(seeded):
+    """Ingest, scan, validate and report ran only from the CLI with no status on the
+    page beyond counts."""
+    client, con = seeded
+    stages = {s["stage"]: s for s in q.run_stages(con, q.run_summary(con, 1))}
+    assert list(stages) == ["Ingest", "Scan", "Funnel", "Deep review", "Validate",
+                            "Report"]
+    assert stages["Ingest"]["cmd"] == "quarry ingest o/r"
+    assert stages["Scan"]["status"] == "done" and "before per-tool" in stages["Scan"]["detail"]
+    assert stages["Funnel"]["status"] == "done"
+    assert stages["Deep review"]["status"] == "not run"
+    assert stages["Validate"]["cmd"] == "quarry validate 1 --dry-run"
+    assert stages["Report"]["status"] == "not run"
+
+    from test_funnel import add
+    add(con, "bandit", "B999", "src/late.py", 3)
+    con.commit()
+    stages = {s["stage"]: s for s in q.run_stages(con, q.run_summary(con, 1))}
+    assert stages["Funnel"]["status"] == "behind" and "1 not yet" in stages["Funnel"]["detail"]
+
+    page = client.get("/runs/1").text
+    section = page.split('id="terminal"', 1)[1].split("</details>", 1)[0]
+    for cmd in ("quarry ingest o/r", "quarry scan 1", "quarry funnel 1", "quarry deep 1",
+                "quarry validate 1 --dry-run", "quarry report 1"):
+        assert f"<code>{cmd}</code>" in section, cmd
+    assert "<form" not in section
+    assert '<span class="pill incomplete">behind</span>' in section
+
+
+def test_report_is_behind_when_a_confirmed_verdict_has_no_draft(seeded):
+    from quarry import db
+    _, con = seeded
+    fid = con.execute("SELECT finding_id FROM live_occurrences WHERE run_id=1 LIMIT 1"
+                      ).fetchone()["finding_id"]
+    with db.tx(con):
+        db.verdict(con, fid, 1, verdict="confirmed", model="idor")
+    stages = {s["stage"]: s for s in q.run_stages(con, q.run_summary(con, 1))}
+    assert stages["Validate"]["status"] == "done"
+    assert stages["Report"]["status"] == "behind"
+    assert "1 confirmed verdict(s) with no draft" in stages["Report"]["detail"]
+
+
 def test_a_scanner_occurrence_has_no_deep_review_section(seeded):
     client, con = seeded
     oid = con.execute("SELECT id FROM live_occurrences WHERE run_id=1 LIMIT 1"

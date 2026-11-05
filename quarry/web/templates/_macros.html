@@ -1,0 +1,29 @@
+{#
+  Shared pieces. Import with `{% import "_macros.html" as m %}` and call `m.cmd(...)`;
+  a bare imported name would read as an unregistered global to
+  tests/test_template_contract.py, and a namespaced call does not.
+#}
+
+{#  A command to paste into a terminal, with a button that copies exactly the text
+    shown. The command is built and shell-quoted in Python (queries.shell), because a
+    target name is text from a database. The copy reads the <code> element's text, so
+    no data ever enters the JavaScript expression. A <button> outside a form: copying
+    changes nothing on the server. #}
+{% macro cmd(text) -%}
+<span class="cmd" x-data="{ copied: false }"><code>{{ text }}</code><button type="button"
+  class="ghost xs" aria-label="Copy the command: {{ text }}"
+  x-on:click="navigator.clipboard.writeText($root.querySelector('code').textContent).then(() => { copied = true; setTimeout(() => copied = false, 1500) })"
+  ><span x-text="copied ? 'Copied' : 'Copy'">Copy</span></button><span class="sr-only"
+  role="status" x-text="copied ? 'Copied to clipboard' : ''"></span></span>
+{%- endmacro %}
+
+{#  A stage's state, for the terminal-stage tables. Same roles as everywhere else:
+    done is verified, behind is incomplete, failed is an alarm, not run is unmeasured. #}
+{% macro stage_pill(status) -%}
+{% if status == 'done' %}<span class="pill verified">done</span>
+{%- elif status in ('behind', 'stopped') %}<span class="pill incomplete">{{ status }}</span>
+{%- elif status in ('failed', 'died', 'stalled') %}<span class="pill alarm">{{ status }}</span>
+{%- elif status in ('running', 'starting') %}<span class="pill accent">{{ status }}</span>
+{%- elif status == 'not run' %}<span class="pill unmeasured">not run</span>
+{%- else %}<span class="pill inert">{{ status }}</span>{% endif %}
+{%- endmacro %}

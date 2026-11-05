@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
 {% set nav = 'runs' %}
 {% set nav_run = run.id %}
 {% block title %}Run {{ run.id }} · {{ run.target }}{% endblock %}
@@ -25,6 +26,28 @@
 
   {#  The pipeline, left to right, each stage's count linking to its set. #}
   {% include "_pipeline.html" %}
+
+  {#  Every stage of this run runs from a terminal. Each row says what the stage last
+      left behind and gives the command, never a button: scan, validate and ingest
+      reach the network or stand up containers, and the dashboard starts none of it. #}
+  <details class="collapse stages-cli" id="terminal">
+    <summary>From the terminal: each stage's state and its command</summary>
+    <div class="tbl mt-2">
+      <table>
+        <caption class="sr-only">The command-line stages of run {{ run.id }}, their state, and the command for each</caption>
+        <thead><tr><th scope="col">Stage</th><th scope="col">State</th>
+          <th scope="col">Command</th></tr></thead>
+        <tbody>
+        {% for s in cli_stages %}
+          <tr><th scope="row">{% if s.href %}<a href="{{ s.href }}">{{ s.stage }}</a>{% else %}{{ s.stage }}{% endif %}</th>
+            <td class="sm">{{ m.stage_pill(s.status) }}
+              <div class="dim">{{ s.detail|visible }}</div></td>
+            <td class="sm">{{ m.cmd(s.cmd) }}<div class="dim">{{ s.note }}</div></td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
 
   {#  Four stat cards, all links. A card is a promise of a drill-down; cards that do
       not drill down teach the operator that numbers here are decoration, and that

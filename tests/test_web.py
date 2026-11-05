@@ -31,6 +31,8 @@ def seeded(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("QUARRY_HOME", str(home))
+    # The Setup page reads vulnerability-database metadata; never the real one.
+    monkeypatch.setenv("QUARRY_DBS", str(tmp_path / "vulndb"))
     from quarry import config
     paths = config.paths()
     con = db.init(paths.db)
@@ -296,7 +298,8 @@ def test_finished_runs_are_never_second_guessed(seeded):
 # change the design pass was. These are the structural gates.
 
 ROUTES = ["/triage", "/runs", "/runs/1", "/research", "/egress", "/validation",
-          "/advisories"]
+          "/advisories", "/setup", "/runs/1/triage", "/runs/1/validation",
+          "/runs/1/advisories"]
 
 
 def test_every_route_renders_and_extends_the_shell(seeded):

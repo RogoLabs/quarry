@@ -857,6 +857,20 @@ def create_app() -> FastAPI:
                 "pipeline": q.pipeline(c, summary, reports_root),
                 "vc": q.verdict_counts(c, run_id),
                 "dismissals": q.dismissals_for_run(c, run_id),
+                "cli_stages": q.run_stages(c, summary, reports_root),
+            }, c)
+
+    @app.get("/setup", response_class=HTMLResponse)
+    def setup(request: Request):
+        """The stages that run only from a terminal and come before any run: doctor,
+        `db sync` and target scoring. Read-only on purpose. Two of the three reach the
+        network, and the dashboard starts nothing that does; it shows what each last
+        left behind and the command to copy."""
+        with opened() as c:
+            return render(request, "setup.html", {
+                "env": q.environment(c, paths.root, paths.db),
+                "dbs": q.vulndb_status(c),
+                "targets": q.targets(c),
             }, c)
 
     @app.get("/egress", response_class=HTMLResponse)

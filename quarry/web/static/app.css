@@ -411,6 +411,18 @@
   .pipeline.compact .pv{font-size:var(--fs-cell)}
   .pipeline.compact .pu{min-inline-size:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
+  /* ---- a command to copy (/setup, the run page's terminal stages) ---------- *
+     The command and its button stay together on one line; the command itself may
+     wrap at any character, because a long target name must not push the page wide. */
+  .cmd{display:inline-flex;align-items:center;gap:var(--sp-4);max-inline-size:100%;
+       vertical-align:middle;margin-inline-end:var(--sp-8)}
+  .cmd code{
+    background:var(--sunk);border:1px solid var(--rule);border-radius:var(--r-ctl);
+    padding:2px 6px;color:var(--ink);overflow-wrap:anywhere;
+  }
+  .cmd button{padding:3px 7px}
+  details.stages-cli{margin-block-end:var(--sp-24)}
+
   /* ---- validation summary card (/runs/{id}) ------------------------------- */
   .vcard{
     display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-12);

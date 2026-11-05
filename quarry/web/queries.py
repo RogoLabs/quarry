@@ -1242,6 +1242,175 @@ def digest(con: sqlite3.Connection, run_id: int,
     return None
 
 
+# ------------------------------------------------- stages that run from the terminal
+#
+# Doctor, db sync, target scoring, ingest, scan, funnel, validate and report run only
+# from the CLI, and several of them reach the network. The dashboard does not run any
+# of them. It shows what each one last left behind and the command that runs it,
+# shell-quoted, because a target name is text from a database and the command is
+# meant to be pasted into a terminal.
+
+def shell(*args: Any) -> str:
+    """A command line with each argument quoted for a POSIX shell."""
+    import shlex
+    return " ".join(shlex.quote(str(a)) for a in args)
+
+
+def run_stages(con: sqlite3.Connection, run: dict[str, Any],
+               reports_root: "Path | None" = None) -> list[dict[str, Any]]:
+    """Each CLI stage of one run: what it last did, and the command that runs it.
+
+    Read from what the run already records (status, manifest, ledger, verdicts,
+    advisory rows), so it costs no process and no network. `status` is a short state,
+    `detail` says what that rests on, and `cmd` is the command to run next or again.
+    """
+    rid, target = run["id"], run["target"]
+    m = db.read_manifest(con, rid)
+    out: list[dict[str, Any]] = []
+
+    ingest_detail = f"run status {run['status']}"
+    if run["status"] == "done" and not run.get("volume_path"):
+        ingest_detail += "; volume released, so deep review and validate need a new ingest"
+    out.append({"stage": "Ingest", "status": run["status"], "detail": ingest_detail,
+                "cmd": shell("quarry", "ingest", target),
+                "note": "makes a new run of this target"})
+
+    tools = run.get("scan_tools") or []
+    n_scan = con.execute(
+        "SELECT COUNT(*) c FROM occurrences o JOIN producers p ON p.id = o.producer_id "
+        "WHERE o.run_id=? AND p.tool != 'deep'", (rid,)).fetchone()["c"]
+    if tools:
+        failed = sum(1 for t in tools if not t.get("ok") and not t.get("skipped"))
+        skipped = sum(1 for t in tools if t.get("skipped"))
+        status = "failed" if failed else "done"
+        detail = (f"{len(tools)} scanner(s) recorded, {failed} failed, {skipped} skipped; "
+                  f"{n_scan} occurrence(s)")
+    elif n_scan:
+        status, detail = "done", (f"{n_scan} occurrence(s); scanned before per-tool "
+                                  "outcomes were kept")
+    else:
+        status, detail = "not run", "no scanner output for this run"
+    out.append({"stage": "Scan", "status": status, "detail": detail,
+                "cmd": shell("quarry", "scan", rid),
+                "note": "a tool that already returned results is refused"})
+
+    f = m.get("funnel") if isinstance(m.get("funnel"), dict) else {}
+    # A run funnelled before passes were recorded has its stage list and no `passes`;
+    # that is one pass (funnel._persist_summary reads it the same way).
+    passes = len(f.get("passes") or []) or (1 if f.get("stages") else 0)
+    funnelled = con.execute(
+        "SELECT COUNT(DISTINCT occurrence_id) c FROM funnel_events WHERE run_id=? "
+        "AND stage != 'operator' AND occurrence_id IS NOT NULL", (rid,)).fetchone()["c"]
+    waiting = arrived_total(con, rid)
+    if not funnelled and not passes:
+        status = "not run"
+    else:
+        status = "behind" if waiting else "done"
+    out.append({"stage": "Funnel", "status": status,
+                "detail": (f"{passes} pass(es) recorded; {funnelled} occurrence(s) "
+                           f"funnelled, {waiting} not yet"),
+                "cmd": shell("quarry", "funnel", rid),
+                "note": "acts only on occurrences no pass has seen"})
+
+    rr = con.execute("SELECT COUNT(*) n, MAX(id) latest FROM research_runs WHERE run_id=?",
+                     (rid,)).fetchone()
+    # The newest research run's state as the reader computes it, never the column.
+    newest = research_runs(con, rid=rr["latest"])[0] if rr["n"] else None
+    out.append({"stage": "Deep review",
+                "status": newest["status"] if newest else "not run",
+                "detail": (f"{rr['n']} research run(s); newest is {rr['latest']}, "
+                           f"{newest['done']} of {newest['units']} unit(s) done"
+                           if newest else "no research run for this run"),
+                "cmd": shell("quarry", "deep", rid),
+                "note": "local models only; hours, not minutes",
+                "href": f"/research/{rr['latest']}" if rr["n"] else "/research"})
+
+    vc = verdict_counts(con, rid)
+    out.append({"stage": "Validate", "status": "done" if vc["total"] else "not run",
+                "detail": (f"{vc['total']} latest verdict(s): {vc['confirmed']} confirmed, "
+                           f"{vc['needs-review']} needs review, {vc['rejected']} rejected"),
+                "cmd": shell("quarry", "validate", rid, "--dry-run"),
+                "note": "plans the probes; run it again without --dry-run to probe"})
+
+    n_adv = advisory_count(con, rid)
+    dg = digest(con, rid, reports_root)
+    need = vc["confirmed"] and not n_adv
+    out.append({"stage": "Report",
+                "status": "behind" if need else ("done" if n_adv or dg else "not run"),
+                "detail": (f"{n_adv} advisory draft(s)"
+                           + ("; a deep-review digest" if dg else "")
+                           + (f"; {vc['confirmed']} confirmed verdict(s) with no draft"
+                              if need else "")),
+                "cmd": shell("quarry", "report", rid),
+                "note": "writes drafts to read before anything is sent"})
+    return out
+
+
+def environment(con: sqlite3.Connection, root: Path, db_path: Path) -> dict[str, Any]:
+    """What `quarry doctor` checks that can be read without running anything.
+
+    Doctor also probes the filesystem type, sync attributes and each tool's version,
+    which means running processes; the page shows the tool versions the newest run
+    recorded instead, and says which run that was.
+    """
+    from ..migrations import MIGRATIONS
+    from ..sandbox import CLONE_PROFILE, PROFILE
+    size = 0
+    for p in (db_path, db_path.with_name(db_path.name + "-wal")):
+        try:
+            size += p.stat().st_size
+        except OSError:
+            pass
+    newest = con.execute("SELECT id FROM runs ORDER BY id DESC LIMIT 1").fetchone()
+    versions: dict[str, Any] = {}
+    if newest:
+        m = db.read_manifest(con, newest["id"])
+        # Tool versions are the manifest's top-level strings; None is a tool that was
+        # absent at ingest. Everything else there is a structured record.
+        versions = {k: v for k, v in sorted(m.items()) if v is None or isinstance(v, str)}
+    return {"root": str(root), "db": str(db_path), "db_bytes": size,
+            "schema": con.execute("PRAGMA user_version").fetchone()[0],
+            "schema_current": len(MIGRATIONS),
+            "profiles": [{"name": "tier 1 scanner sandbox", "path": str(PROFILE),
+                          "present": PROFILE.exists()},
+                         {"name": "clone sandbox", "path": str(CLONE_PROFILE),
+                          "present": CLONE_PROFILE.exists()}],
+            "versions": versions, "versions_run": newest["id"] if newest else None}
+
+
+def vulndb_status(con: sqlite3.Connection) -> dict[str, Any]:
+    """Each vulnerability database's build time and age now, which scanner reads it,
+    and when `quarry db sync` last reached the network for it (the egress ledger)."""
+    from .. import vulndb
+    readers = {v: k for k, v in vulndb.DB_OF_TOOL.items()}
+    rows = []
+    for name, a in vulndb.ages().items():
+        age = a.get("age_days")
+        last = con.execute(
+            "SELECT MAX(created_at) t FROM egress WHERE stage='db-sync' AND note LIKE ?",
+            (f"{name}%",)).fetchone()["t"]
+        rows.append({"name": name, "built": a.get("built"), "age_days": age,
+                     "basis": a.get("basis") or "", "reader": readers.get(name),
+                     "stale": not isinstance(age, (int, float)) or age > vulndb.STALE_DAYS,
+                     "last_sync": last})
+    return {"rows": rows, "dir": str(vulndb.db_dir()), "stale_days": vulndb.STALE_DAYS}
+
+
+def targets(con: sqlite3.Connection, limit: int = 100) -> dict[str, Any]:
+    """Scored candidate targets, highest first. The `targets` table had no reader
+    anywhere in the dashboard. Archived targets are listed and marked, not hidden."""
+    rows = []
+    for r in con.execute("SELECT * FROM targets ORDER BY score DESC, slug LIMIT ?", (limit,)):
+        d = dict(r)
+        d["ingest_cmd"] = shell("quarry", "ingest", d["slug"])
+        d["why_cmd"] = shell("quarry", "targets", "why", d["slug"])
+        rows.append(d)
+    total = con.execute("SELECT COUNT(*) c FROM targets").fetchone()["c"]
+    scanned = con.execute("SELECT COUNT(*) c FROM targets WHERE scanned_run IS NOT NULL"
+                          ).fetchone()["c"]
+    return {"rows": rows, "total": total, "scanned": scanned}
+
+
 def advisory_count(con: sqlite3.Connection, run_id: int) -> int:
     return con.execute("SELECT COUNT(*) c FROM advisories WHERE run_id=?",
                        (run_id,)).fetchone()["c"]

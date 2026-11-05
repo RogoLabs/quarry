@@ -48,6 +48,7 @@ if(t==='light'||t==='dark')d.dataset.theme=t;else if(t!=='system')d.dataset.them
         opened from run 1 showed whichever run was newest. #}
     {% set _nr = nav_run|default(none) %}
     <nav aria-label="Sections{{ ', run %d'|format(_nr) if _nr is not none }}">
+      <a href="/setup" {% if nav=='setup' %}class="on" aria-current="page"{% endif %}>Setup</a>
       <a href="/runs" {% if nav=='runs' %}class="on" aria-current="page"{% endif %}>Runs</a>
       <a href="{{ '/runs/%d/triage'|format(_nr) if _nr is not none else '/triage' }}" {% if nav=='triage' %}class="on" aria-current="page"{% endif %}>Triage</a>
       <a href="{{ '/runs/%d/validation'|format(_nr) if _nr is not none else '/validation' }}" {% if nav=='validation' %}class="on" aria-current="page"{% endif %}>Validation</a>
