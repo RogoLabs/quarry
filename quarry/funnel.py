@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from . import db
+from . import db, dismissals
 from .taint import PLACEHOLDER_SECRETS, PLACEHOLDER_SHAS, redact_secret
 
 # ---------------------------------------------------------------- path classes
@@ -696,12 +696,20 @@ def _rule_precision_prior(con, run_id, rows, src, prior=()) -> StageResult:
     """The cross-repo precision ledger, used as a prior. A producer with a measured
     record earns or loses rank; an unmeasured one is worth *investigating*, because
     a cheap measurement is itself valuable (Seat 4's cheapest-information-first)."""
-    sr = StageResult("rule-precision-prior")
+    sr = StageResult(dismissals.FUNNEL_STAGE)
+    # A repo dismissal is keyed on the target, so it holds for every run of it, not
+    # just the run it was made from (see quarry/dismissals.py).
+    run = con.execute("SELECT target FROM runs WHERE id=?", (run_id,)).fetchone()
+    repo_off = dismissals.repo_dismissals(con, run["target"]) if run else {}
     for r in rows:
         adj, conf, n = r["n_adjudicated"] or 0, r["n_confirmed"] or 0, r["n_occurrences"] or 0
-        if not r["enabled"]:
-            _kill(con, run_id, r, sr.stage, "producer dismissed by the operator",
-                  deterministic=True)
+        why = (dismissals.FUNNEL_CORPUS if not r["enabled"] else
+               dismissals.FUNNEL_REPO if r["producer_id"] in repo_off else None)
+        if why:
+            _kill(con, run_id, r, sr.stage, why, deterministic=True)
+            # The operator's decision, not the tool losing its output: it must not
+            # trip the "every occurrence killed" health check.
+            r.pop("_det_kill", None)
             sr.killed += 1
             continue
         if adj >= 5:

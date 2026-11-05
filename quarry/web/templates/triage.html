@@ -80,7 +80,7 @@
         <input type="hidden" name="run_id" value="{{ run.id }}">
         <button type="submit">Restore <kbd>u</kbd></button>
       </form>
-      <span class="dim">reverses your dismissal only; the funnel's own kills stand</span>
+      <span class="dim">brings back what the dismissal held out; the funnel's other kills stand</span>
     </div>
     {% endif %}
 
@@ -156,20 +156,30 @@
   <div class="col detail" role="region" aria-label="Finding detail">
     {% if detail %}
       {% include "_detail.html" %}
+      {#  The note is the operator's reason, kept in the ledger beside the kill. The
+          copy says exactly what each button reaches, because the buttons used to
+          read wider than they were: both killed only this run's occurrences. #}
       <form class="actions" method="post"
             action="/producers/{{ detail.producer_id|urlencode }}/dismiss">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <input type="hidden" name="run_id" value="{{ run.id }}">
+        <label class="sr-only" for="dismiss-note">Reason for dismissing, kept in the ledger</label>
+        <input type="text" name="note" id="dismiss-note" class="note-in" maxlength="500"
+               placeholder="why (optional, kept in the ledger)" autocomplete="off">
         <button type="submit" name="scope" value="repo" class="danger"
                 aria-describedby="dispose-note">
           Dismiss for this repo <kbd>d</kbd></button>
         {# Corpus-wide is NOT a shifted pair with `d`: a slipped shift key would change
            the blast radius from one run to every future run against every repository.
            `D` is unbound in the handler; this needs a deliberate click. #}
-        <button type="submit" name="scope" value="corpus" class="danger">
+        <button type="submit" name="scope" value="corpus" class="danger"
+                aria-describedby="dispose-note">
           Dismiss everywhere</button>
-        <span class="note" id="dispose-note">Reversible: writes a ledger event, deletes
-          nothing. <kbd>u</kbd> undoes the last one.</span>
+        <span class="note" id="dispose-note">This repo: its live findings here now, and
+          its new findings in every later funnel pass on {{ run.target }}. Everywhere: the
+          same on every repository, by disabling the producer. Findings already live in
+          other runs stay live. Reversible: writes ledger events, deletes nothing.
+          <kbd>u</kbd> undoes the last one.</span>
       </form>
     {% else %}
       <div class="dbody dim">Select a producer.</div>

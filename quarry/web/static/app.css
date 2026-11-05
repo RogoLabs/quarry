@@ -666,6 +666,7 @@
     flex:0 0 auto;align-items:center;flex-wrap:wrap;
   }
   .actions .note{font-size:var(--fs-meta);color:var(--ink-3)}
+  .actions .note-in{flex:1 1 100%;inline-size:auto;padding:6px 9px;font-size:var(--fs-dense)}
 }
 
 /* ========================================================== pages ========= */

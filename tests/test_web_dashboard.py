@@ -239,6 +239,176 @@ def test_an_offset_timestamp_is_shown_on_the_local_clock():
     assert q.local("2026-08-24T18:36:41") == "2026-08-24 18:36", "naive stays local"
 
 
+# ============================================================ 4. dismiss semantics
+
+def _occ(con, run_id, tool, rule, path, line=10):
+    """`test_funnel.add` for any run. The finding id is line-number-free in spirit
+    here too: the same (tool, rule, path, line) in a later run is the same finding."""
+    from quarry import db
+    pid = db.upsert_producer(con, tool, rule)
+    fid = f"f{tool}{rule}{path}{line}"
+    con.execute("INSERT OR IGNORE INTO findings (id,target,path,producer_id,"
+                "first_seen_run,last_seen_run) VALUES (?,?,?,?,?,?)",
+                (fid, "o/r", path, pid, run_id, run_id))
+    sha = f"blob{tool}{rule}{path}{line}"
+    con.execute("INSERT OR IGNORE INTO evidence_blobs (sha,path,file_sha256,start_line,"
+                "end_line,body,bytes) VALUES (?,?,?,?,?,?,?)",
+                (sha, path, "x", max(1, line - 40), line + 40, b"", 0))
+    oid = con.execute("INSERT INTO occurrences (run_id,finding_id,producer_id,path,"
+                      "start_line,message,severity,blob_sha,raw_result) "
+                      "VALUES (?,?,?,?,?,'','medium',?,'{}')",
+                      (run_id, fid, pid, path, line, sha)).lastrowid
+    con.commit()
+    return oid
+
+
+def _rescan(con, rid, target, rows):
+    """A new run of `target` with these (tool, rule, path) occurrences, funnelled."""
+    from quarry import funnel
+    _second_run(con, rid, target)
+    ids = [_occ(con, rid, t, r, p, 20 + i) for i, (t, r, p) in enumerate(rows)]
+    funnel.run(con, rid)
+    return ids
+
+
+def _live_ids(con) -> set[int]:
+    return {r["id"] for r in con.execute("SELECT id FROM live_occurrences")}
+
+
+def _ledger_size(con) -> tuple[int, int]:
+    return (con.execute("SELECT COUNT(*) c FROM occurrences").fetchone()["c"],
+            con.execute("SELECT COUNT(*) c FROM funnel_events").fetchone()["c"])
+
+
+def test_a_repo_dismissal_holds_for_the_next_run_of_the_same_repo(seeded):
+    """P3 item 4. "Dismiss for this repo" killed only this run's occurrences, so the
+    next scan of the same repository brought the producer straight back."""
+    from quarry import dismissals
+    client, con = seeded
+    _post(client, "/producers/bandit:B101/dismiss",
+          {"run_id": 1, "scope": "repo", "note": "style, not security"})
+    row = con.execute("SELECT reason FROM funnel_events WHERE occurrence_id IS NULL "
+                      "AND producer_id='bandit:B101'").fetchone()
+    assert row["reason"] == "producer dismissed for this repo: style, not security"
+    assert con.execute("SELECT enabled FROM producers WHERE id='bandit:B101'"
+                       ).fetchone()["enabled"] == 1, "a repo dismissal disables nothing"
+
+    b101, b113 = _rescan(con, 2, "o/r", [("bandit", "B101", "src/x.py"),
+                                         ("bandit", "B113", "src/y.py")])
+    assert b101 not in _live_ids(con) and b113 in _live_ids(con)
+    why = con.execute("SELECT stage, reason FROM funnel_events WHERE occurrence_id=? "
+                      "AND action='kill'", (b101,)).fetchone()
+    assert (why["stage"], why["reason"]) == (dismissals.FUNNEL_STAGE, dismissals.FUNNEL_REPO)
+
+    other, = _rescan(con, 3, "someone/else", [("bandit", "B101", "src/x.py")])
+    assert other in _live_ids(con), "a repo dismissal must not reach another repository"
+
+    size = _ledger_size(con)
+    r = _post(client, "/producers/bandit:B101/restore", {"run_id": 2})
+    assert r.status_code == 303
+    assert b101 in _live_ids(con), "restore must undo the funnel's dismissal kill"
+    assert dismissals.repo_dismissal(con, "bandit:B101", "o/r") is None
+    later, = _rescan(con, 4, "o/r", [("bandit", "B101", "src/x.py")])
+    assert later in _live_ids(con), "a withdrawn repo dismissal no longer holds"
+    after = _ledger_size(con)
+    assert after[0] >= size[0] and after[1] > size[1], "restoring appends; it never deletes"
+
+
+def test_restore_undoes_the_funnels_corpus_dismissal_kill_in_a_later_run(seeded):
+    client, con = seeded
+    _post(client, "/producers/bandit:B101/dismiss",
+          {"run_id": 1, "scope": "corpus", "note": "noise"})
+    b101, = _rescan(con, 2, "o/r", [("bandit", "B101", "src/x.py")])
+    assert b101 not in _live_ids(con)
+    assert q.restorable_occurrences(con, 2, "bandit:B101") == [b101]
+    assert q.operator_killed(con, 2, "bandit:B101") == [], \
+        "the old rule missed it: the kill was the funnel's, on the dismissal's behalf"
+
+    _post(client, "/producers/bandit:B101/restore", {"run_id": 2})
+    assert b101 in _live_ids(con)
+    row = con.execute("SELECT enabled, dismissed_note FROM producers "
+                      "WHERE id='bandit:B101'").fetchone()
+    assert row["enabled"] == 0 and row["dismissed_note"] == "noise", \
+        "the corpus switch is undone only from the run that threw it"
+    _post(client, "/producers/bandit:B101/restore", {"run_id": 1})
+    assert con.execute("SELECT enabled FROM producers WHERE id='bandit:B101'"
+                       ).fetchone()["enabled"] == 1
+
+
+def test_a_dismissal_never_lets_restore_revive_an_unrelated_kill(seeded):
+    """The funnel's path-class kill on a test file stands through dismiss and restore,
+    in a later run as in the first."""
+    client, con = seeded
+    _post(client, "/producers/bandit:B101/dismiss", {"run_id": 1, "scope": "repo"})
+    src, test = _rescan(con, 2, "o/r", [("bandit", "B101", "src/x.py"),
+                                        ("bandit", "B101", "tests/test_x.py")])
+    assert q.restorable_occurrences(con, 2, "bandit:B101") == [src]
+    _post(client, "/producers/bandit:B101/restore", {"run_id": 2})
+    assert src in _live_ids(con) and test not in _live_ids(con)
+
+
+def test_a_repo_dismissal_does_not_hide_the_corpus_one_from_restore(seeded):
+    """Both write producer-level operator rows; restore read only the newest."""
+    client, con = seeded
+    _post(client, "/producers/bandit:B101/dismiss",
+          {"run_id": 1, "scope": "corpus", "note": "noise"})
+    _post(client, "/producers/bandit:B101/dismiss", {"run_id": 1, "scope": "repo"})
+    assert q.corpus_dismissal_run(con, "bandit:B101") == 1
+    _post(client, "/producers/bandit:B101/restore", {"run_id": 1})
+    assert con.execute("SELECT enabled FROM producers WHERE id='bandit:B101'"
+                       ).fetchone()["enabled"] == 1
+
+
+def test_the_dismiss_form_takes_a_note_and_the_ledger_keeps_it(seeded):
+    client, con = seeded
+    page = client.get("/runs/1/triage").text
+    form = page.split('class="actions"', 1)[1].split("</form>", 1)[0]
+    assert 'name="note"' in form and "every later funnel pass" in form
+    _post(client, "/producers/bandit:B101/dismiss",
+          {"run_id": 1, "scope": "repo", "note": "  vendored‮ copy  "})
+    reasons = {r["reason"] for r in con.execute(
+        "SELECT reason FROM funnel_events WHERE producer_id='bandit:B101' "
+        "AND actor='operator'")}
+    assert reasons == {"vendored copy", "producer dismissed for this repo: vendored copy"}
+
+
+def test_a_dismissal_by_the_operator_is_not_a_tool_losing_its_output(seeded):
+    """Funnel health warns when every new occurrence of a tool died to deterministic
+    stages. The dismissal kill is deterministic in the ledger, but it is the
+    operator's decision, and warning about it would cry wolf."""
+    from quarry import db
+    client, con = seeded
+    _post(client, "/producers/bandit:B101/dismiss", {"run_id": 1, "scope": "repo"})
+    _rescan(con, 2, "o/r", [("bandit", "B101", "src/x.py")])
+    health = (db.read_manifest(con, 2).get("health") or {}).get("funnel") or {}
+    assert not health.get("bandit")
+
+
+def test_dismissals_that_reach_a_run_are_listed_with_a_way_back(seeded):
+    """A dismissal made in run 1 killed run 2's occurrences, and run 2's page neither
+    said so nor offered to undo it."""
+    client, con = seeded
+    _post(client, "/producers/bandit:B101/dismiss",
+          {"run_id": 1, "scope": "corpus", "note": "noise"})
+    _post(client, "/producers/bandit:B113/dismiss", {"run_id": 1, "scope": "repo"})
+    _rescan(con, 2, "o/r", [("bandit", "B101", "src/x.py"),
+                            ("bandit", "B113", "src/y.py")])
+    ds = {d["producer_id"]: d for d in q.dismissals_for_run(con, 2)}
+    assert ds["bandit:B101"]["scope"] == "corpus" and ds["bandit:B101"]["held"] == 1
+    assert ds["bandit:B101"]["from_run"] == 1 and not ds["bandit:B101"]["undoes_switch"]
+    assert ds["bandit:B113"]["scope"] == "repo" and ds["bandit:B113"]["undoes_switch"]
+    page = client.get("/runs/2").text
+    section = page.split('id="dismissals"', 1)[1].split("</table>", 1)[0]
+    assert "bandit:B101" in section and "noise" in section
+    assert "stays disabled until restored from run 1" in section
+    assert section.count(f'name="csrf" value="{client.app.state.csrf_token}"') == 2
+    r = _post(client, "/producers/bandit:B113/restore", {"run_id": 2, "back": "run"})
+    assert r.headers["location"] == "/runs/2#dismissals"
+    r = _post(client, "/producers/bandit:B113/restore",
+              {"run_id": 2, "back": "https://attacker.example/"})
+    assert r.headers["location"] == "/runs/2/triage", "back is a choice, never a URL"
+
+
 def test_a_scanner_occurrence_has_no_deep_review_section(seeded):
     client, con = seeded
     oid = con.execute("SELECT id FROM live_occurrences WHERE run_id=1 LIMIT 1"

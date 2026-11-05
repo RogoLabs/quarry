@@ -536,21 +536,32 @@ def create_app() -> FastAPI:
     @app.post("/producers/{producer_id:path}/dismiss")
     def dismiss(producer_id: str, run_id: int = Form(...), scope: str = Form("repo"),
                 note: str = Form("")):
-        """`d` is repo-local, `D` is corpus-wide. Corpus-wide sets `enabled=0` on the
-        producer: a disable, never a delete (D8), so it is reversible and the ledger
-        records who did it and why.
+        """`d` is repo-wide, "Dismiss everywhere" is corpus-wide. See
+        quarry/dismissals.py for what each is keyed on.
 
-        A corpus-wide dismissal also writes one producer-level ledger row
-        (`occurrence_id` NULL, which the schema reserves for exactly this). That row
-        is what lets `restore` tell "this run's dismissal disabled the producer" apart
-        from "the producer was already disabled by something else".
+        Both write one producer-level ledger row (`occurrence_id` NULL, which the
+        schema reserves for exactly this) and kill the producer's live occurrences in
+        this run. Corpus-wide also sets `enabled=0` on the producer: a disable, never a
+        delete (D8). The producer-level row is what later funnel passes and `restore`
+        read: for a repo dismissal it names the target through its run, and for a
+        corpus one it tells "this run's dismissal disabled the producer" apart from
+        "the producer was already disabled by something else".
+
+        Repo dismissals used to write no producer-level row, so they reached only this
+        run, and the next scan of the same repository brought the producer back.
+
+        The note is the operator's reason, stored in the ledger reason. It is free
+        text, so it is scrubbed of control characters and capped like any other
+        stored string.
 
         The redirect carries `undo=` so the next page can render a strip with a working
         restore button. A disposition whose reversal the operator cannot reach is, on
         this product's own thesis, indistinguishable from a deletion.
         """
+        from .. import dismissals, taint
         if scope not in ("repo", "corpus"):
             raise HTTPException(400, "scope must be 'repo' or 'corpus'.")
+        note = taint.scrub_text(note.strip(), 500)
         with opened() as c:
             if q.run_summary(c, row_id(run_id)) is None:
                 raise HTTPException(404, "No such run.")
@@ -561,11 +572,12 @@ def create_app() -> FastAPI:
                 if scope == "corpus":
                     c.execute("UPDATE producers SET enabled=0, dismissed_at=datetime('now'), "
                               "dismissed_note=? WHERE id=?",
-                              (note or "operator dismissal", producer_id))
-                    db.funnel(c, run_id, producer_id=producer_id, stage="operator",
-                              action="kill", deterministic=False, actor="operator",
-                              reason="producer disabled corpus-wide: "
-                                     + (note or "operator dismissal"))
+                              (note or dismissals.DEFAULT_NOTE, producer_id))
+                db.funnel(c, run_id, producer_id=producer_id, stage="operator",
+                          action="kill", deterministic=False, actor="operator",
+                          reason=dismissals.reason(
+                              dismissals.CORPUS_PREFIX if scope == "corpus"
+                              else dismissals.REPO_PREFIX, note))
                 ids = [r["id"] for r in c.execute(
                     "SELECT id FROM live_occurrences WHERE run_id=? AND producer_id=?",
                     (run_id, producer_id))]
@@ -580,23 +592,33 @@ def create_app() -> FastAPI:
             status_code=303)
 
     @app.post("/producers/{producer_id:path}/restore")
-    def restore(producer_id: str, run_id: int = Form(...)):
-        """Undo an operator dismissal, and *only* that.
+    def restore(producer_id: str, run_id: int = Form(...), back: str = Form("")):
+        """Undo a dismissal, and *only* that.
 
         A resurrect clears everything suppressing an occurrence, so a naive restore
         would also revive findings the deterministic funnel killed for unrelated
         reasons (a test path, a merged duplicate). The operator undoing their own
         decision must not silently override the funnel, so restore is scoped to
-        occurrences whose only suppression came from the operator.
+        occurrences held out only by a dismissal: the operator's kills, and the
+        funnel's `producer dismissed` kills made on the dismissal's behalf
+        (`queries.restorable_occurrences`). It used to undo only the first, so a run
+        scanned after a dismissal could never get those findings back.
 
-        The same goes for the producer's corpus-wide switch. It is turned back on, and
-        its dismissal note cleared, only when the disable being undone was written by
-        a corpus-wide dismissal in THIS run. A producer disabled some other way, or
-        from another run, stays disabled with its note intact; restore then brings
-        back only this run's operator kills.
+        A repo dismissal is keyed on the target, so a restore from any run of that
+        target withdraws it. The corpus-wide switch is turned back on, and its note
+        cleared, only when the disable being undone was written by a corpus-wide
+        dismissal in THIS run. A producer disabled some other way, or from another run,
+        stays disabled with its note intact; restore then brings back only this run's
+        occurrences.
+
+        `back=run` returns to the run page, where the list of dismissals lives;
+        anything else returns to the run's triage. It is a choice between two fixed
+        pages, never a URL from the form.
         """
+        from .. import dismissals
         with opened() as c:
-            if q.run_summary(c, row_id(run_id)) is None:
+            run = q.run_summary(c, row_id(run_id))
+            if run is None:
                 raise HTTPException(404, "No such run.")
             with db.tx(c):
                 if q.corpus_dismissal_run(c, producer_id) == run_id:
@@ -604,12 +626,18 @@ def create_app() -> FastAPI:
                               "dismissed_note=NULL WHERE id=?", (producer_id,))
                     db.funnel(c, run_id, producer_id=producer_id, stage="operator",
                               action="resurrect", deterministic=False, actor="operator",
-                              reason="corpus-wide dismissal withdrawn")
-                for oid in q.operator_killed(c, run_id, producer_id):
+                              reason=dismissals.CORPUS_WITHDRAWN)
+                if dismissals.repo_dismissal(c, producer_id, run["target"]) is not None:
+                    db.funnel(c, run_id, producer_id=producer_id, stage="operator",
+                              action="resurrect", deterministic=False, actor="operator",
+                              reason=dismissals.REPO_WITHDRAWN)
+                for oid in q.restorable_occurrences(c, run_id, producer_id):
                     db.funnel(c, run_id, occurrence_id=oid, producer_id=producer_id,
                               stage="operator", action="resurrect", deterministic=False,
                               actor="operator", reason="operator dismissal withdrawn")
-        return RedirectResponse(q.run_urls(run_id)["triage"], status_code=303)
+        urls = q.run_urls(run_id)
+        return RedirectResponse(urls["run"] + "#dismissals" if back == "run"
+                                else urls["triage"], status_code=303)
 
     # ------------------------------------------------------------ deep mode
 
@@ -786,6 +814,7 @@ def create_app() -> FastAPI:
                 "led": q.egress_ledger(c, run_id),
                 "pipeline": q.pipeline(c, summary),
                 "vc": q.verdict_counts(c, run_id),
+                "dismissals": q.dismissals_for_run(c, run_id),
             }, c)
 
     @app.get("/egress", response_class=HTMLResponse)

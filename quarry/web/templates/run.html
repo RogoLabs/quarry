@@ -223,6 +223,49 @@
     <span>nothing is ever deleted</span>
   </div>
 
+  {#  A dismissal made in another run reaches this one through the funnel, which
+      kills the producer's new occurrences. Without this list nothing here said which
+      decision had done that, and nothing offered to undo it. #}
+  {% if dismissals %}
+  <h2 class="h-sec" id="dismissals">Dismissals that reach this run</h2>
+  <div class="tbl">
+    <table>
+      <caption class="sr-only">Operator dismissals in force for run {{ run.id }}, with what
+        a restore from this run does</caption>
+      <thead><tr><th scope="col">Producer</th><th scope="col">Scope</th>
+        <th scope="col">Note</th><th scope="col" class="r">Held here</th>
+        <th scope="col">Restore from this run</th></tr></thead>
+      <tbody>
+      {% for d in dismissals %}
+        <tr>
+          <td class="mono sm">{{ d.producer_id|visible }}</td>
+          <td class="sm">{% if d.scope == 'corpus' %}<span class="pill incomplete">every repository</span>
+            {% elif d.scope == 'repo' %}<span class="pill inert">this repository</span>
+            {% else %}<span class="pill inert">this run only</span>{% endif %}
+            {% if d.from_run %}<div class="dim">from <a href="/runs/{{ d.from_run }}">run {{ d.from_run }}</a>{% if d.since %}, {{ d.since|local }}{% endif %}</div>{% endif %}</td>
+          <td class="dim sm wrap-normal">{{ (d.note or '')|visible }}</td>
+          <td class="r num">{{ d.held }}</td>
+          <td class="sm">
+            {% if d.held or d.undoes_switch %}
+            <form method="post" action="/producers/{{ d.producer_id|urlencode }}/restore">
+              <input type="hidden" name="csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="run_id" value="{{ run.id }}">
+              <input type="hidden" name="back" value="run">
+              <button type="submit" class="xs">Restore</button>
+            </form>
+            {% endif %}
+            <div class="dim">{% if d.scope == 'repo' %}withdraws it for {{ run.target }}{% if d.held %} and brings back {{ d.held }} here{% endif %}
+              {%- elif d.scope == 'corpus' and d.undoes_switch %}re-enables the producer{% if d.held %} and brings back {{ d.held }} here{% endif %}
+              {%- elif d.scope == 'corpus' %}{% if d.held %}brings back {{ d.held }} here; {% endif %}the producer stays disabled until restored from run {{ d.from_run or '?' }}
+              {%- else %}brings back {{ d.held }} here{% endif %}</div>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
   {% if stage or all_suppressed or arrived %}
   {#  The heading names the action taken. It was hardcoded to "Suppressed at", which
       was simply false for a boost — and it now states the true total rather than

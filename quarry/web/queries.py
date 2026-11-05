@@ -19,7 +19,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
-from .. import db
+from .. import db, dismissals
 
 BANDS = ("known-good", "unmeasured", "known-bad")
 
@@ -433,14 +433,12 @@ def corpus_dismissal_run(con: sqlite3.Connection, producer_id: str) -> int | Non
                     (producer_id,)).fetchone()
     if p is None or p["enabled"]:
         return None
-    e = con.execute(
-        """SELECT run_id, action, reason FROM funnel_events
-           WHERE producer_id = ? AND occurrence_id IS NULL
-             AND actor = 'operator' AND stage = 'operator'
-           ORDER BY id DESC LIMIT 1""", (producer_id,)).fetchone()
+    # Corpus-scope rows only: a repo dismissal written later is also a producer-level
+    # operator row, and must not hide the corpus one from its own restore.
+    e = dismissals.latest_corpus_event(con, producer_id)
     if e is None or e["action"] != "kill":
         return None
-    if e["reason"] != f"producer disabled corpus-wide: {p['dismissed_note']}":
+    if e["reason"] != dismissals.reason(dismissals.CORPUS_PREFIX, p["dismissed_note"]):
         return None
     return e["run_id"]
 
@@ -465,10 +463,88 @@ def operator_killed(con: sqlite3.Connection, run_id: int, producer_id: str) -> l
         (run_id, producer_id, run_id))]
 
 
+def restorable_occurrences(con: sqlite3.Connection, run_id: int,
+                           producer_id: str) -> list[int]:
+    """Occurrences in this run that are out only because of a dismissal.
+
+    Wider than `operator_killed`: a dismissal also holds out the occurrences the
+    funnel killed on its behalf (`dismissals.FUNNEL_REASONS` at `rule-precision-prior`)
+    in a later run or a later pass, and undoing the dismissal must bring those back
+    too. Narrower than a resurrect: anything else holding the occurrence out since
+    its last resurrect (a test path, a merged duplicate, a Layer 2 kill) keeps it out,
+    because a resurrect clears every suppression at once.
+    """
+    reasons = dismissals.FUNNEL_REASONS
+    by_dismissal = (f"(e.actor = 'operator' OR (e.stage = ? AND e.action = 'kill' "
+                    f"AND e.reason IN ({','.join('?' * len(reasons))})))")
+    dargs = (dismissals.FUNNEL_STAGE, *reasons)
+    return [r["id"] for r in con.execute(
+        f"""SELECT o.id FROM occurrences o
+            WHERE o.run_id = ? AND o.producer_id = ?
+              AND o.id NOT IN (SELECT id FROM live_occurrences WHERE run_id = ?)
+              AND NOT EXISTS (
+                  SELECT 1 FROM funnel_events e
+                  WHERE e.occurrence_id = o.id
+                    AND e.action IN ('kill','defer','merge')
+                    AND e.id > COALESCE((SELECT MAX(r.id) FROM funnel_events r
+                                         WHERE r.occurrence_id = o.id
+                                           AND r.action = 'resurrect'), 0)
+                    AND NOT {by_dismissal})
+            ORDER BY o.id""",
+        (run_id, producer_id, run_id, *dargs))]
+
+
 def restorable(con: sqlite3.Connection, run_id: int, producer_id: str) -> bool:
     """Would `POST /producers/{id}/restore` with this run change anything?"""
-    return bool(operator_killed(con, run_id, producer_id)) \
-        or corpus_dismissal_run(con, producer_id) == run_id
+    if restorable_occurrences(con, run_id, producer_id) \
+            or corpus_dismissal_run(con, producer_id) == run_id:
+        return True
+    run = con.execute("SELECT target FROM runs WHERE id=?", (run_id,)).fetchone()
+    return bool(run) and dismissals.repo_dismissal(con, producer_id, run["target"]) is not None
+
+
+def dismissals_for_run(con: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]:
+    """Every dismissal that reaches this run, with what a restore here would do.
+
+    Without this list a dismissal made in an earlier run was invisible from the run
+    it affected: the funnel killed the producer's new occurrences, and nothing on the
+    page said which decision had done it or offered to undo it.
+
+    `held` counts this run's occurrences the dismissal holds out (what a restore
+    brings back). `undoes_switch` says whether a restore from this run also lifts the
+    dismissal itself: always for a repo dismissal, which is keyed on the target, and
+    for a corpus one only from the run that made it. Scope `run` is a dismissal from
+    before repo dismissals were keyed on the target: it held this run's occurrences
+    and nothing else.
+    """
+    run = con.execute("SELECT target FROM runs WHERE id=?", (run_id,)).fetchone()
+    if run is None:
+        return []
+    out: list[dict[str, Any]] = []
+    for p in con.execute(
+            """SELECT p.id, p.dismissed_note, p.dismissed_at FROM producers p
+               WHERE p.enabled = 0 AND EXISTS (SELECT 1 FROM occurrences o
+                                               WHERE o.producer_id = p.id AND o.run_id = ?)
+               ORDER BY p.id""", (run_id,)):
+        made = corpus_dismissal_run(con, p["id"])
+        out.append({"producer_id": p["id"], "scope": "corpus", "note": p["dismissed_note"],
+                    "since": p["dismissed_at"], "from_run": made,
+                    "undoes_switch": made == run_id})
+    for pid, rec in sorted(dismissals.repo_dismissals(con, run["target"]).items()):
+        out.append({"producer_id": pid, "scope": "repo", "note": rec["note"],
+                    "since": rec["created_at"], "from_run": rec["run_id"],
+                    "undoes_switch": True})
+    listed = {d["producer_id"] for d in out}
+    for r in con.execute(
+            """SELECT DISTINCT e.producer_id FROM funnel_events e
+               WHERE e.run_id = ? AND e.actor = 'operator' AND e.action = 'kill'
+                 AND e.occurrence_id IS NOT NULL ORDER BY e.producer_id""", (run_id,)):
+        if r["producer_id"] not in listed:
+            out.append({"producer_id": r["producer_id"], "scope": "run", "note": None,
+                        "since": None, "from_run": run_id, "undoes_switch": False})
+    for d in out:
+        d["held"] = len(restorable_occurrences(con, run_id, d["producer_id"]))
+    return [d for d in out if d["scope"] != "run" or d["held"]]
 
 
 def run_summary(con: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
