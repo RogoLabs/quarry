@@ -1,0 +1,38 @@
+openapi: 3.0.3
+info:
+  title: Ticket API
+  version: 1.4.0
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+security:
+  - bearerAuth: []
+paths:
+  /api/tickets:
+    get: {summary: List the caller's organisation's tickets}
+    post: {summary: Open a ticket}
+  /api/tickets/{id}:
+    get: {summary: Read a ticket}
+    put: {summary: Update a ticket}
+    delete: {summary: Delete a ticket}
+  /api/tickets/{id}/history:
+    get: {summary: A ticket's change history}
+  /api/tickets/{id}/comments:
+    get: {summary: A ticket's comments}
+    post: {summary: Comment on a ticket}
+  /api/comments/{commentId}:
+    get: {summary: Read one comment}
+  /api/admin/users:
+    get: {summary: List users}
+  /api/admin/users/{id}/disable:
+    post: {summary: Disable a user}
+  /api/admin/users/{id}/role:
+    post: {summary: Change a user's role}
+  /api/admin/users/{id}:
+    delete: {summary: Delete a user}
+  /health:
+    get: {summary: Liveness}
+  /version:
+    get: {summary: Build version}

@@ -678,6 +678,8 @@ _SYM_JS = (
     re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*"
                r"(?:async\s+)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)"),
     re.compile(r"^\s*([A-Za-z_$][\w$]*)\s*:\s*(?:async\s+)?(?:function\b|\([^)]*\)\s*=>)"),
+    re.compile(r"^\s*(?:module\.)?exports\.([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?"
+               r"(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)"),
     re.compile(r"^\s*(?:static\s+)?(?:async\s+)?(?!(?:if|for|while|switch|catch|return|"
                r"function)\b)([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{"),
 )
