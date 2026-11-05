@@ -117,6 +117,32 @@
     </table>
   </div>
 
+  {#  A dependency scanner's clean result is only as good as the database it read.
+      `scan` stores each database's age at scan time; this is where it is read. #}
+  {% set db_tools = run.scan_tools|selectattr('tool', 'in', ['trivy', 'osv-scanner'])|list %}
+  {% if run.vulndb %}
+  <div class="tbl mt-3">
+    <table>
+      <caption>Vulnerability databases at scan time (stale past {{ run.stale_days }} days)</caption>
+      <thead><tr><th scope="col">Database</th><th scope="col">Built</th>
+        <th scope="col" class="r">Age</th><th scope="col">Read from</th></tr></thead>
+      <tbody>
+      {% for v in run.vulndb %}
+        <tr><td class="mono sm">{{ v.name|visible }}</td>
+          <td class="mono sm dim nowrap">{{ v.built|local if v.built else 'unknown' }}</td>
+          <td class="r num nowrap">{% if v.age_days is number %}{{ '%.1f'|format(v.age_days) }} d{% else %}?{% endif %}
+            {%- if v.stale %} <span class="pill incomplete">stale</span>{% endif %}</td>
+          <td class="dim sm">{{ v.basis|visible }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% elif db_tools %}
+  <p class="note">Database ages were not recorded for this run: it was scanned before
+    <code>scan</code> kept them. <code>quarry db status</code> shows the databases' age
+    now, which is not their age at scan time.</p>
+  {% endif %}
+
   <h2 class="h-sec" id="funnel">The funnel: every number is a link to the set it killed</h2>
 
   {#  A real <table>. It was a <div> of <div>s holding <span>s, so a screen reader

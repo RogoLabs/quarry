@@ -175,6 +175,70 @@ def test_a_research_card_whose_occurrence_is_not_in_triage_says_where_it_is(seed
     assert "out of the funnel" in page and f'href="/evidence/{killed}"' in page
 
 
+def test_the_scan_card_does_not_count_deep_review_as_a_scanner(seeded):
+    """P3 item 3. The card read "8 tool(s)" for seven scanners plus `deep`."""
+    _, con = seeded
+    before = q.pipeline(con, q.run_summary(con, 1))[1]
+    assert before["unit"] == "raw, 2 scanner(s)"
+    _deep_candidate(con)
+    summary = q.run_summary(con, 1)
+    scan = q.pipeline(con, summary)[1]
+    assert scan["name"] == "Scan"
+    assert scan["unit"] == "raw, 2 scanner(s); 1 more from deep review"
+    assert scan["n"] == summary["total"] - 1 == before["n"]
+
+
+def _scanned_with(con, tools: dict, vulndb: dict | None = None):
+    from quarry import db
+
+    def change(m):
+        m.setdefault("scan", {}).setdefault("tools", {}).update(tools)
+        if vulndb is not None:
+            m["vulndb"] = vulndb
+    db.update_manifest(con, 1, change)
+    con.commit()
+
+
+TRIVY_OK = {"ok": True, "rc": 0, "seconds": 3.0, "records": 4, "skipped": "",
+            "error": "", "note": ""}
+
+
+def test_the_run_page_shows_each_databases_age_at_scan_time(seeded):
+    """P3 item 3, plan item 7. `scan` stored the age; no page read it."""
+    client, con = seeded
+    _scanned_with(con, {"trivy": TRIVY_OK, "osv-scanner": TRIVY_OK}, {
+        "trivy": {"built": "2026-10-28T19:18:03+00:00", "age_days": 5.1,
+                  "basis": "metadata.json UpdatedAt"},
+        "osv": {"built": "2026-10-20T00:00:00+00:00", "age_days": 9.0,
+                "basis": "oldest of 6 ecosystem zip download times"},
+        "grype": {"built": None, "age_days": None, "basis": "import.json missing"}})
+    page = client.get("/runs/1").text
+    head = "Vulnerability databases at scan time (stale past 7 days)"
+    assert head in page
+    table = page.split(head, 1)[1].split("</table>", 1)[0]
+    rows = {n: table.split(f'<td class="mono sm">{n}</td>', 1)[1].split("</tr>", 1)[0]
+            for n in ("trivy", "osv", "grype")}
+    assert "5.1 d" in rows["trivy"] and "stale" not in rows["trivy"]
+    assert "metadata.json UpdatedAt" in rows["trivy"]
+    assert "9.0 d" in rows["osv"] and "stale" in rows["osv"]
+    assert "?" in rows["grype"] and "stale" in rows["grype"] and "unknown" in rows["grype"]
+
+
+def test_a_run_scanned_before_ages_were_kept_says_so(seeded):
+    client, con = seeded
+    assert "Database ages were not recorded" not in client.get("/runs/1").text
+    _scanned_with(con, {"trivy": TRIVY_OK})
+    assert "Database ages were not recorded" in client.get("/runs/1").text
+
+
+def test_an_offset_timestamp_is_shown_on_the_local_clock():
+    import datetime as dt
+    got = q.local("2026-10-28T19:18:03.419608+00:00")
+    want = dt.datetime(2026, 10, 28, 19, 18, 3, tzinfo=dt.timezone.utc).astimezone()
+    assert got == want.strftime("%Y-%m-%d %H:%M")
+    assert q.local("2026-08-24T18:36:41") == "2026-08-24 18:36", "naive stays local"
+
+
 def test_a_scanner_occurrence_has_no_deep_review_section(seeded):
     client, con = seeded
     oid = con.execute("SELECT id FROM live_occurrences WHERE run_id=1 LIMIT 1"

@@ -498,6 +498,19 @@ def run_summary(con: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
                    for src, by_tool in sorted((m.get("health") or {}).items())
                    if isinstance(by_tool, dict)
                    for tool, msgs in sorted(by_tool.items()) for msg in (msgs or [])]
+    # The vulnerability databases a scan read, and how old each was then. A clean
+    # Trivy or OSV result is only as good as its database, and that age was printed
+    # by `doctor` and stored by `scan` but never shown beside the result.
+    from ..vulndb import STALE_DAYS
+    d["stale_days"] = STALE_DAYS
+    d["vulndb"] = []
+    for name, a in sorted((m.get("vulndb") or {}).items()):
+        if not isinstance(a, dict):
+            continue
+        age = a.get("age_days")
+        d["vulndb"].append({"name": name, "built": a.get("built"), "age_days": age,
+                            "basis": a.get("basis") or "",
+                            "stale": not isinstance(age, (int, float)) or age > STALE_DAYS})
     return d
 
 
@@ -871,15 +884,19 @@ def local(ts: str | None, *, with_date: bool = True) -> str:
 
     Everything the page shows now goes through here, so one clock is on screen.
     Naive-local values are detected by the `T` separator `datetime.isoformat()` writes
-    and passed through unconverted; SQLite's space-separated UTC is converted.
+    and passed through unconverted; SQLite's space-separated UTC is converted. An
+    isoformat value that carries its own offset (a database build time in the run
+    manifest) says which clock it is on, so it is converted too.
     """
     if not ts:
         return "—"
     text = str(ts)
     fmt = "%Y-%m-%d %H:%M" if with_date else "%H:%M"
     try:
-        if "T" in text:                      # isoformat() — already local, naive
+        if "T" in text:                      # isoformat() — local unless it says not
             dt = _dt.datetime.fromisoformat(text)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone()
             return dt.strftime(fmt)
         dt = _dt.datetime.strptime(text[:19], "%Y-%m-%d %H:%M:%S")
         dt = dt.replace(tzinfo=_dt.timezone.utc).astimezone()
@@ -1098,15 +1115,20 @@ def pipeline(con: sqlite3.Connection, run: dict[str, Any]) -> list[dict[str, Any
     u = run_urls(rid)
     quarantined = con.execute("SELECT COUNT(*) c FROM quarantined WHERE run_id=?",
                               (rid,)).fetchone()["c"]
-    tools = con.execute(
-        "SELECT COUNT(DISTINCT p.tool) c FROM occurrences o "
-        "JOIN producers p ON p.id = o.producer_id WHERE o.run_id=?",
-        (rid,)).fetchone()["c"]
+    # Layer 1 only. Deep review writes occurrences under the producer tool `deep`,
+    # and counting it made the card read "8 tool(s)" for seven scanners.
+    scan = con.execute(
+        "SELECT COUNT(DISTINCT p.tool) tools, COUNT(o.id) n FROM occurrences o "
+        "JOIN producers p ON p.id = o.producer_id WHERE o.run_id=? AND p.tool != 'deep'",
+        (rid,)).fetchone()
+    n_deep = run["total"] - scan["n"]
     vc = verdict_counts(con, rid)
     return [
         {"name": "Ingest", "n": quarantined, "unit": "quarantined",
          "href": f"{u['run']}#quarantine", "page": "run"},
-        {"name": "Scan", "n": run["total"], "unit": f"raw, {tools} tool(s)",
+        {"name": "Scan", "n": scan["n"],
+         "unit": f"raw, {scan['tools']} scanner(s)"
+                 + (f"; {n_deep} more from deep review" if n_deep else ""),
          "href": f"{u['run']}#funnel", "page": "run"},
         {"name": "Funnel", "n": run["live"], "unit": "live",
          "href": u["triage"], "page": "triage"},
