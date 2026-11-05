@@ -5,15 +5,20 @@ The one place Quarry deliberately reaches the network for tool data. It runs
 that can reach the network during a scan can also exfiltrate the target. Every fetch
 is written to the egress ledger so "completely local" stays an auditable claim rather
 than a slogan.
+
+It also reads what was fetched: the advisory draft's prior-advisory check searches the
+downloaded OSV zips on disk and never fetches.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import sqlite3
-from dataclasses import dataclass
+import zipfile
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -220,6 +225,191 @@ def ages(now: datetime | None = None, root: Path | None = None) -> dict[str, dic
                      "age_days": round((now - when).total_seconds() / 86400, 1)
                      if when else None}
     return out
+
+
+def _osv_zips(root: Path) -> dict[str, Path]:
+    """The offline OSV databases on disk, by ecosystem. osv-scanner lays them out as
+    `<cache>/<subdir>/<Ecosystem>/all.zip`; the directory name is the ecosystem."""
+    return {z.parent.name: z for z in sorted((root / "osv").rglob("all.zip"))}
+
+
+# ------------------------------------------------------------------ prior advisories
+
+# An OSV record is a few KB; one past this is not a record this lookup should inflate.
+_OSV_MEMBER_CAP = 4 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class PriorAdvisory:
+    """One local OSV record that names the package or the repository."""
+    id: str
+    aliases: tuple[str, ...]
+    cwes: tuple[str, ...]
+    summary: str
+    modified: str
+    ecosystem: str
+    basis: str                    # one of BASES, strongest first
+
+
+# Why a record was matched, strongest first. A reference URL under the repository is the
+# weakest, and one record can sit in several ecosystems' zips. MEASURED on the live copy
+# before de-duplication: Django's 3 reference-URL matches were all one jQuery advisory
+# (GHSA-6c3j-c64m-qhgq) in the Packagist, RubyGems and npm zips. Its PyPI copy names
+# django as an affected package, so it is now kept once, as a package-name match.
+BASES = ("package name", "affected repository", "reference URL")
+
+
+@dataclass
+class PriorCheck:
+    """What a local prior-advisory lookup did, so the draft can say what was searched as
+    well as what was found. `checked` False means nothing was searched, with `reason`."""
+    checked: bool
+    reason: str = ""
+    ecosystems: tuple[str, ...] = ()       # the local OSV copies read
+    entries_read: int = 0
+    downloaded: str | None = None          # oldest ecosystem zip download date
+    package: str = ""
+    package_ecosystem: str = ""            # "" when the name was not searched
+    repo: str = ""                         # normalised repository key, "" when not searched
+    matches: list[PriorAdvisory] = field(default_factory=list)
+
+
+def _pypi_name(name: str) -> str:
+    """PEP 503 normalisation: PyPI treats runs of -, _ and . as one separator."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _same_package(ecosystem: str, a: str, b: str) -> bool:
+    if ecosystem == "PyPI":
+        return _pypi_name(a) == _pypi_name(b)
+    return a.lower() == b.lower()
+
+
+def repo_key(url: str) -> str:
+    """`host/owner/repo`, lower-case, from any spelling of a repository URL (scheme,
+    `git@host:` form, trailing `.git` or slash, query or fragment). "" when the URL has
+    fewer than three parts, so a bare host can never match every advisory on it."""
+    s = (url or "").strip().lower()
+    s = re.sub(r"^[a-z][a-z0-9+.-]*://", "", s)
+    s = re.sub(r"^[^@/]+@([^:/]+):", r"\1/", s)       # git@github.com:owner/repo
+    s = re.sub(r"^[^@/]+@", "", s)
+    s = s.removeprefix("www.").split("#")[0].split("?")[0]
+    s = s.rstrip("/").removesuffix(".git").rstrip("/")
+    return s if s.count("/") >= 2 else ""
+
+
+def _names_repo(url: str, key: str) -> bool:
+    k = repo_key(url)
+    if not k:
+        return False
+    return k == key or k.startswith(key + "/")
+
+
+def local_prior_advisories(ecosystem: str, package: str, repo_url: str,
+                           root: Path | None = None) -> PriorCheck:
+    """Search the offline OSV databases `quarry db sync` already downloaded for records
+    that name this package (exact, in its own ecosystem) or this repository (a GIT
+    range or a reference URL under it, in any ecosystem on disk). Reads local zips
+    only; nothing here touches the network, which is why a missing database is a
+    reported gap and not a fetch.
+
+    A record is matched by package name only in the guessed ecosystem, since the same
+    name in another registry is another project. The repository name a run carries is
+    not always the published package name, so the repository URL is the stronger key.
+    A miss does not show the issue is new: the copy is a snapshot and OSV is not every
+    advisory source.
+
+    MEASURED 2026-11-05 on the live OSV copy (six ecosystems, 283,287 records, downloaded
+    2026-10-28): 3.2 to 3.4 s per lookup over five targets. npm alone is 230,903 records
+    (388 MB unpacked). A byte pre-filter means only records that mention the name or the
+    repository are parsed. django matched 339 records, all by package name; the three
+    targets Quarry has run (vulnerability-lookup, ML-Gateway, cve-services) matched none."""
+    root = root or db_dir()
+    zips = _osv_zips(root)
+    if not zips:
+        return PriorCheck(False, "no local OSV database; quarry db sync downloads one")
+    key = repo_key(repo_url)
+    name = (package or "").strip()
+    by_name = ecosystem if (name and ecosystem in zips) else ""
+    if not key and not by_name:
+        return PriorCheck(False, f"no local OSV database for {ecosystem} and no "
+                                 f"repository URL to search by")
+    when, _ = built_at("osv", root)
+    check = PriorCheck(True, ecosystems=tuple(zips), package=name,
+                       package_ecosystem=by_name, repo=key,
+                       downloaded=when.date().isoformat() if when else None)
+    # The pre-filter looks for the name as a JSON string; PyPI spellings differ in their
+    # separators, so any run of -, _ or . stands for one.
+    parts = [re.escape(p) for p in re.split(r"[-_.]+", name.lower()) if p]
+    pat = "[-_.]+".join(parts) if ecosystem == "PyPI" else re.escape(name.lower())
+    name_re = re.compile(('"' + pat + '"').encode()) if by_name else None
+    key_b = key.encode()
+    found: dict[str, PriorAdvisory] = {}
+    for eco, path in zips.items():
+        try:
+            zf = zipfile.ZipFile(path)
+        except (OSError, zipfile.BadZipFile):
+            continue
+        with zf:
+            for info in zf.infolist():
+                if info.is_dir() or info.file_size > _OSV_MEMBER_CAP:
+                    continue
+                raw = zf.read(info)
+                check.entries_read += 1
+                low = raw.lower()
+                hit_name = bool(name_re and eco == by_name and name_re.search(low))
+                hit_repo = bool(key_b and key_b in low)
+                if not (hit_name or hit_repo):
+                    continue
+                try:
+                    rec = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                basis = _osv_basis(rec, eco, by_name, name, key)
+                if not basis:
+                    continue
+                adv = _prior(rec, eco, basis)
+                old = found.get(adv.id)
+                if old is None or BASES.index(basis) < BASES.index(old.basis):
+                    found[adv.id] = adv
+    check.matches = list(found.values())
+    return check
+
+
+def _osv_basis(rec: dict, eco: str, by_name: str, name: str, key: str) -> str:
+    """Why this record is about the target, re-checked on the parsed record (the byte
+    pre-filter only says the string occurs somewhere), or "" when it is not."""
+    affected = [a for a in rec.get("affected") or [] if isinstance(a, dict)]
+    if eco == by_name:
+        for a in affected:
+            pkg = a.get("package") or {}
+            if (isinstance(pkg, dict) and pkg.get("ecosystem") == eco
+                    and isinstance(pkg.get("name"), str)
+                    and _same_package(eco, pkg["name"], name)):
+                return "package name"
+    if key:
+        repos = [r.get("repo") for a in affected for r in a.get("ranges") or []
+                 if isinstance(r, dict)]
+        if any(isinstance(u, str) and _names_repo(u, key) for u in repos):
+            return "affected repository"
+        refs = [r.get("url") for r in rec.get("references") or [] if isinstance(r, dict)]
+        if any(isinstance(u, str) and _names_repo(u, key) for u in refs):
+            return "reference URL"
+    return ""
+
+
+def _prior(rec: dict, eco: str, basis: str) -> PriorAdvisory:
+    from .cwe import normalise
+    ds = rec.get("database_specific") or {}
+    cwes = ds.get("cwe_ids") if isinstance(ds, dict) else None
+    return PriorAdvisory(
+        id=str(rec.get("id") or "?"),
+        aliases=tuple(str(a) for a in rec.get("aliases") or [] if isinstance(a, str)),
+        cwes=tuple(c for c in (normalise(x) for x in cwes or [] if isinstance(x, str)) if c),
+        summary=str(rec.get("summary") or ""), modified=str(rec.get("modified") or ""),
+        ecosystem=eco, basis=basis)
 
 
 def stale_warnings(by_db: dict[str, dict], tools: list[str]) -> dict[str, list[str]]:
