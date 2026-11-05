@@ -127,6 +127,104 @@ def _class_verbs(text: str, start: int, indent: str) -> list[str]:
     return [v.upper() for v in METHODS if v in found]
 
 
+def _line_of(text: str, offset: int) -> int:
+    """1-based line number of a character offset."""
+    return text.count("\n", 0, offset) + 1
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip())
+
+
+def _code(line: str) -> str:
+    """A line without a trailing comment or surrounding space. Approximate: a `#` inside
+    a string literal cuts the line short, which only shortens a header scan."""
+    return line.split("#", 1)[0].strip()
+
+
+def _py_def_span(lines: list[str], def_idx: int) -> tuple[int, int]:
+    """(first, last) 1-based lines of the def or class at `def_idx` (0-based), its
+    decorators included. Decorators span several lines in Flask-RESTX code
+    (`@ns.doc(\\n responses={...}\\n)`), so the walk up takes every line at the def's
+    indent that starts with `@` or closes a bracket, and every deeper line between them,
+    and stops at a blank line or any other statement at that indent. A blank line between
+    two decorators ends the walk early, which only makes the span shorter."""
+    if not (0 <= def_idx < len(lines)):
+        return (0, 0)
+    ind = _indent(lines[def_idx])
+    start = def_idx
+    k = def_idx - 1
+    while k >= 0 and def_idx - k <= 80:
+        line = lines[k]
+        if not line.strip():
+            break
+        here, code = _indent(line), _code(line)
+        if here < ind:
+            break
+        if here == ind:
+            if code.startswith("@"):
+                start = k
+            elif not code or code[0] in ")]}":
+                pass                           # a comment or a decorator's closing bracket
+            else:
+                break                          # a statement: the previous sibling's end
+        k -= 1
+    # The header may run over several lines (a long signature); the body starts after the
+    # first line whose code ends with ':'.
+    h = def_idx
+    while h < len(lines) - 1 and h - def_idx < 30 and not _code(lines[h]).endswith(":"):
+        h += 1
+    end = h
+    for j in range(h + 1, len(lines)):
+        line = lines[j]
+        if not line.strip() or not _code(line):
+            continue
+        if _indent(line) <= ind:
+            break
+        end = j
+    return (start + 1, end + 1)
+
+
+def _class_verb_spans(text: str, start: int, indent: str) -> dict[str, tuple[int, int]]:
+    """VERB -> (first, last) line of that verb's method in the class at `start`. A
+    Flask-RESTX Resource serves each verb from its own method, so a finding inside
+    `delete` belongs to the DELETE route and not to the GET beside it."""
+    lines = text.splitlines()
+    cls = _line_of(text, start) - 1
+    _, cls_end = _py_def_span(lines, cls)
+    body = [i for i in range(cls + 1, cls_end) if _code(lines[i])]
+    if not body:
+        return {}
+    depth = _indent(lines[body[0]])
+    out: dict[str, tuple[int, int]] = {}
+    for i in range(cls + 1, cls_end):
+        m = _PY_VERB_DEF.match(lines[i])
+        if m and len(m[1]) == depth and m[2].upper() not in out:
+            out[m[2].upper()] = _py_def_span(lines, i)
+    return out
+
+
+# Query parameters a handler body reads. Flask `request.args.get("x")`, `request.args["x"]`,
+# `request.values.get("x")`; Express `req.query.x` and `req.query["x"]`.
+_PY_QUERY = re.compile(
+    r"request\.(?:args|values)(?:\.get(?:list)?\(\s*|\[\s*)[\"'](\w+)[\"']")
+_JS_QUERY = re.compile(r"\breq\.query(?:\.(\w+)|\[\s*[\"'](\w+)[\"']\s*\])")
+
+
+def _query_params(text: str, span: tuple[int, int], rel: str) -> tuple[str, ...]:
+    """Query parameter names read inside a handler's own lines, in first-seen order."""
+    if not span[0]:
+        return ()
+    body = "\n".join(text.splitlines()[span[0] - 1:span[1]])
+    pat = _PY_QUERY if rel.endswith(".py") else _JS_QUERY
+    names: list[str] = []
+    for m in pat.finditer(body):
+        name = next(g for g in m.groups() if g)
+        if name not in names:
+            names.append(name)
+    return tuple(names)
+
+
 def _kwarg(args: str | None, name: str) -> str | None:
     m = re.search(rf"\b{name}\s*=\s*[\"']([^\"']*)[\"']", args or "")
     return m[1] if m else None
@@ -151,10 +249,33 @@ class Route:
     source: str = "static"      # static | openapi | crawl
     auth_required: bool | None = None
     params: tuple[str, ...] = ()
+    # Where a mandatory security requirement was declared: "operation" when the operation
+    # itself names one, "global" when it only inherits the document's top-level
+    # `security`. A global requirement is a default the author applied to every
+    # operation, public reads included (VulnLookup's spec marks its whole read API that
+    # way), so only "operation" counts as "this route is declared protected".
+    auth_scope: str = ""
+    # How a credential is presented for this route's scheme, from the spec's security
+    # schemes: a header name ("X-API-KEY") or "Authorization: Bearer". Empty when unknown.
+    auth_header: str = ""
+    # Query parameter names the route reads: OpenAPI `in: query`, or the handler body's
+    # own `request.args.get("x")` / `req.query.x`. A probe injects into a declared name
+    # before it falls back to a guessed `q`, and only a declared name can reject.
+    query: tuple[str, ...] = ()
+    # The handler's lines in handler_file, 1-based and inclusive, decorators included.
+    # Static routes only; 0 when unknown. This is what ties a finding's line to the
+    # route that serves it, rather than to every route in the same file.
+    line: int = 0
+    end_line: int = 0
 
     @property
     def key(self) -> tuple[str, str]:
         return (self.method, _norm_path(self.path))
+
+    def encloses(self, path: str, line: int | None) -> bool:
+        """Whether a finding at `path`:`line` sits inside this route's own handler."""
+        return (bool(line) and bool(self.line) and self.handler_file == path
+                and self.line <= int(line) <= self.end_line)
 
 
 def _norm_path(path: str) -> str:
@@ -193,11 +314,13 @@ class StaticRouteSource:
         mounts = _Mounts(texts)
         out: list[Route] = []
         for rel, text in texts.items():
-            for obj, method, path in self._routes_in(text, rel):
+            for obj, method, path, span in self._routes_in(text, rel):
+                query = _query_params(text, span, rel)
                 for prefix in mounts.prefixes(rel, obj):
                     full = _join(prefix, path) if prefix else path
                     out.append(Route(method, full, rel, "static",
-                                     params=_path_params(full)))
+                                     params=_path_params(full), query=query,
+                                     line=span[0], end_line=span[1]))
         # stable, de-duplicated
         seen: dict[tuple, Route] = {}
         for r in out:
@@ -212,17 +335,25 @@ class StaticRouteSource:
                 if Path(name).suffix.lower() in _SRC_EXTS:
                     yield Path(dp) / name
 
-    def _routes_in(self, text: str, rel: str) -> list[tuple[str, str, str]]:
-        """(object, METHOD, path) for every route declared in one file."""
-        found: list[tuple[str, str, str]] = []
+    def _routes_in(self, text: str, rel: str) -> list[tuple[str, str, str, tuple[int, int]]]:
+        """(object, METHOD, path, (first line, last line) of its handler) for every route
+        declared in one file."""
+        found: list[tuple[str, str, str, tuple[int, int]]] = []
+        lines = text.splitlines()
         if not rel.endswith(".py"):
             routers = _JS_ROUTER_NAMES | set(_JS_ROUTER_VAR.findall(text))
             for m in _JS_ROUTE.finditer(text):
                 if m[1] in routers:
-                    found.append((m[1], m[2].upper(), m[3]))
+                    open_paren = text.index("(", m.start(2))
+                    end = open_paren + 1 + len(_call_args(text, open_paren))
+                    span = (_line_of(text, m.start()), _line_of(text, end))
+                    found.append((m[1], m[2].upper(), m[3], span))
             return found
         for m in _PY_DECOR.finditer(text):
-            found.append((m[1], m[2].upper(), m[3]))
+            target = _PY_DECORATED.search(text, m.end())
+            span = (_py_def_span(lines, _line_of(text, target.start()) - 1)
+                    if target is not None else (0, 0))
+            found.append((m[1], m[2].upper(), m[3], span))
         for m in _PY_ROUTE.finditer(text):
             args = _call_args(text, m.end() - 1)
             paths = _str_args(args)
@@ -230,13 +361,17 @@ class StaticRouteSource:
             if not paths or target is None:
                 continue
             if target[2] == "class":           # a Resource: its methods are the verbs
-                verbs = _class_verbs(text, target.start(), target[1])
-            elif (meth := _PY_METHODS.search(args)):
-                verbs = [v.strip().strip("\"'").upper()
-                         for v in meth[1].split(",") if v.strip()]
+                spans = _class_verb_spans(text, target.start(), target[1])
+                verbs = [v for v in _class_verbs(text, target.start(), target[1])]
             else:
-                verbs = ["GET"]               # Flask defaults to GET
-            found.extend((m[1], v, path) for path in paths
+                if (meth := _PY_METHODS.search(args)):
+                    verbs = [v.strip().strip("\"'").upper()
+                             for v in meth[1].split(",") if v.strip()]
+                else:
+                    verbs = ["GET"]           # Flask defaults to GET
+                whole = _py_def_span(lines, _line_of(text, target.start()) - 1)
+                spans = {v: whole for v in verbs}
+            found.extend((m[1], v, path, spans.get(v, (0, 0))) for path in paths
                          for v in verbs if v.lower() in METHODS)
         return found
 
@@ -421,15 +556,22 @@ class RouteMap:
 
 def _merge(a: Route, b: Route) -> Route:
     """Combine two routes with the same key. Prefer a known auth flag and a richer param
-    list; keep the handler_file from whichever static source has one; union provenance."""
+    list; keep the handler_file, and the handler's lines, from whichever static source
+    has one; union provenance and query names."""
     source = a.source if a.source == b.source else f"{a.source}+{b.source}"
+    auth_from = a if a.auth_required is not None else b
+    lines_from = a if a.handler_file else b
     return Route(
         method=a.method,
         path=a.path if a.handler_file else b.path,
         handler_file=a.handler_file or b.handler_file,
         source=source,
-        auth_required=a.auth_required if a.auth_required is not None else b.auth_required,
+        auth_required=auth_from.auth_required,
         params=a.params if len(a.params) >= len(b.params) else b.params,
+        auth_scope=auth_from.auth_scope,
+        auth_header=a.auth_header or b.auth_header,
+        query=a.query + tuple(q for q in b.query if q not in a.query),
+        line=lines_from.line, end_line=lines_from.end_line,
     )
 
 
@@ -496,22 +638,62 @@ def routes_from_openapi(doc: dict) -> list[Route]:
         return []
     global_sec = doc.get("security")
     global_security = _security_required(global_sec) if global_sec is not None else False
+    schemes = _security_schemes(doc)
     base = _base_path(doc)
     out: list[Route] = []
     for path, item in paths.items():
         if not isinstance(item, dict):
             continue
+        shared = item.get("parameters") if isinstance(item.get("parameters"), list) else []
         for method, op in item.items():
             if method.lower() not in METHODS or not isinstance(op, dict):
                 continue
             sec = op.get("security")
             auth = _security_required(sec) if sec is not None else global_security
-            params = tuple(
-                p.get("name") for p in op.get("parameters", []) or []
-                if isinstance(p, dict) and p.get("in") == "path" and p.get("name"))
+            scope = ("operation" if sec is not None else "global") if auth else ""
+            declared = [p for p in list(shared) + list(op.get("parameters", []) or [])
+                        if isinstance(p, dict) and p.get("name")]
+            params = tuple(p["name"] for p in declared if p.get("in") == "path")
+            query = tuple(dict.fromkeys(p["name"] for p in declared if p.get("in") == "query"))
             out.append(Route(method.upper(), _join(base, path) if base else path, "",
-                             "openapi", auth_required=auth, params=params))
+                             "openapi", auth_required=auth, params=params,
+                             auth_scope=scope, query=query,
+                             auth_header=_auth_header(sec if sec is not None else global_sec,
+                                                      schemes) if auth else ""))
     return out
+
+
+def _security_schemes(doc: dict) -> dict:
+    """Scheme name -> definition, from OpenAPI 3 `components.securitySchemes` or Swagger 2
+    `securityDefinitions`."""
+    comp = doc.get("components")
+    found = comp.get("securitySchemes") if isinstance(comp, dict) else None
+    found = found if isinstance(found, dict) else doc.get("securityDefinitions")
+    return found if isinstance(found, dict) else {}
+
+
+def _auth_header(sec, schemes: dict) -> str:
+    """How to present a credential for the first scheme of a mandatory requirement: an
+    apiKey header's name, or `Authorization: Bearer` / `Authorization: Basic`. Empty for
+    a cookie or query key, or an unknown scheme: the authz probe then has no invalid-
+    credential control to send, and says so."""
+    if not isinstance(sec, list):
+        return ""
+    for req in sec:
+        for name in (req or {}):
+            s = schemes.get(name)
+            if not isinstance(s, dict):
+                continue
+            kind = str(s.get("type", "")).lower()
+            if kind == "apikey" and str(s.get("in", "")).lower() == "header" and s.get("name"):
+                return str(s["name"])
+            if kind == "http" and str(s.get("scheme", "")).lower() in ("bearer", "basic"):
+                return f"Authorization: {str(s['scheme']).capitalize()}"
+            if kind in ("oauth2", "openidconnect"):
+                return "Authorization: Bearer"
+            if kind == "basic":                       # Swagger 2
+                return "Authorization: Basic"
+    return ""
 
 
 @dataclass
