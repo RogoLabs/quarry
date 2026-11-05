@@ -409,6 +409,16 @@ def _record_provisioning(con: sqlite3.Connection, run_id: int, runtime) -> None:
                            **({"readiness": ready} if ready else {})))
     netted = prov.get("build_network", "none") != "none"
     sample = prov.get("dotenv") or ""
+    # Item 2: pulls and ADD fetches go through the daemon and BuildKit, outside the
+    # build's network: none. Each host goes on the egress ledger; a pull may have been
+    # served from the local image cache, which the daemon does not report.
+    hosts: dict[str, int] = {}
+    for f in prov.get("remote_fetches") or []:
+        hosts[f.get("host") or "?"] = hosts.get(f.get("host") or "?", 0) + 1
+    for host, n in sorted(hosts.items()):
+        db.egress(con, run_id, "validate-provision", host,
+                  note=f"{n} image or ADD fetch(es) by the docker daemon or BuildKit; "
+                       f"may have been local cache hits")
     db.set_health(con, run_id, "validate", {
         "readiness": ([f"readiness route {ready.get('request')} answered the same as a "
                        f"random path ({ready.get('status')}); it shows something is "

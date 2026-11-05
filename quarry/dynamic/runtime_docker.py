@@ -550,6 +550,141 @@ def check_dockerfiles(doc: dict, src: Path) -> None:
                                      "is not docker/dockerfile")
 
 
+# Registries a target's images may come from without the operator opting in. A pull
+# from one of these shows the operator's address to a large public registry, not to a
+# host the target picked (IMPROVEMENT-PLAN item 2, the part left open by the rebuild).
+KNOWN_REGISTRIES = frozenset({"docker.io", "ghcr.io", "quay.io", "mcr.microsoft.com",
+                              "public.ecr.aws", "gcr.io", "mirror.gcr.io",
+                              "registry.k8s.io"})
+_FROM = re.compile(r"^FROM\s+(?:--platform=\S+\s+)?(\S+)(?:\s+AS\s+(\S+))?", re.I)
+_ADD = re.compile(r"^ADD\s+(.+)$", re.I)
+_FROM_FLAG = re.compile(r"(?:^|\s)--(?:mount=\S*?)?from=([^\s,]+)", re.I)
+_ARG = re.compile(r"^ARG\s+([A-Za-z_]\w*)(?:=(\S*))?", re.I)
+_VAR = re.compile(r"\$\{?([A-Za-z_]\w*)\}?")
+
+
+def registry_of(ref: str) -> str:
+    """The registry host an image reference pulls from. Docker's rule: the first path
+    component is a host only if it has a dot or a port, or is `localhost`."""
+    first, sep, _ = ref.partition("/")
+    if sep and ("." in first or ":" in first or first == "localhost"):
+        return first.lower()
+    return "docker.io"
+
+
+def _logical_lines(text: str) -> list[str]:
+    out, cur = [], ""
+    for raw in str(text).splitlines():
+        line = raw.rstrip()
+        if line.lstrip().startswith("#") and not cur:
+            continue
+        if line.endswith("\\"):
+            cur += line[:-1] + " "
+            continue
+        out.append((cur + line).strip())
+        cur = ""
+    if cur:
+        out.append(cur.strip())
+    return [ln for ln in out if ln]
+
+
+def dockerfile_fetches(text: str, build_args: dict | None = None) -> list[dict]:
+    """Everything a Dockerfile makes the daemon or BuildKit fetch: base images (FROM),
+    images copied or mounted from (`--from=`), and `ADD` of a URL or git remote. These
+    run outside the build's `network: none`, which covers RUN steps only. ARG defaults
+    and build args are substituted; a reference still holding a variable is reported
+    with host "?". Reads text the target wrote; interprets none of it as a command."""
+    import json as _json
+    from urllib.parse import urlsplit
+    args = {k: str(v) for k, v in (build_args or {}).items() if v is not None}
+    stages: set[str] = set()
+    out: list[dict] = []
+
+    def expand(s: str) -> str:
+        return _VAR.sub(lambda m: args.get(m[1], m[0]), s)
+
+    def image(ref: str) -> None:
+        ref = expand(ref)
+        if ref.lower() == "scratch" or ref in stages or ref.isdigit():
+            return
+        out.append({"kind": "image", "ref": ref,
+                    "host": "?" if "$" in ref else registry_of(ref)})
+    for line in _logical_lines(text):
+        if m := _ARG.match(line):
+            args.setdefault(m[1], m[2] or "")
+            continue
+        if m := _FROM.match(line):
+            image(m[1])
+            if m[2]:
+                stages.add(m[2])
+            continue
+        for ref in _FROM_FLAG.findall(line):
+            image(ref)
+        if m := _ADD.match(line):
+            body = m[1].strip()
+            try:
+                parts = _json.loads(body) if body.startswith("[") else body.split()
+            except ValueError:
+                parts = body.split()
+            srcs = [p for p in parts if isinstance(p, str) and not p.startswith("--")][:-1]
+            for s in srcs:
+                # Shell form may quote: ADD "https://..." /dst (VulnLookup does).
+                s = expand(s.strip("\"'"))
+                if "://" in s:
+                    out.append({"kind": "add-url", "ref": s,
+                                "host": (urlsplit(s).hostname or "?").lower()})
+                elif s.startswith("git@"):
+                    out.append({"kind": "add-url", "ref": s,
+                                "host": s[4:].split(":", 1)[0].lower()})
+    return out
+
+
+def remote_fetches(doc: dict) -> list[dict]:
+    """Every image and URL provisioning a hardened compose document will fetch, per
+    service, plus Quarry's own sidecar. Deduplicated on (kind, ref)."""
+    seen: set[tuple[str, str]] = set()
+    out: list[dict] = []
+
+    def add(f: dict, service: str) -> None:
+        if (f["kind"], f["ref"]) not in seen:
+            seen.add((f["kind"], f["ref"]))
+            out.append({**f, "service": service})
+    for name, svc in (doc.get("services") or {}).items():
+        b = svc.get("build")
+        if b:
+            text = b.get("dockerfile_inline")
+            if text is None:
+                p = Path(b["context"]) / str(b.get("dockerfile") or "Dockerfile")
+                text = p.read_text(errors="replace") if p.is_file() else ""
+            for f in dockerfile_fetches(text, b.get("args") if isinstance(
+                    b.get("args"), dict) else None):
+                add(f, name)
+        elif svc.get("image"):
+            ref = str(svc["image"])
+            add({"kind": "image", "ref": ref, "host": registry_of(ref)}, name)
+    add({"kind": "image", "ref": SIDECAR_IMAGE, "host": registry_of(SIDECAR_IMAGE)},
+        "(quarry sidecar)")
+    return out
+
+
+def check_remote_fetches(fetches: list[dict], build_network: str) -> None:
+    """With the build network off, provisioning may still pull images, but only from
+    KNOWN_REGISTRIES, and may not ADD a URL: both would let the target pick the host
+    that learns where and when it is being analysed, and an ADD can pull content the
+    clone does not contain. The operator's --build-network opt-in allows both."""
+    if build_network != "none":
+        return
+    bad = [f for f in fetches
+           if f["kind"] == "add-url" or f["host"] not in KNOWN_REGISTRIES]
+    if bad:
+        shown = "; ".join(f"{f['service']}: {f['kind']} {f['ref']} ({f['host']})"
+                          for f in bad[:5])
+        raise ProvisioningGap(
+            f"provisioning would fetch from {len(bad)} source(s) outside the known "
+            f"registries, or ADD a URL, while the build network is off: {shown}. Pass "
+            f"--build-network to allow it")
+
+
 def _entrypoint(doc: dict) -> tuple[str, int]:
     """The service and container port a probe should address, inferred from a document
     that still has its ports (harden_compose drops them): prefer a service that
@@ -693,6 +828,9 @@ class DockerRuntime:
         doc = harden_compose(resolved, src, build_network=self.build_network,
                              mem_limit=self.mem_limit)
         check_dockerfiles(doc, src)
+        fetches = remote_fetches(doc)
+        self.provisioning["remote_fetches"] = fetches
+        check_remote_fetches(fetches, self.build_network)
         (work / "empty.env").write_text("")
         hardened = work / "compose.hardened.yml"
         hardened.write_text(yaml.safe_dump(doc, sort_keys=False))
