@@ -628,7 +628,7 @@ def dockerfile_fetches(text: str, build_args: dict | None = None) -> list[dict]:
                 parts = body.split()
             srcs = [p for p in parts if isinstance(p, str) and not p.startswith("--")][:-1]
             for s in srcs:
-                # Shell form may quote: ADD "https://..." /dst (VulnLookup does).
+                # Shell form may quote the source, as VulnLookup does: ADD "<url>" /dst.
                 s = expand(s.strip("\"'"))
                 if "://" in s:
                     out.append({"kind": "add-url", "ref": s,
