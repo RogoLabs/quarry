@@ -7,6 +7,8 @@ reachable unauthenticated, and kills one that is properly denied.
 """
 from __future__ import annotations
 
+import dataclasses
+
 import sys
 from pathlib import Path
 
@@ -129,7 +131,10 @@ def test_authz_probe_confirms_and_kills_against_a_live_target(tmp_path):
         "    volumes: ['./:/app']\n"
         "    ports: ['18081:8080']\n")
     runtime = rt.DockerRuntime(health_timeout=90)
-    running = runtime.start(runtime.detect(src), tmp_path)
+    # Readiness needs a route the app serves (IMPROVEMENT-PLAN item 16).
+    running = runtime.start(dataclasses.replace(runtime.detect(src),
+                                                ready_paths=("/openapi.json",)),
+                            tmp_path)
     try:
         exec_fn = lambda argv: runtime.probe_exec(running, argv)
         routes = fetch_openapi_routes(exec_fn, running.base_url)

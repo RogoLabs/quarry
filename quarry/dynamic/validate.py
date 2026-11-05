@@ -100,6 +100,8 @@ class ProbeEvidence:
 NO_BASELINE = "no baseline comparison recorded"
 # The reason a non-reproduction without a handled control is held back from "rejected".
 NO_CONTROL = "no control comparison recorded"
+# The reason a confirmation is held back when replaying it did not give the same result.
+DID_NOT_REPLAY = "did not replay"
 
 
 class TargetRuntime(Protocol):
@@ -219,6 +221,97 @@ def select_candidates(con: sqlite3.Connection, run_id: int, *,
         if len(out) >= limit:
             break
     return out
+
+
+def final_verdict(evidence: ProbeEvidence, replay: dict | None = None) -> tuple[str, str]:
+    """adjudicate_with_reason, then the replay rule: a confirmation whose replay did not
+    hold is needs-review with DID_NOT_REPLAY. No replay record leaves the verdict as
+    measured once (IMPROVEMENT-PLAN item 17); the advisory then says it was not
+    replayed."""
+    v, reason = adjudicate_with_reason(evidence)
+    if v == "confirmed" and replay is not None and not replay.get("held"):
+        return "needs-review", DID_NOT_REPLAY
+    return v, reason
+
+
+def replay_confirmation(probe_once: Callable[[], ProbeEvidence], *, times: int = 3,
+                        restart: Callable[[], object] | None = None) -> dict:
+    """Run the whole probe again, attack request and control together, `times` times in
+    the running instance, then once more after `restart()` if one is given.
+
+    IMPROVEMENT-PLAN item 17 and the book it came from: the one request that showed an
+    effect is run again under the same conditions, after a reset, before it counts.
+    A single disagreeing replay holds the confirmation back. A restart that fails also
+    holds it back: the effect was not shown to survive one. Every replay is kept, as
+    verdict, status line and whether the control still differed, so the advisory can
+    say exactly how often it held."""
+    runs: list[dict] = []
+
+    def once(after_restart: bool) -> None:
+        ev = probe_once()
+        runs.append({"verdict": adjudicate_with_reason(ev)[0],
+                     "reproduced": bool(ev.reproduced),
+                     "control_differed": ev.differs_from_baseline is True,
+                     "observed": (ev.observed or "")[:200],
+                     "after_restart": after_restart})
+    for _ in range(times):
+        once(False)
+    after: bool | None = None
+    note = ""
+    if restart is not None:
+        try:
+            restart()
+            once(True)
+            after = runs[-1]["verdict"] == "confirmed"
+        except Exception as e:                       # noqa: BLE001 - recorded, not raised
+            after = False
+            note = f"restart failed: {type(e).__name__}: {e}"[:300]
+    held = all(r["verdict"] == "confirmed" for r in runs) and after is not False
+    out = {"attempts": len(runs), "reproduced": sum(r["reproduced"] for r in runs),
+           "control_held": sum(r["control_differed"] for r in runs),
+           "after_restart": after, "held": held, "runs": runs}
+    if note:
+        out["note"] = note
+    return out
+
+
+def probe_identity(lens, evidence: ProbeEvidence) -> dict:
+    """What a verdict was measured with, so a later run can tell whether it still
+    applies (IMPROVEMENT-PLAN item 18): the lens, the sha256 of the module that holds
+    its probe body (any change to the probes reopens the verdict; conservative on
+    purpose), and the method and path of the first request the probe sent."""
+    method, path = _request_line(evidence.request)
+    return {"id": getattr(lens, "key", "?"), "source_sha": probe_source_sha(lens),
+            "method": method, "route": path}
+
+
+def probe_source_sha(lens) -> str:
+    """sha256 of the source module of a lens's probe body, or "" when unavailable."""
+    import hashlib
+    import inspect
+    fn = getattr(lens, "run", None)
+    try:
+        mod = inspect.getmodule(fn) if fn is not None else None
+        text = inspect.getsource(mod) if mod is not None else ""
+    except (OSError, TypeError):
+        return ""
+    return hashlib.sha256(text.encode()).hexdigest() if text else ""
+
+
+_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
+
+
+def _request_line(request: str) -> tuple[str, str]:
+    """(method, path) of the first request in a probe's replay string, query dropped.
+    Probe strings look like `GET <base_url>/api/x?q=1  (no Authorization header)`
+    or `GET <a>  vs  GET <b>`."""
+    from urllib.parse import urlsplit
+    parts = (request or "").split()
+    if len(parts) < 2 or parts[0] not in _METHODS:
+        return "", ""
+    url = parts[1]
+    path = urlsplit(url).path if "://" in url else url.split("?", 1)[0]
+    return parts[0], path or "/"
 
 
 def adjudicate(evidence: ProbeEvidence) -> str:
@@ -382,6 +475,13 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
             with db.tx(con):
                 db.set_health(con, run_id, "validate",
                               {"seed": sr.notes or []})
+        prov = getattr(runtime, "provisioning", None) or {}
+        conditions = {
+            "seed": getattr(seed, "name", None) if seed is not None else None,
+            "env_keys": sorted(prov.get("env_overrides") or []),
+            "readiness": (prov.get("readiness") or {}).get("request"),
+            "build_network": prov.get("build_network"),
+        }
         if enrich:
             # Best-effort, and both read-only: a served OpenAPI document, then a bounded
             # GET-only crawl. Neither knows a handler file, so each only adds to a static
@@ -396,9 +496,20 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
             for cand in matching:
                 routes = rmap.for_finding(cand.path)
                 evidence = lens.probe(running, cand, routes, exec_fn)
+                replay = None
+                if adjudicate(evidence) == "confirmed":
+                    # Item 17: no confirmation on one observation. The same probe runs
+                    # again in place, then after the target service restarts.
+                    restart = getattr(runtime, "restart", None)
+                    replay = replay_confirmation(
+                        lambda: lens.probe(running, cand, routes, exec_fn),
+                        restart=(lambda: restart(running, spec.ready_paths))
+                        if restart else None)
                 with db.tx(con):
-                    record_verdict(con, cand, run_id, evidence, model=lens.key)
-                v = adjudicate(evidence)
+                    record_verdict(con, cand, run_id, evidence, model=lens.key,
+                                   replay=replay, probe=probe_identity(lens, evidence),
+                                   conditions=conditions)
+                v = final_verdict(evidence, replay)[0]
                 res.verdicts.append((cand.finding_id, lens.key, v))
                 res.confirmed += v == "confirmed"
                 res.rejected += v == "rejected"
@@ -415,23 +526,36 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
 
 
 def record_verdict(con: sqlite3.Connection, candidate: Candidate, run_id: int,
-                   evidence: ProbeEvidence, *, model: str = "probe") -> int:
+                   evidence: ProbeEvidence, *, model: str = "probe",
+                   replay: dict | None = None, probe: dict | None = None,
+                   conditions: dict | None = None) -> int:
     """Write the adjudication for one probed candidate. executed_score is non-zero only
     when a probe actually ran, which is the ledger's whole point, and is 100 only for a
     confirmation: a reproduction held back for want of a baseline scores as a probe that
     ran and did not decide. The full evidence, baseline included, is stored as JSON in
     `rationale` so a disclosure report is reproducible from the DB."""
     import json
-    v, reason = adjudicate_with_reason(evidence)
+    v, reason = final_verdict(evidence, replay)
     executed = 100 if v == "confirmed" else (
         50 if v == "rejected" or evidence.reproduced else 0)
-    rationale = json.dumps({
+    body = {
         "summary": evidence.summary, "request": evidence.request,
         "observed": evidence.observed, "determinism": evidence.determinism,
         "baseline": evidence.baseline,
         "differs_from_baseline": evidence.differs_from_baseline,
         "handled": evidence.handled,
-    }, sort_keys=True)
+    }
+    if probe is not None:
+        # The evidence window the finding was flagged in. A later run carries this
+        # verdict forward only while the window, not just the flagged line, is the same.
+        row = con.execute("SELECT blob_sha FROM occurrences WHERE id=?",
+                          (candidate.occurrence_id,)).fetchone()
+        body["probe"] = {**probe, "evidence_blob": row["blob_sha"] if row else None}
+    if replay is not None:
+        body["replay"] = replay
+    if conditions is not None:
+        body["conditions"] = conditions
+    rationale = json.dumps(body, sort_keys=True)
     return db.verdict(
         con, candidate.finding_id, run_id, verdict=v, seat="dynamic", model=model,
         cwe=candidate.cwe, executed_score=executed, evidence_score=0,

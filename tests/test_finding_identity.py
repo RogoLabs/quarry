@@ -51,13 +51,26 @@ def test_lineless_findings_key_on_their_message():
     assert a != b
 
 
-#: What a controlled Layer 3 rejection stores (validate.record_verdict).
-CONTROLLED = json.dumps({"baseline": "GET /x?q=1 -> 200", "differs_from_baseline": False,
-                         "handled": True})
+def _probe(con, fid, **over):
+    """The probe identity validate.record_verdict stores (item 18): the lens, the sha
+    of its probe source as it is now, and the occurrence's evidence window."""
+    from quarry.dynamic.lenses import CATALOGUE
+    from quarry.dynamic.validate import probe_source_sha
+    lens = CATALOGUE[0]
+    blob = con.execute("SELECT blob_sha FROM occurrences WHERE finding_id=?",
+                       (fid,)).fetchone()["blob_sha"]
+    return {"id": lens.key, "source_sha": probe_source_sha(lens), "method": "GET",
+            "route": "/x", "evidence_blob": blob, **over}
+
+
+def _controlled(con, fid, **probe_over):
+    """What a controlled Layer 3 rejection stores (validate.record_verdict)."""
+    return json.dumps({"baseline": "GET /x?q=1 -> 200", "differs_from_baseline": False,
+                       "handled": True, "probe": _probe(con, fid, **probe_over)})
 
 
 def _reject(con, fid, **kw):
-    kw = {"reason": "deterministic", "rationale": CONTROLLED, **kw}
+    kw = {"reason": "deterministic", "rationale": _controlled(con, fid), **kw}
     db.verdict(con, fid, 0, verdict="rejected", **kw)
 
 
@@ -92,6 +105,41 @@ def test_only_a_controlled_deterministic_rejection_carries_forward(con, kw):
     _reject(con, fid, **kw)
     funnel.run(con, 1)
     assert oid in {r["id"] for r in con.execute("SELECT id FROM live_occurrences")}
+
+
+@pytest.mark.parametrize("change,why", [
+    ({"source_sha": "0" * 64}, "the probe that rejected it has changed since"),
+    ({"evidence_blob": "another-window"}, "code around the flagged line changed"),
+    (None, "rejected before probes recorded their identity"),
+], ids=["probe-changed", "window-changed", "no-identity"])
+def test_a_carried_rejection_reopens_when_what_it_measured_changed(con, change, why):
+    """IMPROVEMENT-PLAN item 18. finding_id keys on the flagged line(s) only, so an
+    old rejection used to outlive a fixed probe and a rewritten handler around an
+    unchanged line, and the kill reason claimed "symbol content unchanged"."""
+    oid = add(con, "bandit", "B307", "src/a.py", 10)
+    con.execute("INSERT INTO runs (id,target,clone_url,status) VALUES (0,'o/r','x','done')")
+    fid = con.execute("SELECT finding_id FROM occurrences WHERE id=?",
+                      (oid,)).fetchone()["finding_id"]
+    rationale = (json.dumps({"baseline": "GET /x -> 200", "differs_from_baseline": False,
+                             "handled": True}) if change is None
+                 else _controlled(con, fid, **change))
+    _reject(con, fid, rationale=rationale)
+    funnel.run(con, 1)
+    assert oid in {r["id"] for r in con.execute("SELECT id FROM live_occurrences")}, why
+
+
+def test_a_carried_rejection_names_its_run_probe_and_route(con):
+    oid = add(con, "bandit", "B307", "src/a.py", 10)
+    con.execute("INSERT INTO runs (id,target,clone_url,status) VALUES (0,'o/r','x','done')")
+    fid = con.execute("SELECT finding_id FROM occurrences WHERE id=?",
+                      (oid,)).fetchone()["finding_id"]
+    _reject(con, fid)
+    funnel.run(con, 1)
+    reason = con.execute("SELECT reason FROM funnel_events WHERE occurrence_id=? AND "
+                         "stage='rejected-carry-forward' AND action='kill'",
+                         (oid,)).fetchone()["reason"]
+    assert reason.startswith("rejected in run 0 by probe ") and "against GET /x" in reason
+    assert "probe source and evidence window unchanged" in reason
 
 
 def test_carry_forward_uses_the_latest_verdict(con):

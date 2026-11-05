@@ -656,7 +656,8 @@ def _rejected_carry_forward(con, run_id, rows, src, prior=()) -> StageResult:
     # The latest verdict per finding, selected explicitly. `GROUP BY ... HAVING MAX(id)`
     # leaned on SQLite's bare-column rule, which nothing guarantees for a HAVING.
     prior = {r["finding_id"]: r for r in con.execute(
-        """SELECT v.finding_id, v.verdict, v.seat, v.reason, v.rationale FROM verdicts v
+        """SELECT v.finding_id, v.run_id, v.verdict, v.seat, v.reason, v.rationale
+           FROM verdicts v
            JOIN (SELECT finding_id, MAX(id) AS id FROM verdicts
                  WHERE run_id != ? GROUP BY finding_id) latest ON latest.id = v.id""",
         (run_id,))}
@@ -664,15 +665,43 @@ def _rejected_carry_forward(con, run_id, rows, src, prior=()) -> StageResult:
         p = prior.get(r["finding_id"])
         v = p["verdict"] if p else None
         if v == "rejected" and _controlled_rejection(p):
-            _kill(con, run_id, r, sr.stage,
-                  "adjudicated `rejected` in an earlier run; symbol content unchanged")
-            sr.killed += 1
+            if why := _still_applies(p, r):
+                _kill(con, run_id, r, sr.stage, why)
+                sr.killed += 1
+            else:
+                sr.passed += 1               # reopened: the probe or the code moved
         elif v == "confirmed":
             _boost(con, run_id, r, sr.stage, "confirmed in an earlier run", 50.0)
             sr.boosted += 1
         else:
             sr.passed += 1
     return sr
+
+
+def _still_applies(v, row) -> str:
+    """The reopen condition (IMPROVEMENT-PLAN item 18). A rejection is carried forward
+    only while what it was measured against is unchanged: the same probe source, and
+    the same evidence window around the flagged line. finding_id alone keys on the
+    flagged line(s), so a changed handler around an unchanged line, or a fixed probe,
+    used to keep the old kill forever. Returns the kill reason, or "" to reopen. A
+    rejection written before probes recorded their identity reopens."""
+    import json as _json
+    try:
+        probe = (_json.loads(v["rationale"] or "{}") or {}).get("probe") or {}
+    except (ValueError, TypeError, AttributeError):
+        return ""
+    if not probe.get("source_sha") or not probe.get("evidence_blob"):
+        return ""
+    if probe["evidence_blob"] != row["blob_sha"]:
+        return ""
+    from .dynamic.lenses import CATALOGUE
+    from .dynamic.validate import probe_source_sha
+    lens = next((ln for ln in CATALOGUE if ln.key == probe.get("id")), None)
+    if lens is None or probe_source_sha(lens) != probe["source_sha"]:
+        return ""
+    where = f" against {probe.get('method')} {probe.get('route')}" if probe.get("route") else ""
+    return (f"rejected in run {v['run_id']} by probe {probe['id']}{where}; probe source "
+            f"and evidence window unchanged")
 
 
 def _controlled_rejection(v) -> bool:

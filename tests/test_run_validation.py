@@ -298,3 +298,96 @@ def test_dependency_findings_are_not_probe_candidates(scanned):
     ids = _candidate_ids(con)
     assert "f-osv" not in ids and "f-trivy" not in ids
     assert "f-secret" in ids
+
+
+# --- IMPROVEMENT-PLAN items 16 to 18: readiness routes, replay, probe identity -----
+
+def _confirming(monkeypatch, verdicts=None):
+    """The authz probe with a baseline, so it confirms. `verdicts` scripts later calls:
+    True keeps confirming, False loses the baseline difference (a replay that
+    disagrees). Returns the call counter."""
+    calls = {"n": 0}
+
+    def probe(running, cand, routes, exec_fn):
+        calls["n"] += 1
+        ev = probes.probe_broken_authz(running, cand, routes, exec_fn)
+        keep = True if verdicts is None else verdicts[min(calls["n"], len(verdicts)) - 1]
+        return replace(ev, baseline="GET /health -> 200 (unprotected sibling)",
+                       differs_from_baseline=keep)
+    monkeypatch.setattr(lenses, "CATALOGUE", tuple(
+        replace(lens, run=probe) if lens.key == "broken-authz-idor" else lens
+        for lens in lenses.CATALOGUE))
+    return calls
+
+
+class Restartable(FakeRuntime):
+    provisioning = {"build_network": "none", "env_overrides": ["INSTANCE_UUID"],
+                    "readiness": {"request": "GET /health", "status": 200}}
+
+    def __init__(self, status, fail=False):
+        super().__init__(status)
+        self.restarts, self.fail, self.spec = 0, fail, None
+
+    def start(self, spec, rundir):
+        self.spec = spec
+        return super().start(spec, rundir)
+
+    def restart(self, running, ready_paths=()):
+        self.restarts += 1
+        if self.fail:
+            raise RuntimeError("compose restart failed")
+        return {"basis": "known-route"}
+
+
+def test_a_confirmation_is_replayed_in_place_and_after_a_restart(scanned, monkeypatch):
+    con, rundir = scanned
+    calls = _confirming(monkeypatch)
+    runtime = Restartable({"/secret": "200"})
+    res = run_validation(con, 1, rundir, runtime)
+    assert res.verdicts == [("f-secret", "broken-authz-idor", "confirmed")]
+    assert calls["n"] == 5 and runtime.restarts == 1    # 1 + 3 in place + 1 after restart
+    row = con.execute("SELECT rationale FROM verdicts WHERE finding_id='f-secret'").fetchone()
+    ev = json.loads(row["rationale"])
+    assert {k: ev["replay"][k] for k in ("attempts", "reproduced", "control_held",
+                                         "after_restart", "held")} == \
+        {"attempts": 4, "reproduced": 4, "control_held": 4, "after_restart": True,
+         "held": True}
+    assert ev["probe"]["id"] == "broken-authz-idor" and len(ev["probe"]["source_sha"]) == 64
+    assert ev["probe"]["method"] == "GET" and ev["probe"]["route"] == "/secret"
+    assert "evidence_blob" in ev["probe"]
+    assert ev["conditions"] == {"seed": None, "env_keys": ["INSTANCE_UUID"],
+                                "readiness": "GET /health", "build_network": "none"}
+    # Readiness was handed the clone's parameter-free GET routes (item 16).
+    assert set(runtime.spec.ready_paths) == {"/secret", "/health", "/users"}
+
+
+def test_a_confirmation_that_does_not_replay_is_held(scanned, monkeypatch):
+    con, rundir = scanned
+    _confirming(monkeypatch, verdicts=[True, True, False, True, True])
+    res = run_validation(con, 1, rundir, Restartable({"/secret": "200"}))
+    assert res.verdicts == [("f-secret", "broken-authz-idor", "needs-review")]
+    row = dict(con.execute("SELECT * FROM verdicts WHERE finding_id='f-secret'").fetchone())
+    assert row["reason"] == "did not replay" and row["executed_score"] == 50
+    assert json.loads(row["rationale"])["replay"]["reproduced"] == 4
+    assert json.loads(row["rationale"])["replay"]["control_held"] == 3
+
+
+def test_a_restart_that_fails_holds_the_confirmation(scanned, monkeypatch):
+    con, rundir = scanned
+    _confirming(monkeypatch)
+    res = run_validation(con, 1, rundir, Restartable({"/secret": "200"}, fail=True))
+    assert res.verdicts == [("f-secret", "broken-authz-idor", "needs-review")]
+    ev = json.loads(con.execute("SELECT rationale FROM verdicts").fetchone()["rationale"])
+    assert ev["replay"]["after_restart"] is False and ev["replay"]["held"] is False
+    assert "restart failed: RuntimeError" in ev["replay"]["note"]
+
+
+def test_only_confirmations_are_replayed(scanned, monkeypatch):
+    con, rundir = scanned
+    _with_control(monkeypatch)
+    runtime = Restartable({"/secret": "403"})
+    res = run_validation(con, 1, rundir, runtime)
+    assert res.verdicts == [("f-secret", "broken-authz-idor", "rejected")]
+    assert runtime.restarts == 0
+    ev = json.loads(con.execute("SELECT rationale FROM verdicts").fetchone()["rationale"])
+    assert "replay" not in ev and ev["probe"]["id"] == "broken-authz-idor"

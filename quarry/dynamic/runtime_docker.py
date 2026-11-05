@@ -819,6 +819,18 @@ class DockerRuntime:
                            env=self._env)
         return r.returncode, (r.stdout + r.stderr)
 
+    def restart(self, running: RunningTarget, ready_paths: tuple[str, ...] = ()) -> dict:
+        """Restart the target's own service and wait for readiness again. Used to replay
+        a confirmation after a reset (IMPROVEMENT-PLAN item 17). Restarts the entrypoint
+        service only: its datastores keep what seeding created, so the seeded accounts
+        still exist, and in-process state (caches, counters, sessions) is gone."""
+        if not running.project or not running.compose_file or not running.service:
+            raise DockerError("restart needs the project, compose file and service "
+                              "recorded at start")
+        self._compose(running.project, Path(running.compose_file), "restart",
+                      running.service, timeout=self.up_timeout)
+        return self._await_health(running.network, running.base_url, ready_paths)
+
     def _sidecar_get(self, net: str, url: str) -> tuple[int, bytes]:
         """One GET from a sidecar on the isolated network. -> (status, body). Status 0
         means no HTTP answer at all (refused, reset, timed out)."""
