@@ -131,7 +131,16 @@ under it.
   host` reports `CapEff` and `CapBnd` of exactly `0x4fb` and `NoNewPrivs: 1`; a build
   whose RUN step fetches a URL fails as a provisioning gap. Removing `network: none` or
   `cap_drop` makes the matching live test fail.
-- **Still open.** Image pulls and Dockerfile `ADD <url>` are fetched by the daemon and
+- **Done 2026-11-05 (f0c3e28).** `prepare` lists every image and URL provisioning
+  fetches outside `network: none` (compose images, FROM, `--from=<image>`, ADD of a URL
+  or git remote, with ARG defaults substituted) into `provisioning.remote_fetches`.
+  With the build network off, an ADD of a URL, an image from a registry outside
+  `KNOWN_REGISTRIES`, or an unresolved reference is a `ProvisioningGap`;
+  `--build-network` allows it. Every fetch host, the curl sidecar included, goes on the
+  egress ledger as `validate-provision`. Measured on run 3's VulnLookup clone, prepare
+  only: five docker.io images and one ADD from github.com, which needs
+  `--build-network`, as VulnLookup's apt and poetry RUN steps already did.
+- **Was still open.** Image pulls and Dockerfile `ADD <url>` are fetched by the daemon and
   BuildKit, not by RUN, so they still reach the network during provisioning. What they
   can carry out is the URL itself, built from the clone's own content, since no
   operator value is interpolated any more. Private registry images cannot be pulled,
@@ -178,6 +187,24 @@ kills that finding in every later run.
   probes record no baseline or control. Their results are all needs-review until each
   gets one. Probes still pick routes from the finding's file, not the finding's own
   route; that needs the route map to resolve a line to a handler.
+
+**Done 2026-11-05, the open part (merged in 1a534a1).** Every probe class now records
+a control and can confirm and reject, and every probe decides only on the finding's own
+route. Static routes carry their handler's line span, and `Route.encloses(path, line)`
+picks the route whose handler holds the finding's line; on any other route a probe
+records what it measured and leaves `differs_from_baseline` unset, so the verdict is
+needs-review. A rejection also needs a parameter the handler is known to read. Authz
+(anonymous) counts only a per-operation security requirement as declared protection
+and never rejects; on the VulnLookup clone 146 of 400 routes carry the spec's
+requirement and all 146 are spec-wide. Rate limit sends a lone request, then 20 back to
+back in one curl run, and reproduces on sameness (`reproduces_when: same`). XSS pairs a
+benign token with `"'><marker>`. Command injection uses `echo $((a*b))` and a replayed
+`sleep 2`. Traversal reads /etc/passwd in the container. SSRF uses the target's own
+root page as an internal-only canary. A live fixture run decided 12 of 12 cases as
+designed. Merging it with item 17 needed one fix: replay counts a held control by the
+direction-aware comparison, since a rate-limit confirmation does not differ from its
+baseline. Still open: the timing probe has no baseline comparison, SQLi never rejects,
+and a rate-limit rejection is not carried forward (the conservative side).
 
 ### 4. Needs-review counts as adjudicated [code]
 
@@ -239,9 +266,20 @@ candidates survived refutation.
   - Run 1's research row still says `running`; its pid is not alive and its last
     heartbeat was 2026-10-28. Without the liveness check its 1,708 candidates would
     never enter.
-- **Not done:** the real DB has not been funnelled. `quarry funnel 1` and
-  `quarry funnel 2` apply the above. The 14 deferred candidates whose refuters all
-  errored need a re-refute path; `--resume` only refutes findings with none.
+- **Was not done:** the real DB had not been funnelled, and the 14 deferred
+  candidates whose refuters all errored had no re-refute path.
+- **Done 2026-11-05.** The re-refute path (fd2fb4d): the refute pass asks a model again
+  when its only record on a finding is an error, and `valid_refutations` counts only
+  refuted and survives records, so an error now shows as a refuter error. Not run: it
+  needs the local models and `quarry deep --resume <run>`, then a funnel pass.
+  The live DB was funnelled (decision E) after a SQLite backup to
+  `~/Library/Application Support/Quarry/backups/quarry-2026-11-05-before-funnel.db`
+  (integrity ok) and a rehearsal on a copy that gave identical numbers. Run 1: 1,717
+  entered, 6 survive, 1,693 killed and 12 deferred at the Layer 2 gate; live 1,983 to
+  272. Run 2: 232 entered, 1 survives, 229 killed and 2 deferred; live 271 to 40.
+  Ledger drift 0, `quick_check` ok. Opening the DB applied migration v9 (items 20, 21),
+  so it is now at schema version 9. Rows whose latest event is a Layer 2 defer: 12 in
+  run 1, 2 in run 2, 302 in run 3.
 
 ---
 
@@ -490,6 +528,28 @@ no state-changing GETs, no `|safe` on stored data, and advisory reads confined t
   - `valid_refutations` with a forged `model` key;
   - curl path normalisation (`--path-as-is`).
 
+**Done 2026-11-05 (merged in 40650cd).** All six, in six new test files (123 tests).
+Three exposed real bugs, fixed in the same commits. `rel_or_none` raised on a `uri`
+that was not a string, so one malformed SARIF entry failed the whole tool instead of
+costing one finding. `valid_refutations` counted every stored record, so a pre-fix
+record naming the author's own family as `survives` defended a candidate both real
+cross-family refuters had refuted; only records naming another family's model now
+count. curl's dot-segment removal sent the traversal probe's
+`/files/../../../../../../etc/passwd` as `GET /etc/passwd` (measured with curl 8.7.1
+and in the curlimages/curl:8.11.1 sidecar); every probe request now passes
+`--path-as-is`. Hostile compose files also go through the real `docker compose config`
+and through compose's re-reading of the hardened file. Every probe lens is swept
+against 404, 405 and no answer, plus one full validate loop. The funnel is checked over
+four passes with arrivals between them.
+
+Side findings from that work, not acted on: a structurally damaged SARIF result (a
+location or message that is not a mapping) fails the whole tool, loudly, rather than
+one finding; a non-integer `startLine` would raise in `extract_evidence` inside
+`_persist` (read from the code, not run); a refuter's `{"verdict": "error"}` record is
+not counted in `refuter_errors`, so the gate's "N refuter error(s)" can say 0 when
+every refuter errored; and a pre-fix record that names the other real refuter cannot
+be told from a genuine one.
+
 ---
 
 ## Order of work
@@ -507,6 +567,25 @@ no state-changing GETs, no `|safe` on stored data, and advisory reads confined t
 - **A. Grype.** Add an adapter, or stop syncing its DB (3,358 MB on disk). My default: stop syncing
   it. It is the same `sca-db` class as OSV and Trivy, so `sca-merge` would fold its
   findings into theirs. It adds a network step and disk for little new signal.
+- **Settled 2026-11-05.** A: Grype is no longer synced (08be19b); a copy on disk is
+  left for Jerry to delete, and `db status` names its path. Secrets are exempt from
+  path-class's generated-path rule (f926f25). Opengrep versions other than 1.27.1 get a
+  health warning (d41e805). The cross-user probe (D) and funnelling the live runs 1
+  and 2 (E) were approved; their results are recorded where they are done.
+- **F. The Layer 2 refuter (new, 2026-11-05).** Item 21's replay measured 0 of 7
+  plants surviving refutation, every kill resting on a check the code does not have.
+  Options: make a refutation that names a guard quote that guard (a `counter_quote`
+  that must verify against the source, as claims already must); or let one surviving
+  family keep a finding alive instead of requiring a defence. My default: require a
+  verified counter-quote for any "it is guarded" refutation, then rerun the replay.
+- **G. Run 1's two deep survivors.** Record your reading with
+  `quarry deep-verdict 1 intended --note "..."` and the same for 141, if it is still
+  that both are intended behaviour.
+- **H. Disk.** The unused Grype database (3,358 MB) and the backup above can be
+  deleted when you are done with them.
+- **I. Re-refute.** `quarry deep --resume <run>` and a funnel pass would give the
+  deferred Layer 2 rows (12, 2 and 302 in runs 1 to 3) their missing verdicts. It runs
+  the local models for a while; not started.
 - **B. Gate `quarry validate` now.** Settled: the gate shipped in 97f7175 and is
   removed again now that item 2's rebuild is in.
 
@@ -616,7 +695,19 @@ record still depends on the feeders. An empty instance also returns 200 (not 404
 CVE lookup, so per-route empty-vs-seeded behaviour must be checked before trusting a
 verdict.
 
-**Still open (needs Jerry's decision):** the authenticated cross-user probe that *uses*
+**Done 2026-11-05 (decision D, merged in 1a534a1).** The cross-user probe is built.
+A recipe declares its per-user resources (`seed.CrossUser`, `OwnedResource`). The
+`vulnlookup` recipe also creates `quarry_user2`, so sightings and comments are tested
+between two commenter peers; bundles are the admin's record addressed by
+`quarry_user`. The owner creates two canary records through the target's own API in
+the contained instance; the anonymous client is the control and the owner's own
+request the baseline; delete and modify are judged by effect; both canaries are
+deleted afterwards and the verdict names them, never a key. A live fixture run
+confirmed a cross-user delete on a buggy handler, rejected it on an ownership-checked
+one, and left neither canary behind. Not yet run against a live VulnLookup: its paths
+and bodies were read from source and pinned against the static extractor.
+
+**Was still open (needed Jerry's decision):** the authenticated cross-user probe that *uses*
 the two accounts and their keys. The keys are captured and on the RunningTarget; no probe
 reads them yet. That probe body is new, measured, read-only logic and is deferred for a
 go-ahead.
@@ -725,6 +816,17 @@ passes, and so does any HTTP service on that port that is not the target.
   matching the committed one. Store the request, status and body hash in
   `manifest.validate.readiness` and refuse to probe without it.
 
+**Done 2026-11-05 (aec8c1a).** Readiness now needs an answer below 500 at the base URL,
+then one of the clone's own parameter-free GET routes (committed spec first, then
+static, from `validate.readiness_paths`) answering with something other than 404, 405
+or 5xx. The request, status and body sha256 go to `manifest.validate.readiness`, with a
+random path's answer beside it; when the two match, the route did not tell the app from
+a catch-all, and the run page warns. No such route, or none answering before the
+deadline, raises and nothing is probed. Measured live on Docker 29.9.2 with the
+containment test's `http.server` target: `GET /` 200, random path 404. The served-spec
+comparison in the plan was not built; the committed spec's routes are among the
+candidates instead. Not checked against VulnLookup, whose build takes about 30 minutes.
+
 ### 17. A confirmation is one observation [code]
 
 `reproduced=True` comes from a single request, and `determinism` is set by the probe
@@ -737,6 +839,14 @@ updating the research state.
   (my default: three times in the running instance, then once after restarting the
   target service) and store every replay. If any replay disagrees, the verdict is
   needs-review with the reason `did not replay`.
+
+**Done 2026-11-05 (dae40c2).** A probe that confirms runs again, attack and control
+together, three times in place and once after `DockerRuntime.restart` restarts the
+entrypoint service and waits for readiness again (datastores keep seeded accounts).
+Every replay is kept in the rationale as `replay` {attempts, reproduced, control_held,
+after_restart, held, runs}. One disagreeing replay, or a failed restart, gives
+needs-review with reason `did not replay`. A verdict with no replay record is left as
+measured once. Tested with scripted probes through `run_validation`; not run live.
 
 ### 18. Carry-forward has no reopen condition [code]
 
@@ -754,6 +864,15 @@ only the flagged lines are compared.
   blob all match; otherwise reopen and say which one changed. This is conservative: an
   unrelated edit inside the window also reopens. Correct the kill reason text.
 
+**Done 2026-11-05 (dae40c2).** Verdicts store `probe` {id, source_sha of the probe
+module, method, route, evidence_blob} and `conditions` {seed, env_keys, readiness
+request, build_network}. The funnel carries a controlled rejection forward only while
+the probe module's sha and the occurrence's evidence window both still match, else it
+reopens; a rejection without that identity reopens. The kill reason names the run,
+probe and route. Hashing the whole probe module is deliberately coarse: any probe edit
+reopens every rejection, which costs a re-probe, never a missed finding. The live DB
+holds 2 verdicts, both needs-review (checked today), so nothing stored changes.
+
 ### 19. Advisories omit conditions and limits [code]
 
 `render_report` has no section for the conditions a maintainer needs to reproduce:
@@ -767,6 +886,25 @@ class prior, not demonstrated impact.
 - **Fix:** add Conditions, Limitations and weakest link, and Prior advisories checked
   (a miss there does not show the issue is new). Check HEAD before drafting. Label
   severity as a class default until a human sets a vector.
+
+**Done 2026-11-05 (merged in f7fe893).** Advisory drafts now have a Conditions
+section: commit, route and method, probe id and source hash, anonymous or seeded role,
+seed recipe, `--env` names, build network, memory, .env source and compose service.
+Each comes from the verdict's `replay`, `probe` and `conditions` keys when present and
+from the run manifest otherwise, marked "recorded for the run" when taken from the
+manifest and "not recorded" when absent. `run_validation` now records `validate.seed`
+and `validate.service`. Severity is labelled a class default, and a separate Confidence
+section comes from the verdict and its replay counts. Without replay evidence the draft
+says the result was observed once and was not replayed; the "measured, reproducible
+observation" line is gone. Limitations names one weakest link. Prior advisories are
+searched offline in the local OSV zips by package name and repository URL: measured on
+the live copy (283,287 records), 3.2 to 3.4 s per lookup; django matched 339, and the
+three targets Quarry has run matched none. SECURITY.md presence is stated. HEAD is not
+re-checked, because the clone is depth 1 and there is no network, and the draft says
+so. Credential headers and credential-shaped query values in the evidence are redacted.
+Still open: a HEAD re-check, and a real package name for the OSV name match in place of
+the repository name. No real `quarry report` was run: the live DB has no confirmed
+verdict.
 
 ### 20. Layer 2 has no record of intended behaviour [file]
 
@@ -783,6 +921,19 @@ the model needs the project's documented rules and records of earlier pitfalls.
   with a note) and have the next deep run on that target read it. Treat the spec as
   evidence with limits: VulnLookup's global `apikey` requirement over-declares.
 
+**Done 2026-11-05 (merged in 648f6cd).** The authz hunt prompt and every refute prompt
+carry a declared-access block (`research/intent.py`): middleware and decorators on each
+route, plus the committed OpenAPI document, with a spec-wide requirement that no
+operation overrides named as over-declaration. On run 3's VulnLookup clone: 155
+operations, a global `apikey`, 0 with their own `security`; 417 routes, 282 with a
+guard. Human verdicts are rows in migration v9's append-only `deep_verdicts` table:
+`quarry deep-verdict <id> intended|real|unclear --note "..."` records one and
+`quarry deep-survivors <run>` lists survivors as new or previously judged. A later run
+matches on lens and file plus enclosing symbol or overlapping quote; an `intended`
+match reaches the refuter with the note and is never dropped. Not done: run 1's two
+verdicts (#1, #141; Jerry's reading to record), showing verdicts in the dashboard and
+digest, and Django URLconf routes, so the block is empty on Django targets.
+
 ### 21. Layer 2 changes are not compared against a fixed set
 
 I found no before/after measurement on a fixed set for the Layer 2 changes since run 1
@@ -791,12 +942,45 @@ defines a planted-bug corpus, and nothing runs it. A small replay (two Leg A rep
 few plants) scoring missed plants, unsupported claims and wall time, with models and
 budget held fixed, would show which changes helped. A tie is a valid result.
 
+**Done 2026-11-05 (merged in 648f6cd).** `tests/fixtures/replay/` holds two synthetic
+services (a Flask notes app and an Express ticket API) with 7 plants and the answer key
+outside them. `quarry deep-replay` runs them through the real runner on a scratch
+database and records models, digests, Ollama version, budget, sampling and a corpus
+hash; `quarry deep-replay-compare` calls a tie a tie and flags changes within noise.
+Measured with qwen3-coder:30b and devstral:24b, temperature 0, seed 42:
+
+| Run | Missed at hunt | Missed after refutation | Unsupported claims | Wall |
+|---|---|---|---|---|
+| Route intent off | 2/7 | 7/7 | 3/15 | 378 s |
+| Repeat of that run | 2/7 | 7/7 | 2/15 | 373 s |
+| Route intent on | 1/7 | 7/7 | 3/16 | 427 s |
+
+**The refute pass killed all 46 claims, plants included,** by citing checks the code
+does not have (a `secure_filename` call, an `auth.requireAdmin` guard, a
+`visibleTicket` filter); with the declared access in the prompt a refuter still claimed
+`reset_password` carries `admin_required`. On this set the refuter as prompted has no
+recall: item 3's asymmetry inside Layer 2. Route intent found one plant the two
+intent-off runs missed, within the noise the repeat measured (3 of 15 claims differed
+between identical runs). The refuter was not changed; see decision F.
+
 ### 22. No text view of a run for an agent [code]
 
 `quarry runs` lists runs. The run page's per-tool outcomes, health warnings, funnel
 table and verdicts exist only in the dashboard, so an agent reconstructs them with ad
 hoc SQL. A `quarry status <run>` built on `web/queries.py` (not a second copy of the
 logic) would give both the same view.
+
+**Done 2026-11-05 (merged in 0e2f87d).** `quarry status <run>` prints a run as
+`key: value` lines, and `--json` prints the same document, built only from
+`web/queries.py` (`run_summary`, `funnel_stages`, `verdict_counts`, `advisories`, plus
+two small additions there, `verdict_counts_by_seat` and `scan_outcome`). It covers the
+run header, each scanner's outcome and coverage counts, health warnings by source, every
+funnel stage with in, kill, defer, merge, boost, restored and out, verdicts by state and
+seat, and advisories. Text from a target or tool is scrubbed of control and bidi
+characters and flattened to one line. Against a read-only backup of the live database,
+run 3 printed 12 stages from 6,297 in to 765 out with drift 0. Not done: `run.html`
+keeps its own copy of the outcome logic, and status leaves out the quarantine and egress
+tables.
 
 ### 23. Bandit, Checkov and Gitleaks also skip trees without saying so [measured]
 
@@ -871,7 +1055,15 @@ Gitleaks also reports a token in a root `package-lock.json` `resolved` URL.
 - Tests: 7 in `test_scanner_argv.py`. Three are live (Bandit, Checkov, Gitleaks on
   planted trees) and each fails on the previous argv or environment. The others cover
   the argv, the config's contents and version, and the link refusal.
-- Not done: the `quarry doctor` fixture sweep across all tools.
+- The `quarry doctor` fixture sweep: **done 2026-11-05 (merged in 0e2f87d)** as
+  `quarry doctor --coverage` (`quarry/scanners/sweep.py`). It plants this fixture, plus
+  a workflow with a template injection for zizmor, runs every installed adapter through
+  its own `Scanner.run`, and exits 1 when a tool returns nothing from a planted file it
+  is expected to read (expectations are per file and per tool). Measured: all 7 tools
+  pass in 32 s, 26 s of it Opengrep. With the four pre-fix configurations put back, it
+  reported the same losses measured by hand above, and for Opengrep (python and
+  dockerfile trees, no flag) 7 of 12 directories. A machine without the offline
+  databases is unit-tested only.
 
 ### 24. Opengrep fallback loses its logs, and the run page mislabels it [code]
 
