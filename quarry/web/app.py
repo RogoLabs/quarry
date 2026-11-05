@@ -40,6 +40,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .. import config, db
 from ..research.ensemble import FAMILY as _MODEL_FAMILY, family as _family
+from ..taint import _CONTROL as _TAINT_CONTROL
 from . import queries as q
 
 # Offered in the UI. Ordered so the default selection spans families.
@@ -230,14 +231,19 @@ def tail_path(text: str, limit: int = 34) -> str:
     return text if len(text) <= limit else "\u2026" + text[-(limit - 1):]
 
 
-#: Characters that change how surrounding text is displayed without being displayed
-#: themselves: bidi embeddings and overrides (U+202A-202E), bidi isolates
-#: (U+2066-2069), zero-width spaces, joiners and directional marks (U+200B-200F), the
-#: Arabic letter mark (U+061C) and the zero-width no-break space / BOM (U+FEFF).
-#: Every one of them can arrive from a scanned repository in a path, a rule id, a
-#: message, a code line or a model's quote, and an RLO in a filename is enough to make
-#: `evil.py` read as something else on the screen whose job is to show what is true.
-_INVISIBLE = re.compile("[‪-‮⁦-⁩​-‏؜﻿]")
+#: Characters that change how surrounding text is displayed, or are not displayed at
+#: all: bidi embeddings, overrides and isolates, zero-width spaces, joiners and marks,
+#: the BOM, and the rest of the set the taint boundary strips (C0 and C1 controls but
+#: tab, newline and carriage return, soft hyphen, word joiners and invisible
+#: operators, line and paragraph separators, the Unicode tag block). Every one can
+#: arrive from a scanned repository in a path, a rule id, a message, a code line or a
+#: model's quote, and an RLO in a filename is enough to make `evil.py` read as
+#: something else on the screen whose job is to show what is true.
+#:
+#: It was a narrower list of its own, so a character the taint boundary knew about
+#: (a word joiner, a tag character) could reach the page unmarked in any text stored
+#: before scrubbing, or never scrubbed. One definition now serves both.
+_INVISIBLE = _TAINT_CONTROL
 
 
 def visible(text) -> Markup:

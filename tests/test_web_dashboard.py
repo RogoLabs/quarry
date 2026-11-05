@@ -768,6 +768,86 @@ def test_report_is_behind_when_a_confirmed_verdict_has_no_draft(seeded):
     assert "1 confirmed verdict(s) with no draft" in stages["Report"]["detail"]
 
 
+# ============================================================ 9. smaller
+
+def test_an_empty_band_does_not_claim_everything_was_suppressed(seeded):
+    """P3 item 9. The band-filter empty state said "every finding was suppressed"
+    while 1,983 occurrences were live."""
+    client, con = seeded
+    page = client.get("/runs/1/triage?band=known-good").text
+    assert "Every finding was suppressed" not in page
+    live = q.run_summary(con, 1)["live"]
+    assert "No producer in the <b>known-good</b> band" in page
+    assert f"{live} occurrence(s) are live" in page and 'href="/runs/1/triage"' in page
+
+
+def test_when_only_held_candidates_are_live_triage_says_so(seeded):
+    client, con = seeded
+    for g in q.producer_groups(con, 1):
+        _post(client, f"/producers/{g.producer_id}/dismiss", {"run_id": 1})
+    assert "Every finding was suppressed" in client.get("/runs/1/triage").text, \
+        "the true case keeps its message"
+    _deep_candidate(con)
+    page = client.get("/runs/1/triage").text
+    assert "Every finding was suppressed" not in page
+    assert "All 1 live occurrence(s) are deep-review candidates" in page
+
+
+INVISIBLE_NOW = {"⁠": "‹U+2060›", "­": "‹U+00AD›", "\x1b": "‹U+001B›",
+                 " ": "‹U+2028›", "\U000e0041": "‹U+E0041›", "᠎": "‹U+180E›"}
+
+
+def test_the_page_marks_everything_the_taint_boundary_strips(seeded):
+    """`_INVISIBLE` was narrower than `taint._CONTROL`: a word joiner, a soft hyphen,
+    an escape, a line separator or a tag character reached the page unmarked."""
+    from quarry import taint
+    from quarry.web.app import _INVISIBLE, visible
+    assert _INVISIBLE is taint._CONTROL, "one definition for both"
+    for ch, token in INVISIBLE_NOW.items():
+        assert str(visible(f"a{ch}b")) == f"a{token}b", repr(ch)
+    for keep in ("\t", "\n", "\r"):
+        assert str(visible(f"a{keep}b")) == f"a{keep}b", "layout characters stay"
+
+    client, con = seeded
+    from test_funnel import add
+    oid = add(con, "bandit", "B998", "src/wj⁠x.py", 4,
+              message="tag\U000e0041 esc\x1b")
+    con.commit()
+    page = client.get(f"/evidence/{oid}").text
+    for ch in ("⁠", "\U000e0041", "\x1b"):
+        assert ch not in page, repr(ch)
+    assert "wj‹U+2060›x.py" in page and "tag‹U+E0041›" in page
+
+
+def test_a_failed_htmx_request_is_shown_not_swallowed(seeded):
+    """htmx 2 does not swap a 4xx or 5xx, so the error text every route returns to an
+    htmx request never reached the screen."""
+    client, _ = seeded
+    for route in ("/runs/1/triage", "/runs/1", "/research"):
+        page = client.get(route).text
+        assert 'id="hxerr" role="alert" hidden' in page, route
+        assert "htmx:responseError" in page and "htmx:sendError" in page
+    script = page.split("htmx:responseError", 1)[1].split("</script>", 1)[0]
+    assert "textContent" in script and "innerHTML" not in script
+    # and the routes do send text an htmx caller can show
+    r = client.get("/evidence/999999", headers={"HX-Request": "true"})
+    assert r.status_code == 404 and "No such occurrence." in r.text
+
+
+def test_a_stopped_research_run_does_not_refetch_on_click(seeded, worker):
+    """A div with hx-get and no hx-trigger fires on click, so a stopped run's panel
+    refetched itself on every click inside it."""
+    client, con = seeded
+    _stopped_research(con)
+    panel = client.get("/research/1").text.split('id="progress"', 1)[1].split(">", 1)[0]
+    assert "hx-get" not in panel and "hx-trigger" not in panel
+    con.execute("UPDATE research_runs SET status='running', pid=?, heartbeat=? WHERE id=1",
+                (worker.pid, _utc_now()))
+    con.commit()
+    panel = client.get("/research/1").text.split('id="progress"', 1)[1].split(">", 1)[0]
+    assert 'hx-get="/research/1/progress"' in panel and "every 10s" in panel
+
+
 def test_a_scanner_occurrence_has_no_deep_review_section(seeded):
     client, con = seeded
     oid = con.execute("SELECT id FROM live_occurrences WHERE run_id=1 LIMIT 1"

@@ -76,9 +76,41 @@ if(t==='light'||t==='dark')d.dataset.theme=t;else if(t!=='system')d.dataset.them
   </header>
 
   <main id="main" tabindex="-1">
+    {#  Where an htmx request that failed says so. htmx 2 does not swap a 4xx or 5xx
+        response, so the error text every route returns to an htmx request was
+        thrown away and a failed click simply did nothing. #}
+    <div class="banner err" id="hxerr" role="alert" hidden>
+      <span id="hxerr-text"></span>
+      <button type="button" class="ghost xs" id="hxerr-close">Dismiss</button>
+    </div>
     {% block body %}{% endblock %}
   </main>
 </div>
+
+<script>
+/* The message is read out of the response as text and written with textContent, so
+   whatever the response holds is shown, never parsed into the page. */
+(function () {
+  var box = document.getElementById('hxerr'),
+      text = document.getElementById('hxerr-text');
+  function show(msg) { text.textContent = msg; box.hidden = false; }
+  document.getElementById('hxerr-close').addEventListener('click', function () {
+    box.hidden = true;
+  });
+  document.body.addEventListener('htmx:responseError', function (e) {
+    var x = e.detail.xhr, said = '';
+    try {
+      said = new DOMParser().parseFromString(x.responseText || '', 'text/html')
+        .body.textContent.trim();
+    } catch (err) {}
+    show(x.status + ': ' + (said || x.statusText || 'the request failed'));
+  });
+  document.body.addEventListener('htmx:sendError', function () {
+    show('The dashboard did not answer. Is `quarry serve` still running?');
+  });
+  document.body.addEventListener('htmx:afterSwap', function () { box.hidden = true; });
+})();
+</script>
 
 <script>
 /* Three states: dark -> light -> system -> dark. Dark is the default and is the

@@ -124,10 +124,24 @@
         </span>
       </a>
     {% endfor %}
+    {#  Each empty state names the reason the list is empty. "Every finding was
+        suppressed" used to show under a band filter with 1,983 occurrences live. #}
     {% if not groups %}
       {% if verdict %}
       <p class="dim pad">No live finding in this run has a latest verdict of
         <b>{{ verdict|visible }}</b>. <a href="/runs/{{ run.id }}/validation">See every verdict</a>.</p>
+      {% elif band %}
+      <p class="dim pad">No producer in the <b>{{ band|visible }}</b> band.
+        {{ run.live }} occurrence(s) are live in this run.
+        <a href="{{ here }}">Show every band</a>.</p>
+      {% elif run.live and run.held >= run.live %}
+      <p class="dim pad">All {{ run.live }} live occurrence(s) are deep-review candidates
+        no funnel pass has seen, so none is listed yet. Run
+        <code>quarry funnel {{ run.id }}</code>, or
+        <a href="/runs/{{ run.id }}?arrived=1">see them</a>.</p>
+      {% elif run.live %}
+      <p class="dim pad">No producer to list, though {{ run.live }} occurrence(s) are
+        live. <a href="/runs/{{ run.id }}">Audit the funnel</a>.</p>
       {% else %}
       <p class="dim pad">Nothing live. Every finding was suppressed.
         <a href="/runs/{{ run.id }}">Audit the funnel</a>.</p>

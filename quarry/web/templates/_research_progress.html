@@ -12,13 +12,15 @@
   under a reading cursor is exactly the reflow that stops people reading, so the count
   goes into a stable banner and the operator chooses when to reload.
 
-  When the run reaches a terminal state the wrapper drops `hx-trigger` entirely, so
-  polling stops by construction — no client-side timer to clear.
+  When the run is not running the wrapper carries no htmx attributes at all, so
+  polling stops by construction, with no client-side timer to clear. Dropping only
+  `hx-trigger` was not enough: a div with `hx-get` and no trigger fires on click,
+  so on a stopped run every click inside the panel refetched it.
 #}
 <div id="progress"
-     hx-get="/research/{{ r.id }}/progress"
-     {% if r.status in ('running', 'starting') %}hx-trigger="every 10s [document.visibilityState==='visible']"{% endif %}
-     hx-swap="outerHTML">
+     {% if r.status in ('running', 'starting') %}hx-get="/research/{{ r.id }}/progress"
+     hx-trigger="every 10s [document.visibilityState==='visible']"
+     hx-swap="outerHTML"{% endif %}>
 
   {% set pct = (100 * r.done / r.units) if r.units else 0 %}
 

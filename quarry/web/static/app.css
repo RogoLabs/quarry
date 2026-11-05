@@ -506,6 +506,14 @@
   }
   .banner.hl{border-inline-start:var(--bw-mark) solid var(--highlight)}
   .banner b{color:var(--ink)}
+  /* A request that failed. The alarm edge, not the highlight: this is the instrument
+     reporting its own failure. */
+  .banner.err{
+    display:flex;align-items:center;gap:var(--sp-8);flex:0 0 auto;
+    margin:var(--sp-8) var(--sp-16) 0;border-inline-start:var(--bw-mark) solid var(--alarm);
+  }
+  .banner.err[hidden]{display:none}
+  .banner.err > span{flex:1;overflow-wrap:anywhere}
   .facts{
     display:grid;grid-template-columns:max-content minmax(0,1fr);
     column-gap:var(--sp-16);row-gap:var(--sp-6);margin:0;
