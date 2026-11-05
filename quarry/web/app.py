@@ -332,8 +332,9 @@ def create_app() -> FastAPI:
         finally:
             c.close()
 
-    def _spawn(args: list[str], log_name: str) -> None:
-        """Start `python <args>` detached, logging to <root>/logs/<log_name>.
+    def _spawn(args: list[str], log_name: str):
+        """Start `python <args>` detached, logging to <root>/logs/<log_name>, and
+        return the process so a caller can record its pid.
 
         The child gets its own copy of the log descriptor, so the parent closes its
         handle as soon as Popen returns; it used to leak one per click.
@@ -343,10 +344,10 @@ def create_app() -> FastAPI:
         log = paths.root / "logs"
         log.mkdir(parents=True, exist_ok=True)
         with (log / log_name).open("ab") as fh:
-            subprocess.Popen([_sys.executable, *args],
-                             cwd=str(Path(__file__).resolve().parents[2]),
-                             stdout=fh, stderr=fh, stdin=subprocess.DEVNULL,
-                             start_new_session=True)
+            return subprocess.Popen([_sys.executable, *args],
+                                    cwd=str(Path(__file__).resolve().parents[2]),
+                                    stdout=fh, stderr=fh, stdin=subprocess.DEVNULL,
+                                    start_new_session=True)
 
     def latest_run(c: sqlite3.Connection) -> int | None:
         """The newest run worth opening.
@@ -687,22 +688,58 @@ def create_app() -> FastAPI:
     @app.post("/research/{rid}/resume")
     def research_resume(rid: int, hours: float = Form(8.0)):
         """Pick a dead or stopped run back up. Completed units are skipped, so this
-        continues rather than restarts. Refused while a live worker still holds it,
-        which would otherwise put two workers on one run."""
+        continues rather than restarts.
+
+        The run is claimed in the database BEFORE the worker is spawned. The check
+        used to read the status, then spawn, with nothing held in between, so two
+        clicks (or two tabs) could both see a stopped run and start two workers on the
+        same units. Now the check and the claim happen in one write transaction
+        (`BEGIN IMMEDIATE`, so a second request waits for the first to commit), the
+        claim sets status `resuming`, and the second request reads that back as
+        `starting` and is refused. The child's pid is recorded as soon as the spawn
+        returns; the worker then claims the run for itself (runner._claim). A spawn
+        that fails releases the claim, and a claim no worker ever took lapses after
+        queries.CLAIM_GRACE_SECONDS, so a run cannot be locked out for good.
+        """
         with opened() as c:
-            rows = q.research_runs(c, rid=row_id(rid))
-        if not rows:
-            raise HTTPException(404, "No such research run.")
-        row = rows[0]
-        if row["status"] in ("running", "unverified"):
-            raise HTTPException(409, f"Research run {rid} still has a live worker; "
-                                     "stop it before resuming.")
-        argv = ["-m", "quarry.cli", "deep", str(row["run_id"]),
-                "--models", ",".join(json.loads(row["models"])),
-                "--resume", str(rid)]
-        if hours and 0 < hours < float("inf"):
-            argv += ["--hours", str(hours)]
-        _spawn(argv, f"deep-run{row['run_id']}.log")
+            with db.tx(c):
+                rows = q.research_runs(c, rid=row_id(rid))
+                if not rows:
+                    raise HTTPException(404, "No such research run.")
+                row = rows[0]
+                if row["status"] in ("running", "unverified", "starting"):
+                    raise HTTPException(409, f"Research run {rid} still has a live or "
+                                             "starting worker; stop it before resuming.")
+                if not row["resumable"]:
+                    raise HTTPException(409, f"Research run {rid} is {row['status']} "
+                                             "with no unit left to run; nothing to resume.")
+                prior = c.execute("SELECT status, pid, heartbeat FROM research_runs "
+                                  "WHERE id=?", (rid,)).fetchone()
+                c.execute("UPDATE research_runs SET status=?, pid=NULL, "
+                          "heartbeat=datetime('now') WHERE id=?", (q.RESUMING, rid))
+            argv = ["-m", "quarry.cli", "deep", str(row["run_id"]),
+                    "--models", ",".join(json.loads(row["models"])),
+                    "--resume", str(rid)]
+            if hours and 0 < hours < float("inf"):
+                argv += ["--hours", str(hours)]
+            try:
+                proc = _spawn(argv, f"deep-run{row['run_id']}.log")
+            except OSError as e:
+                with db.tx(c):
+                    c.execute("UPDATE research_runs SET status=?, pid=?, heartbeat=? "
+                              "WHERE id=? AND status=? AND pid IS NULL",
+                              (prior["status"], prior["pid"], prior["heartbeat"], rid,
+                               q.RESUMING))
+                raise HTTPException(500, f"The worker could not be started ({e}). The "
+                                         "claim was released, so the run can be resumed "
+                                         "again.") from e
+            pid = getattr(proc, "pid", None)
+            if isinstance(pid, int):
+                # Only while the claim is still ours and unfilled: a worker that has
+                # already claimed the run wrote its own pid and status.
+                with db.tx(c):
+                    c.execute("UPDATE research_runs SET pid=? WHERE id=? AND status=? "
+                              "AND pid IS NULL", (pid, rid, q.RESUMING))
         return RedirectResponse(f"/research/{rid}", status_code=303)
 
     @app.post("/research/{rid}/stop")

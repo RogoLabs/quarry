@@ -226,11 +226,13 @@ def _research_in_progress(con: sqlite3.Connection, run_id: int) -> set[int]:
     """Research runs whose worker is verifiably still working. Read through the same
     liveness rule as the dashboard, never from the status column alone: run 1's deep
     review still said `running` five days after its last heartbeat, with its pid gone,
-    and trusting that would hold its 1,708 candidates out of the funnel forever."""
+    and trusting that would hold its 1,708 candidates out of the funnel forever. A
+    resume the dashboard has claimed and is starting counts too: its worker is about
+    to add to the same candidates."""
     from .web.queries import live_status        # the reader-side rule, one copy of it
     return {r["id"] for r in con.execute("SELECT * FROM research_runs WHERE run_id=?",
                                          (run_id,))
-            if live_status(dict(r))[0] in ("running", "unverified")}
+            if live_status(dict(r))[0] in ("running", "unverified", "starting")}
 
 
 def _load(con: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]:

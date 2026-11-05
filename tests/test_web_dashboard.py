@@ -13,7 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from quarry.web import queries as q             # noqa: E402
 
-from test_web import ORIGIN, _post, seeded      # noqa: E402,F401
+from test_web import (ORIGIN, _post, _utc_now, bystander, seeded,  # noqa: E402,F401
+                      worker)
 
 
 def _second_run(con, rid=2, target="o/r2"):
@@ -563,6 +564,106 @@ def test_quarry_report_records_the_digest_it_writes(seeded, monkeypatch, tmp_pat
     assert r.exit_code == 0, r.output
     d = q.digest(con, 1, None)
     assert d and d["recorded"] and d["sha256"] == dg.sha256 and d["n_findings"] == 2
+
+
+# ============================================================ 7. resume claim
+
+def _stopped_research(con, rid=1):
+    """A research run on ingest run 1, stopped with a unit left to do."""
+    con.execute("INSERT INTO research_runs (id,run_id,status,models,lenses,profile) "
+                "VALUES (?,1,'stopped','[\"a:1b\",\"c:2d\"]','[]','{}')", (rid,))
+    con.execute("INSERT INTO research_units (research_id,subsystem,weight,lens,model,"
+                "phase,status) VALUES (?,'src',1.0,'x','a:1b','hunt','pending')", (rid,))
+    con.commit()
+
+
+def _row(con, rid=1):
+    return dict(con.execute("SELECT * FROM research_runs WHERE id=?", (rid,)).fetchone())
+
+
+def test_a_second_resume_is_refused_while_the_first_is_starting(seeded, monkeypatch,
+                                                                worker):
+    """P3 item 7. Nothing locked between the status check and the spawn, so two
+    clicks started two workers on one run."""
+    import subprocess
+    client, con = seeded
+    _stopped_research(con)
+    seen = []
+    from quarry import config, db
+    db_path = config.paths().db
+    real = subprocess.Popen
+
+    def popen(argv, *a, **k):
+        # Only the worker spawn is faked; `ps`, which the liveness check runs, is real.
+        if "quarry.cli" not in argv:
+            return real(argv, *a, **k)
+        # What the database says at the moment of the spawn: already claimed. Read on
+        # a connection of this thread's own; the route runs in a worker thread.
+        other = db.connect(db_path)
+        try:
+            seen.append(_row(other)["status"])
+        finally:
+            other.close()
+        return worker                    # a live process that looks like `deep 1`
+    monkeypatch.setattr(subprocess, "Popen", popen)
+
+    assert _post(client, "/research/1/resume").status_code == 303
+    assert seen == [q.RESUMING], "the claim must be written before the spawn"
+    assert _row(con)["pid"] == worker.pid
+    assert q.live_status(_row(con))[0] == "starting"
+    assert not q.research_runs(con, rid=1)[0]["resumable"]
+
+    r = _post(client, "/research/1/resume")
+    assert r.status_code == 409 and "starting worker" in r.text
+    assert len(seen) == 1, "a second worker was started"
+    page = client.get("/research/1").text
+    assert '<span class="pill accent">starting</span>' in page
+    assert "/research/1/resume" not in page, "no Resume is offered while it starts"
+
+
+def test_a_claim_with_no_worker_lapses_and_the_run_is_resumable_again(seeded, bystander):
+    _, con = seeded
+    _stopped_research(con)
+    base = {"status": q.RESUMING, "run_id": 1}
+    assert q.live_status({**base, "pid": None, "heartbeat": _utc_now()})[0] == "starting"
+    old = _utc_now(minutes=-(q.CLAIM_GRACE_SECONDS / 60 + 1))
+    status, why = q.live_status({**base, "pid": None, "heartbeat": old})
+    assert status == "died" and "no worker started" in why
+    status, why = q.live_status({**base, "pid": 999_999_999, "heartbeat": _utc_now()})
+    assert status == "died" and "exited before claiming" in why
+    status, why = q.live_status({**base, "pid": bystander.pid, "heartbeat": _utc_now()})
+    assert status == "died" and "another program" in why, "a recycled pid is not a worker"
+    con.execute("UPDATE research_runs SET status=?, pid=NULL, heartbeat=? WHERE id=1",
+                (q.RESUMING, old))
+    con.commit()
+    assert q.research_runs(con, rid=1)[0]["resumable"]
+
+
+def test_a_failed_spawn_releases_the_claim(seeded, monkeypatch):
+    import subprocess
+    client, con = seeded
+    _stopped_research(con)
+
+    def broken(*a, **k):
+        raise OSError("no python here")
+    monkeypatch.setattr(subprocess, "Popen", broken)
+    r = _post(client, "/research/1/resume")
+    assert r.status_code == 500 and "claim was released" in r.text
+    assert _row(con)["status"] == "stopped"
+    assert q.research_runs(con, rid=1)[0]["resumable"]
+
+
+def test_a_finished_run_has_nothing_to_resume(seeded, monkeypatch):
+    import subprocess
+    client, con = seeded
+    _stopped_research(con)
+    con.execute("UPDATE research_units SET status='done' WHERE research_id=1")
+    con.commit()
+    spawned = []
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: spawned.append(a))
+    r = _post(client, "/research/1/resume")
+    assert r.status_code == 409 and "nothing to resume" in r.text and not spawned
+    assert _row(con)["status"] == "stopped", "a refused resume claims nothing"
 
 
 def test_a_scanner_occurrence_has_no_deep_review_section(seeded):

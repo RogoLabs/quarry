@@ -17,7 +17,7 @@
 #}
 <div id="progress"
      hx-get="/research/{{ r.id }}/progress"
-     {% if r.status == 'running' %}hx-trigger="every 10s [document.visibilityState==='visible']"{% endif %}
+     {% if r.status in ('running', 'starting') %}hx-trigger="every 10s [document.visibilityState==='visible']"{% endif %}
      hx-swap="outerHTML">
 
   {% set pct = (100 * r.done / r.units) if r.units else 0 %}
@@ -29,7 +29,7 @@
   <div class="card mb-3 {{ 'mark' if r.resumable }}">
     <div class="row">
       {% if r.status == 'done' %}<span class="pill verified">done</span>
-      {% elif r.status == 'running' %}<span class="pill accent">running</span>
+      {% elif r.status in ('running', 'starting') %}<span class="pill accent">{{ r.status }}</span>
       {% elif r.status == 'stopped' %}<span class="pill inert">stopped</span>
       {% elif r.status in ('died','stalled') %}<span class="pill alarm">{{ r.status }}</span>
       {% else %}<span class="pill unmeasured">{{ r.status }}</span>{% endif %}

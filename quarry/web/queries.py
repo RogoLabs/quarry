@@ -699,6 +699,63 @@ def _utc_epoch(ts: str | None) -> float | None:
         return None
 
 
+def _deep_argv(argv: list[str], pid: Any, run_id: Any) -> tuple[bool, str]:
+    """Is this command line `quarry deep <run_id> ...`? -> (verdict, why not)."""
+    is_quarry = any(t == "quarry.cli" or t == "quarry" or t.endswith("/quarry")
+                    for t in argv)
+    if not is_quarry or "deep" not in argv:
+        return False, f"pid {pid} now belongs to another program"
+    if run_id is not None:
+        i = argv.index("deep")
+        if i + 1 >= len(argv) or argv[i + 1] != str(run_id):
+            return False, f"pid {pid} is a deep review of a different run"
+    return True, ""
+
+
+#: The status the dashboard writes when it claims a research run for a resume, before
+#: it spawns the worker. Only the reader interprets it (`_resume_status`); the worker
+#: overwrites it with `running` when it claims the run itself (runner._claim).
+RESUMING = "resuming"
+
+#: How long a claimed resume may go without a worker pid before the claim counts as
+#: failed and the run can be resumed again. The pid is recorded right after the
+#: spawn returns, so this only matters when the spawn itself went wrong.
+CLAIM_GRACE_SECONDS = 120
+
+
+def _resume_status(row: dict[str, Any]) -> tuple[str, str]:
+    """`live_status` for a run the dashboard has claimed for a resume.
+
+    The claim exists so a second Resume, from another tab or a double click, is
+    refused instead of starting a second worker on the same units: the second request
+    sees `starting`, which is neither resumable nor stoppable. If the spawned process
+    is gone, or never recorded, the claim lapses to `died` and Resume is offered again.
+
+    The heartbeat check in `worker_identity` does not apply here: the heartbeat is the
+    claim's own timestamp, written before the worker existed, so the worker always
+    started after it. The command line is still checked, because pids are recycled.
+    """
+    pid = row.get("pid")
+    if pid:
+        if not _pid_alive(pid):
+            return "died", f"the resumed worker (pid {pid}) exited before claiming the run"
+        info = _ps(pid)
+        if info is None:
+            return "starting", f"resume requested; pid {pid} is alive but not yet verified"
+        ok, why = _deep_argv(info["argv"], pid, row.get("run_id"))
+        if not ok:
+            return "died", why
+        return "starting", f"resume requested; worker pid {pid} is starting"
+    claimed = _utc_epoch(row.get("heartbeat"))
+    age = None if claimed is None else max(0.0, _dt.datetime.now(
+        _dt.timezone.utc).timestamp() - claimed)
+    if age is None or age > CLAIM_GRACE_SECONDS:
+        return "died", ("a resume was requested"
+                        + (f" {_ago(age)} ago" if age is not None else "")
+                        + " and no worker started")
+    return "starting", f"resume requested {_ago(age)} ago; waiting for the worker"
+
+
 def worker_identity(row: dict[str, Any]) -> tuple[bool | None, str]:
     """Is `row['pid']` still this research run's worker? -> (verdict, why).
 
@@ -721,16 +778,9 @@ def worker_identity(row: dict[str, Any]) -> tuple[bool | None, str]:
     info = _ps(pid)
     if info is None:
         return None, "process details unavailable"
-    argv = info["argv"]
-    is_quarry = any(t == "quarry.cli" or t == "quarry" or t.endswith("/quarry")
-                    for t in argv)
-    if not is_quarry or "deep" not in argv:
-        return False, f"pid {pid} now belongs to another program"
-    run_id = row.get("run_id")
-    if run_id is not None:
-        i = argv.index("deep")
-        if i + 1 >= len(argv) or argv[i + 1] != str(run_id):
-            return False, f"pid {pid} is a deep review of a different run"
+    ok, why = _deep_argv(info["argv"], pid, row.get("run_id"))
+    if not ok:
+        return False, why
     hb = _utc_epoch(row.get("heartbeat"))
     if hb is None:
         return None, "no heartbeat recorded to check the process start against"
@@ -754,6 +804,8 @@ def live_status(row: dict[str, Any]) -> tuple[str, str]:
     stored = row.get("status") or "unknown"
     if stored in TERMINAL_STATUSES:
         return stored, ""
+    if stored == RESUMING:
+        return _resume_status(row)
     pid, hb = row.get("pid"), row.get("heartbeat")
     alive = _pid_alive(pid)
     gone = f"pid {pid} is gone"
