@@ -398,13 +398,20 @@ def _path_class_filter(con, run_id, rows, src, prior=()) -> StageResult:
     The `secrets` class is exempt from the test-path rule for the same reason. A key
     committed under `tests/` is as leaked as one under `src/`, and run 1 killed 38
     Gitleaks hits here by path alone. local-dev-fixture decides them on the value.
+
+    It is exempt from the generated-path rule too (decision 2026-11-05). A lockfile is
+    where a private registry token lands: npm writes `resolved` URLs with credentials
+    into package-lock.json, and a built bundle carries the keys its build embedded.
+    Generated or not, the token is committed. Once Gitleaks stopped skipping lockfiles
+    (item 23), this rule would have killed exactly those hits. Vendored trees still
+    apply: a secret under node_modules/ is far more often a third-party fixture.
     """
     sr = StageResult("path-class", heuristic=True)
     for r in rows:
         p = r["path"]
         cls = independence_class(r["tool"], r["rule_id"])
         rules = [(VENDOR_PAT, "vendored")]
-        if cls != "sca-db":
+        if cls not in ("sca-db", "secrets"):
             rules.append((GENERATED_PAT, "generated"))
         if cls != "secrets":
             rules.append((TEST_PAT, "test"))

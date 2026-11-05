@@ -57,6 +57,22 @@ def add(c: sqlite3.Connection, tool, rule, path, line=10, message="", raw=None,
 
 # ---------------------------------------------------------------- regressions
 
+def test_a_committed_token_in_a_lockfile_or_bundle_survives_the_path_filter(con):
+    """Decision 2026-11-05. npm writes a private registry's credentials into the
+    `resolved` URLs of package-lock.json; a built bundle carries embedded keys. Those
+    are committed secrets, so the generated-path rule does not apply to the secrets
+    class. A secret in a vendored tree is still killed as vendored."""
+    lock = add(con, "gitleaks", "github-pat", "package-lock.json", 3)
+    bundle = add(con, "gitleaks", "generic-api-key", "web/dist/app.min.js", 1)
+    vendored = add(con, "gitleaks", "github-pat", "node_modules/pkg/x.py", 1)
+    funnel.run(con, 1)
+    killed = {r["occurrence_id"]: r["reason"] for r in con.execute(
+        "SELECT occurrence_id, reason FROM funnel_events WHERE stage='path-class' "
+        "AND action='kill'")}
+    assert lock not in killed and bundle not in killed
+    assert killed[vendored].startswith("vendored path")
+
+
 def test_lockfile_sca_findings_survive_the_path_filter(con):
     """REGRESSION. The first run of `path-class` killed 107 findings on `poetry.lock`
     — 100% of the dependency-vulnerability output from both OSV-Scanner and Trivy —
