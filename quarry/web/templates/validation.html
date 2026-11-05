@@ -1,23 +1,25 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
 {% set nav = 'validation' %}
+{% set nav_run = run.id if run else none %}
 {% block title %}Validation{% if run %} · {{ run.target }}{% endif %} · Quarry{% endblock %}
 {% block body %}
 <div class="page"><div class="wrap">
   <h1>Validation</h1>
-  <p class="sub">{% if run %}run {{ run.id }} · {{ run.target }} ·
+  <p class="sub">{% if run %}<a href="/runs/{{ run.id }}">run {{ run.id }}</a> · {{ run.target }} ·
     <a href="/validation{% if state %}?state={{ state }}{% endif %}">every run</a>{% else %}every run{% endif %}</p>
+  {% if run %}{% include "_pipeline.html" %}{% endif %}
   <p class="prose mb-6">Each row is the latest verdict one seat and lens gave a finding,
     from probes run against the target in Docker. A probe that reproduced but has no
     recorded baseline is stored as needs review, not confirmed, so needs review is the
     common state.</p>
 
-  {% set q_run = ('run=' ~ run.id ~ '&') if run else '' %}
   <nav class="seg" aria-label="Filter by verdict">
-    <a href="/validation{% if run %}?run={{ run.id }}{% endif %}"
+    <a href="{{ here }}"
        class="{{ 'on' if not state }}" {% if not state %}aria-current="true"{% endif %}>all
       <span class="num">{{ counts.total }}</span></a>
     {% for s in states %}
-    <a href="/validation?{{ q_run }}state={{ s }}"
+    <a href="{{ here }}?state={{ s }}"
        class="{{ 'on' if state == s }}" {% if state == s %}aria-current="true"{% endif %}>{{ s }}
       <span class="num">{{ counts[s] }}</span></a>
     {% endfor %}
@@ -35,12 +37,7 @@
       <tbody>
       {% for v in rows %}
         <tr>
-          <td>
-            {% if v.verdict == 'confirmed' %}<span class="pill verified">confirmed</span>
-            {% elif v.verdict == 'needs-review' %}<span class="pill incomplete">needs review</span>
-            {% elif v.verdict == 'rejected' %}<span class="pill killed">rejected</span>
-            {% else %}<span class="pill inert">{{ v.verdict }}</span>{% endif %}
-          </td>
+          <td>{{ m.verdict_pill(v.verdict) }}</td>
           {#  The finding's path opens its evidence: the one action on this row, so it
               sits in the second column rather than past the horizontal scroll. #}
           <td class="mono sm">{% if v.occurrence_id %}<a href="/evidence/{{ v.occurrence_id }}">{{ (v.path or v.finding_id)|tail_path(40)|visible }}</a>{% else %}{{ (v.path or v.finding_id)|tail_path(40)|visible }}{% endif %}{% if v.symbol %}

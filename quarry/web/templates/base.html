@@ -25,6 +25,10 @@ if(t==='light'||t==='dark')d.dataset.theme=t;else if(t!=='system')d.dataset.them
 <link rel="icon" href="{{ asset('favicon.svg') }}" type="image/svg+xml">
 <link rel="stylesheet" href="{{ asset('theme.css') }}">
 <link rel="stylesheet" href="{{ asset('app.css') }}">
+{#  htmx keeps a snapshot of each page in localStorage for Back, by default. Here a
+    page holds findings from untrusted repositories and the form token, and neither
+    should outlive the tab on disk; Back reloads the page from the server instead. #}
+<meta name="htmx-config" content='{"historyCacheSize":0,"refreshOnHistoryMiss":true}'>
 <script src="{{ asset('htmx.min.js') }}" defer></script>
 <script src="{{ asset('alpine.min.js') }}" defer></script>
 {% block head %}{% endblock %}
@@ -37,12 +41,18 @@ if(t==='light'||t==='dark')d.dataset.theme=t;else if(t!=='system')d.dataset.them
       <a class="word" href="/runs">Quarry</a>
       <a class="by" href="https://rogolabs.net" rel="noopener noreferrer">by Rogo<span class="labs">Labs</span></a>
     </span>
-    {#  Pipeline order: where a run starts, then what each stage produced. #}
-    <nav aria-label="Sections">
+    {#  Pipeline order: where a run starts, then what each stage produced.
+
+        A page inside one run sets `nav_run`, and the three per-run sections then
+        link to that run's pages. Without it the nav dropped the run, so Triage
+        opened from run 1 showed whichever run was newest. #}
+    {% set _nr = nav_run|default(none) %}
+    <nav aria-label="Sections{{ ', run %d'|format(_nr) if _nr is not none }}">
+      <a href="/setup" {% if nav=='setup' %}class="on" aria-current="page"{% endif %}>Setup</a>
       <a href="/runs" {% if nav=='runs' %}class="on" aria-current="page"{% endif %}>Runs</a>
-      <a href="/triage" {% if nav=='triage' %}class="on" aria-current="page"{% endif %}>Triage</a>
-      <a href="/validation" {% if nav=='validation' %}class="on" aria-current="page"{% endif %}>Validation</a>
-      <a href="/advisories" {% if nav=='advisories' %}class="on" aria-current="page"{% endif %}>Advisories</a>
+      <a href="{{ '/runs/%d/triage'|format(_nr) if _nr is not none else '/triage' }}" {% if nav=='triage' %}class="on" aria-current="page"{% endif %}>Triage</a>
+      <a href="{{ '/runs/%d/validation'|format(_nr) if _nr is not none else '/validation' }}" {% if nav=='validation' %}class="on" aria-current="page"{% endif %}>Validation</a>
+      <a href="{{ '/runs/%d/advisories'|format(_nr) if _nr is not none else '/advisories' }}" {% if nav=='advisories' %}class="on" aria-current="page"{% endif %}>Advisories</a>
       <a href="/research" {% if nav=='research' %}class="on" aria-current="page"{% endif %}>Deep review</a>
       <a href="/egress" {% if nav=='egress' %}class="on" aria-current="page"{% endif %}>Egress</a>
     </nav>
@@ -66,9 +76,41 @@ if(t==='light'||t==='dark')d.dataset.theme=t;else if(t!=='system')d.dataset.them
   </header>
 
   <main id="main" tabindex="-1">
+    {#  Where an htmx request that failed says so. htmx 2 does not swap a 4xx or 5xx
+        response, so the error text every route returns to an htmx request was
+        thrown away and a failed click simply did nothing. #}
+    <div class="banner err" id="hxerr" role="alert" hidden>
+      <span id="hxerr-text"></span>
+      <button type="button" class="ghost xs" id="hxerr-close">Dismiss</button>
+    </div>
     {% block body %}{% endblock %}
   </main>
 </div>
+
+<script>
+/* The message is read out of the response as text and written with textContent, so
+   whatever the response holds is shown, never parsed into the page. */
+(function () {
+  var box = document.getElementById('hxerr'),
+      text = document.getElementById('hxerr-text');
+  function show(msg) { text.textContent = msg; box.hidden = false; }
+  document.getElementById('hxerr-close').addEventListener('click', function () {
+    box.hidden = true;
+  });
+  document.body.addEventListener('htmx:responseError', function (e) {
+    var x = e.detail.xhr, said = '';
+    try {
+      said = new DOMParser().parseFromString(x.responseText || '', 'text/html')
+        .body.textContent.trim();
+    } catch (err) {}
+    show(x.status + ': ' + (said || x.statusText || 'the request failed'));
+  });
+  document.body.addEventListener('htmx:sendError', function () {
+    show('The dashboard did not answer. Is `quarry serve` still running?');
+  });
+  document.body.addEventListener('htmx:afterSwap', function () { box.hidden = true; });
+})();
+</script>
 
 <script>
 /* Three states: dark -> light -> system -> dark. Dark is the default and is the

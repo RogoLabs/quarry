@@ -9,6 +9,7 @@
   shape as the operator pressed `j`, and injecting the fragment into run.html put a
   second <h1> after four <h2>s.
 #}
+{% import "_macros.html" as m %}
 <div class="dhead">
   <h2>{{ (detail.message or detail.rule_id)|visible }}</h2>
   <div class="loc">{{ detail.path|visible }}{% if detail.start_line %}:{{ detail.start_line }}{% endif %}</div>
@@ -37,6 +38,37 @@
 </div>
 
 <div class="dbody scrollable">
+
+  {#  A deep-review candidate: the facts its Layer 2 gate decided on, and the way back
+      to the research run. Every string is model output about attacker code. #}
+  {% if detail.research %}{% set rf = detail.research %}
+  <div class="sec" id="deep-review">
+    <h3>Deep review <span class="dim">· research run {{ rf.research_id }}</span></h3>
+    <div class="dtags">
+      {% if rf.quote_verified %}<span class="pill verified">quote verified</span>
+      {% else %}<span class="pill alarm">quote NOT in source</span>{% endif %}
+      <span class="pill inert">{{ rf.model|visible }}</span>
+      <span class="pill inert">family {{ rf.family|visible }}</span>
+      <span class="pill inert">lens {{ rf.lens|visible }}</span>
+      {% if rf.n_survived %}<span class="pill verified">survived ×{{ rf.n_survived }}</span>{% endif %}
+      {% if rf.n_refuted %}<span class="pill killed">refuted ×{{ rf.n_refuted }}</span>{% endif %}
+      {% if rf.refuter_errors %}<span class="pill alarm">{{ rf.refuter_errors }} refuter error</span>{% endif %}
+    </div>
+    {% if rf.refutations %}
+    <ul class="whylist">
+      {% for x in rf.refutations %}
+      <li><span class="mono">{{ (x.model or '?')|visible }}</span>: <b>{{ (x.verdict or '?')|visible }}</b>{% if x.discarded %}
+        <span class="pill incomplete">discarded: {{ x.discarded|visible }}</span>{% endif %}
+        {% if x.reason %}{{ x.reason|visible }}{% endif %}</li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="dim fs-cell">No cross-family model has answered yet.</p>
+    {% endif %}
+    <p class="fs-cell mt-2"><a href="/research/{{ rf.research_id }}#cand-{{ rf.id }}">Open this
+      candidate in deep review {{ rf.research_id }}</a></p>
+  </div>
+  {% endif %}
 
   {% if detail.redacted %}
   <div class="sec">
@@ -94,14 +126,11 @@
     {% for v in detail.verdicts %}
     <div class="verdict v-{{ v.verdict }}">
       <div class="vhead">
-        {% if v.verdict == 'confirmed' %}<span class="pill verified">confirmed</span>
-        {% elif v.verdict == 'needs-review' %}<span class="pill incomplete">needs review</span>
-        {% elif v.verdict == 'rejected' %}<span class="pill killed">rejected</span>
-        {% else %}<span class="pill inert">{{ v.verdict }}</span>{% endif %}
+        {{ m.verdict_pill(v.verdict) }}
         <span class="pill inert">{{ v.seat|visible }}</span>
         <span class="pill inert">lens {{ v.model|visible }}</span>
         <span class="vmeta">executed {{ v.executed_score }} · evidence {{ v.evidence_score }}
-          · run <a href="/validation?run={{ v.run_id }}">{{ v.run_id }}</a>
+          · run <a href="/runs/{{ v.run_id }}/validation">{{ v.run_id }}</a>
           · {{ v.created_at|local }}</span>
       </div>
       {% if v.reason %}<p class="msg">{{ v.reason|visible }}</p>{% endif %}
@@ -135,19 +164,12 @@
         {% for p in detail.provenance %}
         <tr>
           <td class="ink">{{ p.stage }}</td>
-          <td>
-            {#  `defer` is NOT `kill`. It was rendered in the same red as a kill, one
-                line from a legend saying it means "a rate limiter ran out, not
-                evidence" — the palette asserting an equivalence the schema was built
-                to refuse. A defer is unfinished work that may still be a real
-                finding; a merge is bookkeeping with no recall loss. #}
-            {% if p.action == 'kill' %}<span class="pill killed">kill</span>
-            {% elif p.action == 'defer' %}<span class="pill incomplete">defer</span>
-            {% elif p.action == 'merge' %}<span class="pill inert">merge</span>
-            {% elif p.action == 'boost' %}<span class="pill accent">boost</span>
-            {% elif p.action == 'resurrect' %}<span class="pill verified">resurrect</span>
-            {% else %}<span class="pill inert">{{ p.action }}</span>{% endif %}
-          </td>
+          {#  `defer` is NOT `kill`. It was rendered in the same red as a kill, one
+              line from a legend saying it means "a rate limiter ran out, not
+              evidence" — the palette asserting an equivalence the schema was built
+              to refuse. A defer is unfinished work that may still be a real
+              finding; a merge is bookkeeping with no recall loss. #}
+          <td>{{ m.action_pill(p.action) }}</td>
           <td class="delta">{{ '%+.0f'|format(p.score_delta) if p.score_delta else '' }}</td>
           <td class="wrap-normal dim">
             {% if not p.deterministic %}<span class="pill incomplete">recall risk</span> {% endif %}{{ p.reason|visible }}</td>
@@ -171,7 +193,9 @@
    assignments would have silently overridden the stylesheet. They live in CSS now and
    only the scroll position is set from script.
 
-   Re-runs on htmx settle so the killed-set peek centres too, not just the include. */
+   Re-runs on htmx settle so the killed-set peek centres too, not just the include.
+   This script arrives again with every swapped-in detail column, so the listener is
+   added once per page rather than once per swap. */
 (function () {
   function centre() {
     var hit = document.getElementById('hitline'),
@@ -181,6 +205,9 @@
       0, hit.offsetTop - pane.clientHeight / 2 + hit.offsetHeight / 2);
   }
   centre();
-  document.body.addEventListener('htmx:afterSettle', centre);
+  if (!window.quarryCentreBound) {
+    window.quarryCentreBound = true;
+    document.body.addEventListener('htmx:afterSettle', centre);
+  }
 })();
 </script>

@@ -1023,7 +1023,7 @@ def draft_research_digest(con: sqlite3.Connection, run_id: int, *,
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{run_id}-deep-review-candidates.md"
+    path = out_dir / digest_name(run_id)
     path.write_bytes(text)
     return ResearchDigest(path=path, n_findings=len(rows),
                           sha256=hashlib.sha256(text).hexdigest())
@@ -1037,6 +1037,33 @@ def _prior_check(ecosystem: str, package: str, clone_url: str, root: Path | None
         return vulndb.local_prior_advisories(ecosystem, package, clone_url, root=root)
     except Exception as e:                       # noqa: BLE001 - a gap, stated in the draft
         return vulndb.PriorCheck(False, f"lookup failed: {type(e).__name__}")
+
+
+def digest_name(run_id: int) -> str:
+    """The digest's file name inside a run's report directory."""
+    return f"{int(run_id)}-deep-review-candidates.md"
+
+
+def record_digest(con: sqlite3.Connection, run_id: int, digest: ResearchDigest) -> None:
+    """Note a written digest in the run manifest, so the dashboard can list it.
+
+    The digest was written to disk and recorded nowhere, so the advisories page said
+    "0 drafts" beside a file the report command had just named. It is not an
+    `advisories` row: that table keys each row to one finding and one verdict, and the
+    digest is many findings with no dynamic verdict. The manifest needs no schema
+    change and holds what the page needs: where the file is, how many findings it
+    holds, and the hash of the bytes written, so a later edit shows as a mismatch."""
+    from datetime import datetime, timezone
+    from .. import db
+    rec = {"path": str(Path(digest.path).resolve()), "sha256": digest.sha256,
+           "n_findings": digest.n_findings,
+           "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+
+    def change(m: dict[str, Any]) -> None:
+        report = m.get("report") if isinstance(m.get("report"), dict) else {}
+        report["digest"] = rec
+        m["report"] = report
+    db.update_manifest(con, run_id, change)
 
 
 def draft_reports(con: sqlite3.Connection, run_id: int, src: Path, *,

@@ -1,5 +1,7 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
 {% set nav = 'runs' %}
+{% set nav_run = run.id %}
 {% block title %}Run {{ run.id }} · {{ run.target }}{% endblock %}
 {% block body %}
 <div class="page"><div class="wrap">
@@ -23,16 +25,29 @@
   {% endif %}
 
   {#  The pipeline, left to right, each stage's count linking to its set. #}
-  <nav class="pipeline" aria-label="Pipeline for run {{ run.id }}">
-    <ol>
-    {% for st in pipeline %}
-      <li><a href="{{ st.href }}">
-        <span class="pn">{{ st.name }}</span>
-        <span class="pv">{{ st.n }}</span>
-        <span class="pu">{{ st.unit }}</span></a></li>
-    {% endfor %}
-    </ol>
-  </nav>
+  {% include "_pipeline.html" %}
+
+  {#  Every stage of this run runs from a terminal. Each row says what the stage last
+      left behind and gives the command, never a button: scan, validate and ingest
+      reach the network or stand up containers, and the dashboard starts none of it. #}
+  <details class="collapse stages-cli" id="terminal">
+    <summary>From the terminal: each stage's state and its command</summary>
+    <div class="tbl mt-2">
+      <table>
+        <caption class="sr-only">The command-line stages of run {{ run.id }}, their state, and the command for each</caption>
+        <thead><tr><th scope="col">Stage</th><th scope="col">State</th>
+          <th scope="col">Command</th></tr></thead>
+        <tbody>
+        {% for s in cli_stages %}
+          <tr><th scope="row">{% if s.href %}<a href="{{ s.href }}">{{ s.stage }}</a>{% else %}{{ s.stage }}{% endif %}</th>
+            <td class="sm">{{ m.stage_pill(s.status) }}
+              <div class="dim">{{ s.detail|visible }}</div></td>
+            <td class="sm">{{ m.cmd(s.cmd) }}<div class="dim">{{ s.note }}</div></td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
 
   {#  Four stat cards, all links. A card is a promise of a drill-down; cards that do
       not drill down teach the operator that numbers here are decoration, and that
@@ -49,13 +64,13 @@
       `suppressed` carries no kill colour: suppression is the deterministic layer
       working, and red would frame it as damage. It is a count, not a warning.    #}
   <div class="cards">
-    <a class="card" href="/triage?run={{ run.id }}">
+    <a class="card" href="/runs/{{ run.id }}/triage">
       <span class="k">raw occurrences</span>
       <span class="v">{{ run.total }}</span></a>
-    <a class="card" href="/triage?run={{ run.id }}">
+    <a class="card" href="/runs/{{ run.id }}/triage">
       <span class="k">live</span>
       <span class="v">{{ run.live }}</span></a>
-    <a class="card" href="/triage?run={{ run.id }}">
+    <a class="card" href="/runs/{{ run.id }}/triage">
       <span class="k">producers to triage</span>
       <span class="v">{{ run.producers }}</span></a>
     <a class="card" href="/runs/{{ run.id }}?suppressed=all">
@@ -69,14 +84,14 @@
       seat and lens) in that state. #}
   <h2 class="h-sec">Validation: latest verdict per finding and lens</h2>
   <div class="vcard {{ 'hl' if vc.confirmed }}">
-    <a href="/validation?run={{ run.id }}&amp;state=confirmed" class="vstat">
+    <a href="/runs/{{ run.id }}/validation?state=confirmed" class="vstat">
       <span class="pill verified">confirmed</span><span class="v">{{ vc.confirmed }}</span></a>
-    <a href="/validation?run={{ run.id }}&amp;state=needs-review" class="vstat">
+    <a href="/runs/{{ run.id }}/validation?state=needs-review" class="vstat">
       <span class="pill incomplete">needs review</span><span class="v">{{ vc['needs-review'] }}</span></a>
-    <a href="/validation?run={{ run.id }}&amp;state=rejected" class="vstat">
+    <a href="/runs/{{ run.id }}/validation?state=rejected" class="vstat">
       <span class="pill killed">rejected</span><span class="v">{{ vc.rejected }}</span></a>
     <p class="note">{% if vc.total %}{{ vc.total }} verdict(s) in this run.
-      <a href="/validation?run={{ run.id }}">All of them</a>. A probe with no recorded
+      <a href="/runs/{{ run.id }}/validation">All of them</a>. A probe with no recorded
       baseline is held as needs review, so that state is the common one.{% else %}No
       verdicts yet. <code>quarry validate {{ run.id }} --dry-run</code> plans the probes;
       <code>quarry validate {{ run.id }}</code> builds the target with no network and
@@ -124,6 +139,32 @@
       </tbody>
     </table>
   </div>
+
+  {#  A dependency scanner's clean result is only as good as the database it read.
+      `scan` stores each database's age at scan time; this is where it is read. #}
+  {% set db_tools = run.scan_tools|selectattr('tool', 'in', ['trivy', 'osv-scanner'])|list %}
+  {% if run.vulndb %}
+  <div class="tbl mt-3">
+    <table>
+      <caption>Vulnerability databases at scan time (stale past {{ run.stale_days }} days)</caption>
+      <thead><tr><th scope="col">Database</th><th scope="col">Built</th>
+        <th scope="col" class="r">Age</th><th scope="col">Read from</th></tr></thead>
+      <tbody>
+      {% for v in run.vulndb %}
+        <tr><td class="mono sm">{{ v.name|visible }}</td>
+          <td class="mono sm dim nowrap">{{ v.built|local if v.built else 'unknown' }}</td>
+          <td class="r num nowrap">{% if v.age_days is number %}{{ '%.1f'|format(v.age_days) }} d{% else %}?{% endif %}
+            {%- if v.stale %} <span class="pill incomplete">stale</span>{% endif %}</td>
+          <td class="dim sm">{{ v.basis|visible }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% elif db_tools %}
+  <p class="note">Database ages were not recorded for this run: it was scanned before
+    <code>scan</code> kept them. <code>quarry db status</code> shows the databases' age
+    now, which is not their age at scan time.</p>
+  {% endif %}
 
   <h2 class="h-sec" id="funnel">The funnel: every number is a link to the set it killed</h2>
 
@@ -205,6 +246,49 @@
     <span>nothing is ever deleted</span>
   </div>
 
+  {#  A dismissal made in another run reaches this one through the funnel, which
+      kills the producer's new occurrences. Without this list nothing here said which
+      decision had done that, and nothing offered to undo it. #}
+  {% if dismissals %}
+  <h2 class="h-sec" id="dismissals">Dismissals that reach this run</h2>
+  <div class="tbl">
+    <table>
+      <caption class="sr-only">Operator dismissals in force for run {{ run.id }}, with what
+        a restore from this run does</caption>
+      <thead><tr><th scope="col">Producer</th><th scope="col">Scope</th>
+        <th scope="col">Note</th><th scope="col" class="r">Held here</th>
+        <th scope="col">Restore from this run</th></tr></thead>
+      <tbody>
+      {% for d in dismissals %}
+        <tr>
+          <td class="mono sm">{{ d.producer_id|visible }}</td>
+          <td class="sm">{% if d.scope == 'corpus' %}<span class="pill incomplete">every repository</span>
+            {% elif d.scope == 'repo' %}<span class="pill inert">this repository</span>
+            {% else %}<span class="pill inert">this run only</span>{% endif %}
+            {% if d.from_run %}<div class="dim">from <a href="/runs/{{ d.from_run }}">run {{ d.from_run }}</a>{% if d.since %}, {{ d.since|local }}{% endif %}</div>{% endif %}</td>
+          <td class="dim sm wrap-normal">{{ (d.note or '')|visible }}</td>
+          <td class="r num">{{ d.held }}</td>
+          <td class="sm">
+            {% if d.held or d.undoes_switch %}
+            <form method="post" action="/producers/{{ d.producer_id|urlencode }}/restore">
+              <input type="hidden" name="csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="run_id" value="{{ run.id }}">
+              <input type="hidden" name="back" value="run">
+              <button type="submit" class="xs">Restore</button>
+            </form>
+            {% endif %}
+            <div class="dim">{% if d.scope == 'repo' %}withdraws it for {{ run.target }}{% if d.held %} and brings back {{ d.held }} here{% endif %}
+              {%- elif d.scope == 'corpus' and d.undoes_switch %}re-enables the producer{% if d.held %} and brings back {{ d.held }} here{% endif %}
+              {%- elif d.scope == 'corpus' %}{% if d.held %}brings back {{ d.held }} here; {% endif %}the producer stays disabled until restored from run {{ d.from_run or '?' }}
+              {%- else %}brings back {{ d.held }} here{% endif %}</div>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
   {% if stage or all_suppressed or arrived %}
   {#  The heading names the action taken. It was hardcoded to "Suppressed at", which
       was simply false for a boost — and it now states the true total rather than
@@ -236,12 +320,7 @@
       {% for s in suppressed %}
         <tr>
           <td>
-            {% if s.action == 'kill' %}<span class="pill killed">kill</span>
-            {% elif s.action == 'defer' %}<span class="pill incomplete">defer</span>
-            {% elif s.action == 'merge' %}<span class="pill inert">merge</span>
-            {% elif s.action == 'boost' %}<span class="pill accent">boost</span>
-            {% elif s.action == 'arrived' %}<span class="pill incomplete">not funnelled</span>
-            {% else %}<span class="pill inert">{{ s.action }}</span>{% endif %}
+            {{ m.action_pill(s.action) }}
             {% if all_suppressed %}<span class="dim sm">{{ s.stage }}</span>{% endif %}
           </td>
           <td class="mono sm">{{ s.producer_id|visible }}</td>

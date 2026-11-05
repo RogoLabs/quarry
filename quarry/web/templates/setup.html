@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% set nav = 'setup' %}
+{% block title %}Setup · Quarry{% endblock %}
+{% block body %}
+<div class="page"><div class="wrap">
+  <h1>Setup</h1>
+  <p class="sub">what runs before any run, from a terminal only</p>
+  <p class="prose mb-6">These stages run from the command line and nowhere else, and two
+    of them reach the network. This page starts none of them: it shows what each one
+    last left behind, read from the database and the files it writes, and the command
+    that runs it. Per-run stages (scan, funnel, validate, report) are on each run's page.</p>
+
+  {#  ---------------------------------------------------------------- doctor #}
+  <h2 class="h-sec" id="environment">Environment: what <code>quarry doctor</code> checks</h2>
+  <dl class="facts">
+    <dt>Data root</dt><dd class="mono sm">{{ env.root|visible }}</dd>
+    <dt>Database</dt><dd class="mono sm">{{ env.db|visible }}
+      <span class="dim">{{ env.db_bytes|filesizeformat }}</span></dd>
+    <dt>Schema</dt><dd>version {{ env.schema }} of {{ env.schema_current }}
+      {% if env.schema == env.schema_current %}<span class="pill verified">current</span>
+      {% else %}<span class="pill alarm">behind</span>{% endif %}</dd>
+    {% for p in env.profiles %}
+    <dt>{{ p.name }}</dt><dd>{% if p.present %}<span class="pill verified">present</span>
+      {% else %}<span class="pill alarm">missing</span>{% endif %}
+      <span class="mono sm dim">{{ p.path|visible }}</span></dd>
+    {% endfor %}
+  </dl>
+  {% if env.versions %}
+  <div class="tbl mt-3">
+    <table>
+      <caption>Tool versions recorded at run {{ env.versions_run }}'s ingest</caption>
+      <thead><tr><th scope="col">Tool</th><th scope="col">Version</th></tr></thead>
+      <tbody>
+      {% for k, v in env.versions.items() %}
+        <tr><td class="mono sm">{{ k|visible }}</td>
+          <td class="mono sm">{% if v %}{{ v|visible }}{% else %}<span class="dim">absent</span>{% endif %}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+  <p class="note">Doctor also checks the filesystem type, sync attributes and each
+    tool's version now, which means running processes, so it is not run from here.
+    {{ m.cmd('quarry doctor') }}</p>
+
+  {#  ---------------------------------------------------------------- db sync #}
+  <h2 class="h-sec" id="databases">Vulnerability databases: <code>quarry db sync</code></h2>
+  <div class="tbl">
+    <table>
+      <caption class="sr-only">Each vulnerability database, its age now, and its last sync</caption>
+      <thead><tr><th scope="col">Database</th><th scope="col">Read by</th>
+        <th scope="col">Built</th><th scope="col" class="r">Age now</th>
+        <th scope="col">Last synced</th><th scope="col">Read from</th></tr></thead>
+      <tbody>
+      {% for d in dbs.rows %}
+        <tr><td class="mono sm">{{ d.name }}</td>
+          <td class="mono sm">{% if d.reader %}{{ d.reader }}{% else %}<span class="dim">no scanner</span>{% endif %}</td>
+          <td class="mono sm dim nowrap">{{ d.built|local if d.built else 'unknown' }}</td>
+          <td class="r num nowrap">{% if d.age_days is number %}{{ '%.1f'|format(d.age_days) }} d{% else %}?{% endif %}
+            {%- if d.stale %} <span class="pill incomplete">stale</span>{% endif %}</td>
+          <td class="mono sm dim nowrap">{{ d.last_sync|local if d.last_sync else 'never, per the egress ledger' }}</td>
+          <td class="dim sm">{{ d.basis|visible }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="note">Stale past {{ dbs.stale_days }} days. Read from
+    <code>{{ dbs.dir|visible }}</code>. Syncing is the one deliberate network step, and
+    every fetch is written to the <a href="/egress">egress ledger</a>.
+    {{ m.cmd('quarry db sync') }} {{ m.cmd('quarry db status') }}</p>
+
+  {#  ---------------------------------------------------------------- targets #}
+  <h2 class="h-sec" id="targets">Target scores: <code>quarry targets</code></h2>
+  {% if targets.total %}
+  <p class="note">{{ targets.total }} target(s) scored, {{ targets.scanned }} of them
+    ingested{% if targets.total > targets.rows|length %}; the
+    {{ targets.rows|length }} highest shown{% endif %}. Covariates are recorded, never
+    scored.</p>
+  {% endif %}
+  <div class="tbl">
+    <table>
+      <caption class="sr-only">Scored candidate targets, highest first</caption>
+      <thead><tr><th scope="col">Target</th><th scope="col" class="r">Score</th>
+        <th scope="col" class="r">Surface</th><th scope="col" class="r">Blast</th>
+        <th scope="col" class="r">Resp.</th><th scope="col">Language</th>
+        <th scope="col">Stratum</th><th scope="col">Next</th></tr></thead>
+      <tbody>
+      {% for t in targets.rows %}
+        <tr>
+          <th scope="row" class="mono sm">{{ t.slug|visible }}{% if t.archived %}
+            <span class="pill inert">archived</span>{% endif %}</th>
+          <td class="r num">{{ '%.0f'|format(t.score) }}</td>
+          <td class="r num">{{ '%.0f'|format(t.surface) }}</td>
+          <td class="r num">{{ '%.0f'|format(t.blast_radius) }}</td>
+          <td class="r num">{{ '%.0f'|format(t.responsiveness) }}</td>
+          <td class="sm">{{ (t.language or '')|visible }}</td>
+          <td class="sm dim">{{ (t.stratum or '')|visible }}</td>
+          <td class="sm">{% if t.scanned_run %}<a href="/runs/{{ t.scanned_run }}">run {{ t.scanned_run }}</a>
+            {% else %}{{ m.cmd(t.ingest_cmd) }}{% endif %}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="8" class="dim">No target has been scored. Scoring asks the
+          GitHub API, ecosyste.ms and the OpenSSF Scorecard API about each repository, so
+          it is a network step.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="note">{{ m.cmd('quarry targets score owner/repo') }}
+    {{ m.cmd('quarry targets list') }}</p>
+</div></div>
+{% endblock %}

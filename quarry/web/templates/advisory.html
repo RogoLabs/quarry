@@ -1,5 +1,7 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
 {% set nav = 'advisories' %}
+{% set nav_run = a.run_id %}
 {% block title %}Advisory {{ a.id }} · {{ a.target }} · Quarry{% endblock %}
 {% block body %}
 <div class="page"><div class="wrap">
@@ -19,7 +21,7 @@
 
   <dl class="facts mt-4">
     <dt>Finding</dt><dd class="mono sm">{{ (a.finding_path or a.finding_id)|visible }}{% if a.symbol %} · {{ a.symbol|visible }}{% endif %}</dd>
-    <dt>Verdict</dt><dd>{% if a.verdict == 'confirmed' %}<span class="pill verified">confirmed</span>{% elif a.verdict %}<span class="pill inert">{{ a.verdict }}</span>{% else %}<span class="pill unmeasured">no verdict row</span>{% endif %}
+    <dt>Verdict</dt><dd>{{ m.verdict_pill(a.verdict) }}
       {% if a.seat %}<span class="dim sm">{{ a.seat|visible }} · lens {{ a.model|visible }}</span>{% endif %}</dd>
     <dt>File</dt><dd class="mono sm">{{ a.path|visible }}</dd>
     <dt>SHA-256</dt><dd class="mono sm">{{ a.sha256 }}

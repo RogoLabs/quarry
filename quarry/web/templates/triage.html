@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% set nav = 'triage' %}
+{% set nav_run = run.id %}
 {% block title %}Triage · {{ run.target }}{% endblock %}
 
 {% block topmeta %}
@@ -8,6 +9,7 @@
   <span><a href="/runs/{{ run.id }}">{{ run.target }}</a>
     <span class="dim">@{{ (run.git_sha or '')[:8] }}</span></span>
   <span><b>{{ run.live }}</b> live <span class="dim">of {{ run.total }}</span></span>
+  {% if run.held %}<span><b>{{ run.held }}</b> held for the funnel</span>{% endif %}
   <span><b>{{ run.producers }}</b> producers</span>
   <span class="dim">sorted by band, never severity</span>
 </div>
@@ -18,8 +20,15 @@
    an h2, so the outline stops changing shape as the operator presses `j`. #}
 <h1 class="sr-only">Triage: {{ run.target }}</h1>
 
+{# The same strip as the run page, compact: which run this is, and the way to the
+   stage before and after it. #}
+{% set compact = true %}
+{% include "_pipeline.html" %}
+
 {# Below 720px the console refuses rather than reflowing: `D` on a phone is one tap
-   from a corpus-wide write, and the dispose controls are not in the DOM at all. #}
+   from a corpus-wide write. The console is hidden by CSS, but its forms are still in
+   the DOM, and `d` used to submit the hidden dismiss form; the key handler below now
+   refuses at the same width. #}
 <div class="too-small">
   <div class="m-tight center">
     <h2 class="as-text">Quarry is a keyboard console</h2>
@@ -29,15 +38,21 @@
   </div>
 </div>
 
-<div class="shell" x-data="triageKeys()" @keydown.window="key($event)">
+{#  Moving between rows swaps columns in place rather than loading the page, so the
+    columns that did not change keep their scroll position: `j` and `k` replace only
+    the detail column, `J` and `K` the occurrence and detail columns. Each row is
+    still a real link with `href`, which is what is followed before htmx has loaded,
+    and `hx-push-url` keeps the address bar and Back on the selected row. #}
+<div class="shell" x-data="triageKeys()" @keydown.window="key($event)"
+     @htmx:before-request="pick($event.detail.elt)">
 
   <!-- ---------------- column 1: producers ---------------- -->
-  <div class="col scrollable" role="region" aria-label="Producers, the unit of decision">
+  <div class="col scrollable" id="pcol" role="region" aria-label="Producers, the unit of decision">
     <div class="colhead">
       <h2>Producers</h2>
       <span class="dim sm">the unit of decision</span>
       <div class="spacer"></div>
-      {% if band %}<a href="/triage?run={{ run.id }}{% if verdict %}&verdict={{ verdict|urlencode }}{% endif %}" class="pill inert">clear band</a>{% endif %}
+      {% if band %}<a href="{{ here }}{% if verdict %}?verdict={{ verdict|urlencode }}{% endif %}" class="pill inert">clear band</a>{% endif %}
       <button class="ghost xs" type="button" x-ref="helpBtn" x-on:click="openHelp()"
               aria-haspopup="dialog" aria-label="Keyboard shortcuts"><kbd>?</kbd></button>
     </div>
@@ -46,13 +61,22 @@
         run in that state, and each one narrows the console to the findings behind it. #}
     <nav class="vfilter" aria-label="Filter by verdict">
       <span class="lbl">verdict</span>
-      <a href="/triage?run={{ run.id }}{% if band %}&band={{ band|urlencode }}{% endif %}"
+      <a href="{{ here }}{% if band %}?band={{ band|urlencode }}{% endif %}"
          class="{{ 'on' if not verdict }}" {% if not verdict %}aria-current="true"{% endif %}>any</a>
       {% for s in verdict_states %}
-      <a href="/triage?run={{ run.id }}&verdict={{ s }}{% if band %}&band={{ band|urlencode }}{% endif %}"
+      <a href="{{ here }}?verdict={{ s }}{% if band %}&band={{ band|urlencode }}{% endif %}"
          class="{{ 'on' if verdict == s }}" {% if verdict == s %}aria-current="true"{% endif %}>{{ s }} <span class="num">{{ verdict_counts[s] }}</span></a>
       {% endfor %}
     </nav>
+
+    {#  Deep candidates wait here until a funnel pass has run their Layer 2 gate. The
+        count is stated so the live number above still adds up. #}
+    {% if run.held %}
+    <p class="note pad-x" role="note"><b>{{ run.held }}</b> deep-review candidate(s) are not
+      listed: no funnel pass has seen them, so their quote check and refutation have not
+      been applied. <a href="/runs/{{ run.id }}?arrived=1">See them</a>, or run
+      <code>quarry funnel {{ run.id }}</code>.</p>
+    {% endif %}
 
     {% if undo %}
     {# Pinned until the next disposition, not a toast. A toast that carries the only
@@ -64,7 +88,7 @@
         <input type="hidden" name="run_id" value="{{ run.id }}">
         <button type="submit">Restore <kbd>u</kbd></button>
       </form>
-      <span class="dim">reverses your dismissal only; the funnel's own kills stand</span>
+      <span class="dim">brings back what the dismissal held out; the funnel's other kills stand</span>
     </div>
     {% endif %}
 
@@ -77,14 +101,16 @@
         {% set ns.cur = g.band %}
         {# The band header is a link, which activates the `band` filter. #}
         <div class="band">
-          <a class="plain dim" href="/triage?run={{ run.id }}&band={{ g.band }}{% if verdict %}&verdict={{ verdict|urlencode }}{% endif %}">{{ g.band }}</a>
+          <a class="plain dim" href="{{ here }}?band={{ g.band }}{% if verdict %}&verdict={{ verdict|urlencode }}{% endif %}">{{ g.band }}</a>
           <span class="hint">{{ bands[g.band] }}</span>
         </div>
       {% endif %}
+      {% set purl = base ~ 'producer=' ~ g.producer_id|urlencode %}
       <a class="prow {{ 'sel' if g.producer_id == selected }}"
          {% if g.producer_id == selected %}aria-current="true"{% endif %}
          title="{{ g.producer_id|visible }}"
-         href="{{ base }}&producer={{ g.producer_id|urlencode }}">
+         href="{{ purl }}" hx-get="{{ purl }}" hx-push-url="true"
+         hx-target="#ocol" hx-select="#ocol" hx-select-oob="#dcol" hx-swap="outerHTML">
         <span>
           <span class="tool">{{ g.tool }}</span>
           <span class="rule">{{ g.rule_id|rule_id|visible }}</span>
@@ -98,10 +124,24 @@
         </span>
       </a>
     {% endfor %}
+    {#  Each empty state names the reason the list is empty. "Every finding was
+        suppressed" used to show under a band filter with 1,983 occurrences live. #}
     {% if not groups %}
       {% if verdict %}
       <p class="dim pad">No live finding in this run has a latest verdict of
-        <b>{{ verdict|visible }}</b>. <a href="/validation?run={{ run.id }}">See every verdict</a>.</p>
+        <b>{{ verdict|visible }}</b>. <a href="/runs/{{ run.id }}/validation">See every verdict</a>.</p>
+      {% elif band %}
+      <p class="dim pad">No producer in the <b>{{ band|visible }}</b> band.
+        {{ run.live }} occurrence(s) are live in this run.
+        <a href="{{ here }}">Show every band</a>.</p>
+      {% elif run.live and run.held >= run.live %}
+      <p class="dim pad">All {{ run.live }} live occurrence(s) are deep-review candidates
+        no funnel pass has seen, so none is listed yet. Run
+        <code>quarry funnel {{ run.id }}</code>, or
+        <a href="/runs/{{ run.id }}?arrived=1">see them</a>.</p>
+      {% elif run.live %}
+      <p class="dim pad">No producer to list, though {{ run.live }} occurrence(s) are
+        live. <a href="/runs/{{ run.id }}">Audit the funnel</a>.</p>
       {% else %}
       <p class="dim pad">Nothing live. Every finding was suppressed.
         <a href="/runs/{{ run.id }}">Audit the funnel</a>.</p>
@@ -110,7 +150,7 @@
   </div>
 
   <!-- ---------------- column 2: occurrences ---------------- -->
-  <div class="col scrollable" role="region" aria-label="Occurrences">
+  <div class="col scrollable" id="ocol" role="region" aria-label="Occurrences">
     <div class="colhead">
       <h2>Occurrences</h2>
       <span class="dim sm">
@@ -122,10 +162,12 @@
       </span>
     </div>
     {% for o in occurrences %}
+      {% set ourl = base ~ 'producer=' ~ selected|urlencode ~ '&occ=' ~ o.id %}
       <a class="orow {{ 'sel' if detail and o.id == detail.id }}"
          {% if detail and o.id == detail.id %}aria-current="true"{% endif %}
          title="{{ o.path|visible }}{% if o.start_line %}:{{ o.start_line }}{% endif %}"
-         href="{{ base }}&producer={{ selected|urlencode }}&occ={{ o.id }}">
+         href="{{ ourl }}" hx-get="{{ ourl }}" hx-push-url="true"
+         hx-target="#dcol" hx-select="#dcol" hx-swap="outerHTML">
         <span class="p">{{ (o.path ~ (":" ~ o.start_line if o.start_line else ""))|tail_path|visible }}</span>
         <span class="s">score {{ '%.0f'|format(o.score) }}{% if o.issue_id %} · clustered{% endif %}{% if o.redacted %} · redacted{% endif %}</span>
       </a>
@@ -137,23 +179,33 @@
   </div>
 
   <!-- ---------------- column 3: detail ---------------- -->
-  <div class="col detail" role="region" aria-label="Finding detail">
+  <div class="col detail" id="dcol" role="region" aria-label="Finding detail">
     {% if detail %}
       {% include "_detail.html" %}
+      {#  The note is the operator's reason, kept in the ledger beside the kill. The
+          copy says exactly what each button reaches, because the buttons used to
+          read wider than they were: both killed only this run's occurrences. #}
       <form class="actions" method="post"
             action="/producers/{{ detail.producer_id|urlencode }}/dismiss">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
         <input type="hidden" name="run_id" value="{{ run.id }}">
+        <label class="sr-only" for="dismiss-note">Reason for dismissing, kept in the ledger</label>
+        <input type="text" name="note" id="dismiss-note" class="note-in" maxlength="500"
+               placeholder="why (optional, kept in the ledger)" autocomplete="off">
         <button type="submit" name="scope" value="repo" class="danger"
                 aria-describedby="dispose-note">
           Dismiss for this repo <kbd>d</kbd></button>
         {# Corpus-wide is NOT a shifted pair with `d`: a slipped shift key would change
            the blast radius from one run to every future run against every repository.
            `D` is unbound in the handler; this needs a deliberate click. #}
-        <button type="submit" name="scope" value="corpus" class="danger">
+        <button type="submit" name="scope" value="corpus" class="danger"
+                aria-describedby="dispose-note">
           Dismiss everywhere</button>
-        <span class="note" id="dispose-note">Reversible: writes a ledger event, deletes
-          nothing. <kbd>u</kbd> undoes the last one.</span>
+        <span class="note" id="dispose-note">This repo: its live findings here now, and
+          its new findings in every later funnel pass on {{ run.target }}. Everywhere: the
+          same on every repository, by disabling the producer. Findings already live in
+          other runs stay live. Reversible: writes ledger events, deletes nothing.
+          <kbd>u</kbd> undoes the last one.</span>
       </form>
     {% else %}
       <div class="dbody dim">Select a producer.</div>
@@ -212,7 +264,27 @@ function triageKeys() {
       this.$nextTick(() => this.$refs.helpBtn.focus());
     },
 
+    /* Mark the row whose column swap is starting. Only the swapped columns come back
+       from the server, so the column the row lives in keeps its old selection unless
+       it is moved here; `j` reads `.sel` to find where it is. Any other htmx request
+       inside the console (none today) is left alone. */
+    pick(el) {
+      const row = el && el.closest && el.closest('.prow,.orow');
+      if (!row) return;
+      const kind = row.classList.contains('prow') ? '.prow' : '.orow';
+      for (const r of document.querySelectorAll(kind)) {
+        r.classList.remove('sel');
+        r.removeAttribute('aria-current');
+      }
+      row.classList.add('sel');
+      row.setAttribute('aria-current', 'true');
+    },
+
     key(e) {
+      /* The console is hidden below 720px (app.css), but its forms are still in the
+         DOM, and `d` submitted the hidden dismiss form. Refuse at the same width. */
+      if (window.matchMedia('(max-width: 719px)').matches) return;
+
       /* Modifier chords are the browser's, not ours. Cmd-D arrived as key 'd' with
          metaKey set and dismissed a producer behind the bookmark dialog. */
       if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -236,8 +308,10 @@ function triageKeys() {
         const i = rows.findIndex(r => r.classList.contains('sel'));
         const next = rows[i + delta];
         if (!next) return false;
-        /* Keep the keyboard cursor in the viewport. */
+        /* Keep the keyboard cursor in the viewport. Selected before the click, so a
+           second `j` pressed before the swap lands still steps from here. */
         next.scrollIntoView({ block: 'nearest' });
+        this.pick(next);
         next.click();
         return true;
       };

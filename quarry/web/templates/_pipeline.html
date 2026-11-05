@@ -1,0 +1,18 @@
+{#
+  The pipeline for one run, left to right, each stage's count linking to its set.
+  Included on every page scoped to a run (the run page, its triage, validation and
+  advisories), so the operator can see which run they are in and step to the next
+  stage without the nav quietly switching runs. Needs `run` and `pipeline`; `nav`
+  marks the stage whose page this is.
+#}
+<nav class="pipeline{{ ' compact' if compact }}" aria-label="Pipeline for run {{ run.id }}">
+  <ol>
+  {% for st in pipeline %}
+    {% set here = nav in ('triage', 'validation', 'advisories') and st.page == nav %}
+    <li><a href="{{ st.href }}" class="{{ 'on' if here }}"{% if here %} aria-current="page"{% endif %}>
+      <span class="pn">{{ st.name }}</span>
+      <span class="pv">{{ st.n }}</span>
+      <span class="pu">{{ st.unit }}</span></a></li>
+  {% endfor %}
+  </ol>
+</nav>

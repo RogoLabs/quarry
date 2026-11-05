@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% set nav = 'research' %}
+{% set nav_run = r.run_id %}
 {% block title %}Deep review {{ r.id }} · {{ r.target }}{% endblock %}
 {% block body %}
 <div class="page"><div class="wrap">
@@ -41,7 +42,8 @@
     <span class="dim">(showing {{ r.findings|length }} of {{ r.n_findings }})</span>{% endif %}</h2>
   {% for f in r.findings %}
     {% set refuted = f.n_refuted > 0 and f.n_survived == 0 %}
-    <div class="finding {{ 'refuted' if refuted else ('verified' if f.quote_verified else '') }}">
+    <div class="finding {{ 'refuted' if refuted else ('verified' if f.quote_verified else '') }}"
+         id="cand-{{ f.id }}">
       <div class="chips">
         {#  Colour spent on machine verification, which is the correct thing for colour
             to encode. A quote that is not in the source means the model fabricated it —
@@ -60,6 +62,18 @@
         {% if f.n_survived %}<span class="pill verified">survived ×{{ f.n_survived }}</span>{% endif %}
         {% if f.n_refuted %}<span class="pill killed">refuted ×{{ f.n_refuted }}</span>{% endif %}
         {% if f.refuter_errors %}<span class="pill alarm">{{ f.refuter_errors }} refuter error</span>{% endif %}
+        {#  The way to the same finding in the funnel. Triage shows a candidate only
+            once a funnel pass has seen it and left it live; anything else opens its
+            evidence page, whose ledger says what the funnel did. #}
+        {% if f.occurrence_id %}
+          {% if f.occ_live and f.occ_funnelled %}
+          <a class="pill accent" href="/runs/{{ f.occ_run }}/triage?producer={{ f.occ_producer|urlencode }}&amp;occ={{ f.occurrence_id }}">in triage</a>
+          {% elif f.occ_live %}
+          <a class="pill incomplete" href="/evidence/{{ f.occurrence_id }}">waiting for the funnel</a>
+          {% else %}
+          <a class="pill inert" href="/evidence/{{ f.occurrence_id }}">out of the funnel: see why</a>
+          {% endif %}
+        {% endif %}
       </div>
 
       {#  A refuted candidate COLLAPSES; it is not dimmed.

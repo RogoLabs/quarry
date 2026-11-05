@@ -17,9 +17,10 @@ import json
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-from .. import db
+from .. import db, dismissals
 
 BANDS = ("known-good", "unmeasured", "known-bad")
 
@@ -54,12 +55,34 @@ def _band(n_adjudicated: int, n_confirmed: int, n_total: int) -> str:
     return "unmeasured"
 
 
+#: A WHERE fragment over `live_occurrences o`: the occurrence is ready for triage.
+#: A deep-review candidate is ready only once a funnel pass has seen it, which means
+#: it cleared the Layer 2 gate: a gate failure is a kill or a defer, so a live deep
+#: occurrence with any funnel event passed. Before this, candidates that no pass had
+#: seen (a review still running, or one finished since the last `quarry funnel`)
+#: reached triage with their quote unchecked and their refutation unread. An
+#: operator event does not count: dismissing is not funnelling.
+TRIAGE_READY = """(o.producer_id NOT IN (SELECT id FROM producers WHERE tool = 'deep')
+     OR EXISTS (SELECT 1 FROM funnel_events g
+                WHERE g.occurrence_id = o.id AND g.stage != 'operator'))"""
+
+
+def held_for_funnel(con: sqlite3.Connection, run_id: int) -> int:
+    """Live deep-review candidates that triage holds back until a funnel pass has
+    seen them. The triage page states this number, so the live count above the
+    console still adds up."""
+    return con.execute(
+        f"SELECT COUNT(*) c FROM live_occurrences o WHERE o.run_id = ? "
+        f"AND NOT {TRIAGE_READY}", (run_id,)).fetchone()["c"]
+
+
 def producer_groups(con: sqlite3.Connection, run_id: int,
                     verdict: str | None = None) -> list[ProducerGroup]:
     """Live findings, grouped by producer, banded and ordered for triage.
 
     `verdict` narrows to occurrences whose finding's latest verdict in this run is in
-    that state (see FINDING_HAS_VERDICT); an unknown state yields no groups."""
+    that state (see FINDING_HAS_VERDICT); an unknown state yields no groups. Deep
+    candidates no funnel pass has seen are left out (TRIAGE_READY)."""
     if verdict is not None and verdict not in VERDICT_STATES:
         return []
     extra, args = ("", (run_id,)) if not verdict else (
@@ -74,7 +97,7 @@ def producer_groups(con: sqlite3.Connection, run_id: int,
         JOIN producers p       ON p.id = o.producer_id
         JOIN findings  f       ON f.id = o.finding_id
         LEFT JOIN occurrence_rank rk ON rk.occurrence_id = o.id
-        WHERE o.run_id = ?""" + extra + """
+        WHERE o.run_id = ? AND """ + TRIAGE_READY + extra + """
         GROUP BY p.id
     """, args).fetchall()
 
@@ -113,7 +136,7 @@ def occurrences_for(con: sqlite3.Connection, run_id: int, producer_id: str,
         FROM live_occurrences o
         JOIN findings f ON f.id = o.finding_id
         LEFT JOIN occurrence_rank rk ON rk.occurrence_id = o.id
-        WHERE o.run_id = ? AND o.producer_id = ?""" + extra + """
+        WHERE o.run_id = ? AND o.producer_id = ? AND """ + TRIAGE_READY + extra + """
         ORDER BY rk.score DESC, o.path, o.start_line
         LIMIT ?""", (run_id, producer_id, *args, limit))]
 
@@ -131,8 +154,8 @@ def occurrences_total(con: sqlite3.Connection, run_id: int, producer_id: str,
     extra, args = ("", ()) if not verdict else (" AND " + FINDING_HAS_VERDICT,
                                                 (run_id, verdict))
     return con.execute(
-        "SELECT COUNT(*) c FROM live_occurrences o WHERE o.run_id=? AND o.producer_id=?"
-        + extra, (run_id, producer_id, *args)).fetchone()["c"]
+        "SELECT COUNT(*) c FROM live_occurrences o WHERE o.run_id=? AND o.producer_id=? "
+        "AND " + TRIAGE_READY + extra, (run_id, producer_id, *args)).fetchone()["c"]
 
 
 def occurrence(con: sqlite3.Connection, oid: int) -> dict[str, Any] | None:
@@ -162,6 +185,30 @@ def evidence(con: sqlite3.Connection, blob_sha: str | None) -> dict[str, Any] | 
     return {"path": r["path"], "start_line": r["start_line"],
             "end_line": r["end_line"], "lines": text.split("\n"),
             "file_sha256": r["file_sha256"]}
+
+
+def research_finding(con: sqlite3.Connection, oid: int) -> dict[str, Any] | None:
+    """The deep-review record behind an occurrence, or None for a scanner's.
+
+    A deep occurrence used to show in the detail pane like any scanner hit: no model,
+    no quote check, no refutation. Those are the facts its Layer 2 gate decided on,
+    so the pane shows them and links back to the research run."""
+    r = con.execute(
+        """SELECT rf.id, rf.research_id, rf.lens, rf.model, rf.family, rf.title,
+                  rf.quote_verified, rf.n_refuted, rf.n_survived, rf.refuter_errors,
+                  rf.refutations, rr.run_id
+           FROM research_findings rf JOIN research_runs rr ON rr.id = rf.research_id
+           WHERE rf.occurrence_id = ? ORDER BY rf.id LIMIT 1""", (oid,)).fetchone()
+    if r is None:
+        return None
+    d = dict(r)
+    try:
+        refs = json.loads(d.get("refutations") or "[]")
+    except ValueError:
+        refs = []
+    d["refutations"] = [x for x in refs if isinstance(x, dict)] \
+        if isinstance(refs, list) else []
+    return d
 
 
 def provenance(con: sqlite3.Connection, oid: int) -> list[dict[str, Any]]:
@@ -387,14 +434,12 @@ def corpus_dismissal_run(con: sqlite3.Connection, producer_id: str) -> int | Non
                     (producer_id,)).fetchone()
     if p is None or p["enabled"]:
         return None
-    e = con.execute(
-        """SELECT run_id, action, reason FROM funnel_events
-           WHERE producer_id = ? AND occurrence_id IS NULL
-             AND actor = 'operator' AND stage = 'operator'
-           ORDER BY id DESC LIMIT 1""", (producer_id,)).fetchone()
+    # Corpus-scope rows only: a repo dismissal written later is also a producer-level
+    # operator row, and must not hide the corpus one from its own restore.
+    e = dismissals.latest_corpus_event(con, producer_id)
     if e is None or e["action"] != "kill":
         return None
-    if e["reason"] != f"producer disabled corpus-wide: {p['dismissed_note']}":
+    if e["reason"] != dismissals.reason(dismissals.CORPUS_PREFIX, p["dismissed_note"]):
         return None
     return e["run_id"]
 
@@ -419,10 +464,161 @@ def operator_killed(con: sqlite3.Connection, run_id: int, producer_id: str) -> l
         (run_id, producer_id, run_id))]
 
 
+def restorable_occurrences(con: sqlite3.Connection, run_id: int,
+                           producer_id: str) -> list[int]:
+    """Occurrences in this run that are out only because of a dismissal.
+
+    Wider than `operator_killed`: a dismissal also holds out the occurrences the
+    funnel killed on its behalf (`dismissals.FUNNEL_REASONS` at `rule-precision-prior`)
+    in a later run or a later pass, and undoing the dismissal must bring those back
+    too. Narrower than a resurrect: anything else holding the occurrence out since
+    its last resurrect (a test path, a merged duplicate, a Layer 2 kill) keeps it out,
+    because a resurrect clears every suppression at once.
+    """
+    reasons = dismissals.FUNNEL_REASONS
+    by_dismissal = (f"(e.actor = 'operator' OR (e.stage = ? AND e.action = 'kill' "
+                    f"AND e.reason IN ({','.join('?' * len(reasons))})))")
+    dargs = (dismissals.FUNNEL_STAGE, *reasons)
+    return [r["id"] for r in con.execute(
+        f"""SELECT o.id FROM occurrences o
+            WHERE o.run_id = ? AND o.producer_id = ?
+              AND o.id NOT IN (SELECT id FROM live_occurrences WHERE run_id = ?)
+              AND NOT EXISTS (
+                  SELECT 1 FROM funnel_events e
+                  WHERE e.occurrence_id = o.id
+                    AND e.action IN ('kill','defer','merge')
+                    AND e.id > COALESCE((SELECT MAX(r.id) FROM funnel_events r
+                                         WHERE r.occurrence_id = o.id
+                                           AND r.action = 'resurrect'), 0)
+                    AND NOT {by_dismissal})
+            ORDER BY o.id""",
+        (run_id, producer_id, run_id, *dargs))]
+
+
 def restorable(con: sqlite3.Connection, run_id: int, producer_id: str) -> bool:
     """Would `POST /producers/{id}/restore` with this run change anything?"""
-    return bool(operator_killed(con, run_id, producer_id)) \
-        or corpus_dismissal_run(con, producer_id) == run_id
+    if restorable_occurrences(con, run_id, producer_id) \
+            or corpus_dismissal_run(con, producer_id) == run_id:
+        return True
+    run = con.execute("SELECT target FROM runs WHERE id=?", (run_id,)).fetchone()
+    return bool(run) and dismissals.repo_dismissal(con, producer_id, run["target"]) is not None
+
+
+def dismissals_for_run(con: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]:
+    """Every dismissal that reaches this run, with what a restore here would do.
+
+    Without this list a dismissal made in an earlier run was invisible from the run
+    it affected: the funnel killed the producer's new occurrences, and nothing on the
+    page said which decision had done it or offered to undo it.
+
+    `held` counts this run's occurrences the dismissal holds out (what a restore
+    brings back). `undoes_switch` says whether a restore from this run also lifts the
+    dismissal itself: always for a repo dismissal, which is keyed on the target, and
+    for a corpus one only from the run that made it. Scope `run` is a dismissal from
+    before repo dismissals were keyed on the target: it held this run's occurrences
+    and nothing else.
+    """
+    run = con.execute("SELECT target FROM runs WHERE id=?", (run_id,)).fetchone()
+    if run is None:
+        return []
+    out: list[dict[str, Any]] = []
+    for p in con.execute(
+            """SELECT p.id, p.dismissed_note, p.dismissed_at FROM producers p
+               WHERE p.enabled = 0 AND EXISTS (SELECT 1 FROM occurrences o
+                                               WHERE o.producer_id = p.id AND o.run_id = ?)
+               ORDER BY p.id""", (run_id,)):
+        made = corpus_dismissal_run(con, p["id"])
+        out.append({"producer_id": p["id"], "scope": "corpus", "note": p["dismissed_note"],
+                    "since": p["dismissed_at"], "from_run": made,
+                    "undoes_switch": made == run_id})
+    for pid, rec in sorted(dismissals.repo_dismissals(con, run["target"]).items()):
+        out.append({"producer_id": pid, "scope": "repo", "note": rec["note"],
+                    "since": rec["created_at"], "from_run": rec["run_id"],
+                    "undoes_switch": True})
+    listed = {d["producer_id"] for d in out}
+    for r in con.execute(
+            """SELECT DISTINCT e.producer_id FROM funnel_events e
+               WHERE e.run_id = ? AND e.actor = 'operator' AND e.action = 'kill'
+                 AND e.occurrence_id IS NOT NULL ORDER BY e.producer_id""", (run_id,)):
+        if r["producer_id"] not in listed:
+            out.append({"producer_id": r["producer_id"], "scope": "run", "note": None,
+                        "since": None, "from_run": run_id, "undoes_switch": False})
+    for d in out:
+        d["held"] = len(restorable_occurrences(con, run_id, d["producer_id"]))
+    return [d for d in out if d["scope"] != "run" or d["held"]]
+
+
+# ------------------------------------------------- small reads the routes used to inline
+
+def has_runs(con: sqlite3.Connection) -> bool:
+    return con.execute("SELECT 1 FROM runs LIMIT 1").fetchone() is not None
+
+
+def run_ids(con: sqlite3.Connection) -> list[int]:
+    """Every run id, newest first."""
+    return [r["id"] for r in con.execute("SELECT id FROM runs ORDER BY id DESC")]
+
+
+def latest_run(con: sqlite3.Connection) -> int | None:
+    """The newest run worth opening.
+
+    `status='done'` alone meant that during your first scan `/triage` told you to
+    go and run a scan. A run in flight is a better answer than an empty state.
+    """
+    r = con.execute("SELECT id FROM runs WHERE status='done' ORDER BY id DESC "
+                    "LIMIT 1").fetchone()
+    if r:
+        return r["id"]
+    r = con.execute("SELECT id FROM runs WHERE status='running' ORDER BY id DESC "
+                    "LIMIT 1").fetchone()
+    return r["id"] if r else None
+
+
+def run_volume(con: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
+    """A run's status and volume path: what deep review needs to start."""
+    r = con.execute("SELECT status, volume_path FROM runs WHERE id=?",
+                    (run_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def producer_exists(con: sqlite3.Connection, producer_id: str) -> bool:
+    return con.execute("SELECT 1 FROM producers WHERE id=?",
+                       (producer_id,)).fetchone() is not None
+
+
+def quarantined(con: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]:
+    """What ingest moved aside for a run."""
+    return [dict(r) for r in con.execute(
+        "SELECT kind,original_path,detail FROM quarantined WHERE run_id=?", (run_id,))]
+
+
+def research_row(con: sqlite3.Connection, rid: int) -> dict[str, Any] | None:
+    """The columns `/research/{id}/stop` checks before it signals anything."""
+    r = con.execute("SELECT id, run_id, pid, status, heartbeat FROM research_runs "
+                    "WHERE id=?", (rid,)).fetchone()
+    return dict(r) if r else None
+
+
+def research_claim_state(con: sqlite3.Connection, rid: int) -> dict[str, Any] | None:
+    """The columns a resume claim overwrites, kept so a failed spawn can put them
+    back (writes.release_research_claim)."""
+    r = con.execute("SELECT status, pid, heartbeat FROM research_runs WHERE id=?",
+                    (rid,)).fetchone()
+    return dict(r) if r else None
+
+
+def occurrence_detail(con: sqlite3.Connection, oid: int) -> dict[str, Any] | None:
+    """One occurrence with everything the detail pane shows: its evidence window,
+    its ledger events, its verdicts and, for a deep candidate, its research record.
+    Triage and /evidence assembled this separately, line for line."""
+    d = occurrence(con, oid)
+    if not d:
+        return None
+    d["evidence"] = evidence(con, d["blob_sha"])
+    d["provenance"] = provenance(con, oid)
+    d["verdicts"] = verdicts_for_finding(con, d["finding_id"])
+    d["research"] = research_finding(con, oid)
+    return d
 
 
 def run_summary(con: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
@@ -434,9 +630,11 @@ def run_summary(con: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
                              (run_id,)).fetchone()["c"]
     d["live"] = con.execute("SELECT COUNT(*) c FROM live_occurrences WHERE run_id=?",
                             (run_id,)).fetchone()["c"]
+    # The producers triage lists, so the card and the console agree.
     d["producers"] = con.execute(
-        "SELECT COUNT(DISTINCT producer_id) c FROM live_occurrences WHERE run_id=?",
-        (run_id,)).fetchone()["c"]
+        "SELECT COUNT(DISTINCT o.producer_id) c FROM live_occurrences o "
+        f"WHERE o.run_id=? AND {TRIAGE_READY}", (run_id,)).fetchone()["c"]
+    d["held"] = held_for_funnel(con, run_id)
     m = db.read_manifest(con, run_id)
     tools = (m.get("scan") or {}).get("tools") or {}
     d["scan_tools"] = [{"tool": t, **i} for t, i in sorted(tools.items())
@@ -450,6 +648,19 @@ def run_summary(con: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
                    for src, by_tool in sorted((m.get("health") or {}).items())
                    if isinstance(by_tool, dict)
                    for tool, msgs in sorted(by_tool.items()) for msg in (msgs or [])]
+    # The vulnerability databases a scan read, and how old each was then. A clean
+    # Trivy or OSV result is only as good as its database, and that age was printed
+    # by `doctor` and stored by `scan` but never shown beside the result.
+    from ..vulndb import STALE_DAYS
+    d["stale_days"] = STALE_DAYS
+    d["vulndb"] = []
+    for name, a in sorted((m.get("vulndb") or {}).items()):
+        if not isinstance(a, dict):
+            continue
+        age = a.get("age_days")
+        d["vulndb"].append({"name": name, "built": a.get("built"), "age_days": age,
+                            "basis": a.get("basis") or "",
+                            "stale": not isinstance(age, (int, float)) or age > STALE_DAYS})
     return d
 
 
@@ -571,6 +782,63 @@ def _utc_epoch(ts: str | None) -> float | None:
         return None
 
 
+def _deep_argv(argv: list[str], pid: Any, run_id: Any) -> tuple[bool, str]:
+    """Is this command line `quarry deep <run_id> ...`? -> (verdict, why not)."""
+    is_quarry = any(t == "quarry.cli" or t == "quarry" or t.endswith("/quarry")
+                    for t in argv)
+    if not is_quarry or "deep" not in argv:
+        return False, f"pid {pid} now belongs to another program"
+    if run_id is not None:
+        i = argv.index("deep")
+        if i + 1 >= len(argv) or argv[i + 1] != str(run_id):
+            return False, f"pid {pid} is a deep review of a different run"
+    return True, ""
+
+
+#: The status the dashboard writes when it claims a research run for a resume, before
+#: it spawns the worker. Only the reader interprets it (`_resume_status`); the worker
+#: overwrites it with `running` when it claims the run itself (runner._claim).
+RESUMING = "resuming"
+
+#: How long a claimed resume may go without a worker pid before the claim counts as
+#: failed and the run can be resumed again. The pid is recorded right after the
+#: spawn returns, so this only matters when the spawn itself went wrong.
+CLAIM_GRACE_SECONDS = 120
+
+
+def _resume_status(row: dict[str, Any]) -> tuple[str, str]:
+    """`live_status` for a run the dashboard has claimed for a resume.
+
+    The claim exists so a second Resume, from another tab or a double click, is
+    refused instead of starting a second worker on the same units: the second request
+    sees `starting`, which is neither resumable nor stoppable. If the spawned process
+    is gone, or never recorded, the claim lapses to `died` and Resume is offered again.
+
+    The heartbeat check in `worker_identity` does not apply here: the heartbeat is the
+    claim's own timestamp, written before the worker existed, so the worker always
+    started after it. The command line is still checked, because pids are recycled.
+    """
+    pid = row.get("pid")
+    if pid:
+        if not _pid_alive(pid):
+            return "died", f"the resumed worker (pid {pid}) exited before claiming the run"
+        info = _ps(pid)
+        if info is None:
+            return "starting", f"resume requested; pid {pid} is alive but not yet verified"
+        ok, why = _deep_argv(info["argv"], pid, row.get("run_id"))
+        if not ok:
+            return "died", why
+        return "starting", f"resume requested; worker pid {pid} is starting"
+    claimed = _utc_epoch(row.get("heartbeat"))
+    age = None if claimed is None else max(0.0, _dt.datetime.now(
+        _dt.timezone.utc).timestamp() - claimed)
+    if age is None or age > CLAIM_GRACE_SECONDS:
+        return "died", ("a resume was requested"
+                        + (f" {_ago(age)} ago" if age is not None else "")
+                        + " and no worker started")
+    return "starting", f"resume requested {_ago(age)} ago; waiting for the worker"
+
+
 def worker_identity(row: dict[str, Any]) -> tuple[bool | None, str]:
     """Is `row['pid']` still this research run's worker? -> (verdict, why).
 
@@ -593,16 +861,9 @@ def worker_identity(row: dict[str, Any]) -> tuple[bool | None, str]:
     info = _ps(pid)
     if info is None:
         return None, "process details unavailable"
-    argv = info["argv"]
-    is_quarry = any(t == "quarry.cli" or t == "quarry" or t.endswith("/quarry")
-                    for t in argv)
-    if not is_quarry or "deep" not in argv:
-        return False, f"pid {pid} now belongs to another program"
-    run_id = row.get("run_id")
-    if run_id is not None:
-        i = argv.index("deep")
-        if i + 1 >= len(argv) or argv[i + 1] != str(run_id):
-            return False, f"pid {pid} is a deep review of a different run"
+    ok, why = _deep_argv(info["argv"], pid, row.get("run_id"))
+    if not ok:
+        return False, why
     hb = _utc_epoch(row.get("heartbeat"))
     if hb is None:
         return None, "no heartbeat recorded to check the process start against"
@@ -626,6 +887,8 @@ def live_status(row: dict[str, Any]) -> tuple[str, str]:
     stored = row.get("status") or "unknown"
     if stored in TERMINAL_STATUSES:
         return stored, ""
+    if stored == RESUMING:
+        return _resume_status(row)
     pid, hb = row.get("pid"), row.get("heartbeat")
     alive = _pid_alive(pid)
     gone = f"pid {pid} is gone"
@@ -738,10 +1001,21 @@ def research_detail(con: sqlite3.Connection, rid: int) -> dict[str, Any] | None:
            ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'error' THEN 1
                                 WHEN 'pending' THEN 2 ELSE 3 END,
                     updated_at DESC LIMIT ?""", (rid, UNITS_SHOWN))]
+    # Each candidate carries where its occurrence stands, so the card can link to it:
+    # into triage when it is there, otherwise to its evidence and ledger, which say
+    # what the funnel did with it.
     head["findings"] = [dict(r) for r in con.execute(
-        """SELECT * FROM research_findings WHERE research_id=?
-           ORDER BY quote_verified DESC, n_survived DESC, n_refuted ASC, id
-           LIMIT ?""", (rid, FINDINGS_SHOWN))]
+        f"""SELECT rf.*, o.run_id AS occ_run, o.producer_id AS occ_producer,
+                   EXISTS (SELECT 1 FROM live_occurrences l
+                           WHERE l.id = rf.occurrence_id) AS occ_live,
+                   EXISTS (SELECT 1 FROM funnel_events g
+                           WHERE g.occurrence_id = rf.occurrence_id
+                             AND g.stage != 'operator') AS occ_funnelled
+            FROM research_findings rf
+            LEFT JOIN occurrences o ON o.id = rf.occurrence_id
+            WHERE rf.research_id=?
+            ORDER BY rf.quote_verified DESC, rf.n_survived DESC, rf.n_refuted ASC, rf.id
+            LIMIT ?""", (rid, FINDINGS_SHOWN))]
     for f in head["findings"]:
         try:
             f["refutations"] = json.loads(f.get("refutations") or "[]")
@@ -822,15 +1096,19 @@ def local(ts: str | None, *, with_date: bool = True) -> str:
 
     Everything the page shows now goes through here, so one clock is on screen.
     Naive-local values are detected by the `T` separator `datetime.isoformat()` writes
-    and passed through unconverted; SQLite's space-separated UTC is converted.
+    and passed through unconverted; SQLite's space-separated UTC is converted. An
+    isoformat value that carries its own offset (a database build time in the run
+    manifest) says which clock it is on, so it is converted too.
     """
     if not ts:
         return "—"
     text = str(ts)
     fmt = "%Y-%m-%d %H:%M" if with_date else "%H:%M"
     try:
-        if "T" in text:                      # isoformat() — already local, naive
+        if "T" in text:                      # isoformat() — local unless it says not
             dt = _dt.datetime.fromisoformat(text)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone()
             return dt.strftime(fmt)
         dt = _dt.datetime.strptime(text[:19], "%Y-%m-%d %H:%M:%S")
         dt = dt.replace(tzinfo=_dt.timezone.utc).astimezone()
@@ -1035,6 +1313,201 @@ def advisory(con: sqlite3.Connection, aid: int) -> dict[str, Any] | None:
     return dict(r) if r else None
 
 
+def digest(con: sqlite3.Connection, run_id: int,
+           reports_root: "Path | None") -> dict[str, Any] | None:
+    """The Layer 2 deep-review digest `quarry report` wrote for a run, or None.
+
+    `quarry report` writes it beside the advisory drafts, and the dashboard said
+    "0 drafts" next to it because no table recorded it. The run manifest now does
+    (`disclosure.record_digest`), with the hash of what was written. A digest written
+    before that is found at its default path and shown as unrecorded, with no hash to
+    compare. Whether the file may be read is not decided here: the page that opens it
+    applies the same confinement to <data root>/reports as an advisory.
+    """
+    from ..disclosure.report import digest_name
+    rec = (db.read_manifest(con, run_id).get("report") or {})
+    rec = rec.get("digest") if isinstance(rec, dict) else None
+    if isinstance(rec, dict) and rec.get("path"):
+        return {"run_id": run_id, "path": str(rec["path"]), "sha256": rec.get("sha256"),
+                "n_findings": rec.get("n_findings"), "written_at": rec.get("written_at"),
+                "recorded": True}
+    if reports_root is not None:
+        p = reports_root / str(run_id) / digest_name(run_id)
+        if p.is_file():
+            return {"run_id": run_id, "path": str(p), "sha256": None, "n_findings": None,
+                    "written_at": None, "recorded": False}
+    return None
+
+
+# ------------------------------------------------- stages that run from the terminal
+#
+# Doctor, db sync, target scoring, ingest, scan, funnel, validate and report run only
+# from the CLI, and several of them reach the network. The dashboard does not run any
+# of them. It shows what each one last left behind and the command that runs it,
+# shell-quoted, because a target name is text from a database and the command is
+# meant to be pasted into a terminal.
+
+def shell(*args: Any) -> str:
+    """A command line with each argument quoted for a POSIX shell."""
+    import shlex
+    return " ".join(shlex.quote(str(a)) for a in args)
+
+
+def run_stages(con: sqlite3.Connection, run: dict[str, Any],
+               reports_root: "Path | None" = None) -> list[dict[str, Any]]:
+    """Each CLI stage of one run: what it last did, and the command that runs it.
+
+    Read from what the run already records (status, manifest, ledger, verdicts,
+    advisory rows), so it costs no process and no network. `status` is a short state,
+    `detail` says what that rests on, and `cmd` is the command to run next or again.
+    """
+    rid, target = run["id"], run["target"]
+    m = db.read_manifest(con, rid)
+    out: list[dict[str, Any]] = []
+
+    ingest_detail = f"run status {run['status']}"
+    if run["status"] == "done" and not run.get("volume_path"):
+        ingest_detail += "; volume released, so deep review and validate need a new ingest"
+    out.append({"stage": "Ingest", "status": run["status"], "detail": ingest_detail,
+                "cmd": shell("quarry", "ingest", target),
+                "note": "makes a new run of this target"})
+
+    tools = run.get("scan_tools") or []
+    n_scan = con.execute(
+        "SELECT COUNT(*) c FROM occurrences o JOIN producers p ON p.id = o.producer_id "
+        "WHERE o.run_id=? AND p.tool != 'deep'", (rid,)).fetchone()["c"]
+    if tools:
+        failed = sum(1 for t in tools if not t.get("ok") and not t.get("skipped"))
+        skipped = sum(1 for t in tools if t.get("skipped"))
+        status = "failed" if failed else "done"
+        detail = (f"{len(tools)} scanner(s) recorded, {failed} failed, {skipped} skipped; "
+                  f"{n_scan} occurrence(s)")
+    elif n_scan:
+        status, detail = "done", (f"{n_scan} occurrence(s); scanned before per-tool "
+                                  "outcomes were kept")
+    else:
+        status, detail = "not run", "no scanner output for this run"
+    out.append({"stage": "Scan", "status": status, "detail": detail,
+                "cmd": shell("quarry", "scan", rid),
+                "note": "a tool that already returned results is refused"})
+
+    f = m.get("funnel") if isinstance(m.get("funnel"), dict) else {}
+    # A run funnelled before passes were recorded has its stage list and no `passes`;
+    # that is one pass (funnel._persist_summary reads it the same way).
+    passes = len(f.get("passes") or []) or (1 if f.get("stages") else 0)
+    funnelled = con.execute(
+        "SELECT COUNT(DISTINCT occurrence_id) c FROM funnel_events WHERE run_id=? "
+        "AND stage != 'operator' AND occurrence_id IS NOT NULL", (rid,)).fetchone()["c"]
+    waiting = arrived_total(con, rid)
+    if not funnelled and not passes:
+        status = "not run"
+    else:
+        status = "behind" if waiting else "done"
+    out.append({"stage": "Funnel", "status": status,
+                "detail": (f"{passes} pass(es) recorded; {funnelled} occurrence(s) "
+                           f"funnelled, {waiting} not yet"),
+                "cmd": shell("quarry", "funnel", rid),
+                "note": "acts only on occurrences no pass has seen"})
+
+    rr = con.execute("SELECT COUNT(*) n, MAX(id) latest FROM research_runs WHERE run_id=?",
+                     (rid,)).fetchone()
+    # The newest research run's state as the reader computes it, never the column.
+    newest = research_runs(con, rid=rr["latest"])[0] if rr["n"] else None
+    out.append({"stage": "Deep review",
+                "status": newest["status"] if newest else "not run",
+                "detail": (f"{rr['n']} research run(s); newest is {rr['latest']}, "
+                           f"{newest['done']} of {newest['units']} unit(s) done"
+                           if newest else "no research run for this run"),
+                "cmd": shell("quarry", "deep", rid),
+                "note": "local models only; hours, not minutes",
+                "href": f"/research/{rr['latest']}" if rr["n"] else "/research"})
+
+    vc = verdict_counts(con, rid)
+    out.append({"stage": "Validate", "status": "done" if vc["total"] else "not run",
+                "detail": (f"{vc['total']} latest verdict(s): {vc['confirmed']} confirmed, "
+                           f"{vc['needs-review']} needs review, {vc['rejected']} rejected"),
+                "cmd": shell("quarry", "validate", rid, "--dry-run"),
+                "note": "plans the probes; run it again without --dry-run to probe"})
+
+    n_adv = advisory_count(con, rid)
+    dg = digest(con, rid, reports_root)
+    need = vc["confirmed"] and not n_adv
+    out.append({"stage": "Report",
+                "status": "behind" if need else ("done" if n_adv or dg else "not run"),
+                "detail": (f"{n_adv} advisory draft(s)"
+                           + ("; a deep-review digest" if dg else "")
+                           + (f"; {vc['confirmed']} confirmed verdict(s) with no draft"
+                              if need else "")),
+                "cmd": shell("quarry", "report", rid),
+                "note": "writes drafts to read before anything is sent"})
+    return out
+
+
+def environment(con: sqlite3.Connection, root: Path, db_path: Path) -> dict[str, Any]:
+    """What `quarry doctor` checks that can be read without running anything.
+
+    Doctor also probes the filesystem type, sync attributes and each tool's version,
+    which means running processes; the page shows the tool versions the newest run
+    recorded instead, and says which run that was.
+    """
+    from ..migrations import MIGRATIONS
+    from ..sandbox import CLONE_PROFILE, PROFILE
+    size = 0
+    for p in (db_path, db_path.with_name(db_path.name + "-wal")):
+        try:
+            size += p.stat().st_size
+        except OSError:
+            pass
+    newest = con.execute("SELECT id FROM runs ORDER BY id DESC LIMIT 1").fetchone()
+    versions: dict[str, Any] = {}
+    if newest:
+        m = db.read_manifest(con, newest["id"])
+        # Tool versions are the manifest's top-level strings; None is a tool that was
+        # absent at ingest. Everything else there is a structured record.
+        versions = {k: v for k, v in sorted(m.items()) if v is None or isinstance(v, str)}
+    return {"root": str(root), "db": str(db_path), "db_bytes": size,
+            "schema": con.execute("PRAGMA user_version").fetchone()[0],
+            "schema_current": len(MIGRATIONS),
+            "profiles": [{"name": "tier 1 scanner sandbox", "path": str(PROFILE),
+                          "present": PROFILE.exists()},
+                         {"name": "clone sandbox", "path": str(CLONE_PROFILE),
+                          "present": CLONE_PROFILE.exists()}],
+            "versions": versions, "versions_run": newest["id"] if newest else None}
+
+
+def vulndb_status(con: sqlite3.Connection) -> dict[str, Any]:
+    """Each vulnerability database's build time and age now, which scanner reads it,
+    and when `quarry db sync` last reached the network for it (the egress ledger)."""
+    from .. import vulndb
+    readers = {v: k for k, v in vulndb.DB_OF_TOOL.items()}
+    rows = []
+    for name, a in vulndb.ages().items():
+        age = a.get("age_days")
+        last = con.execute(
+            "SELECT MAX(created_at) t FROM egress WHERE stage='db-sync' AND note LIKE ?",
+            (f"{name}%",)).fetchone()["t"]
+        rows.append({"name": name, "built": a.get("built"), "age_days": age,
+                     "basis": a.get("basis") or "", "reader": readers.get(name),
+                     "stale": not isinstance(age, (int, float)) or age > vulndb.STALE_DAYS,
+                     "last_sync": last})
+    return {"rows": rows, "dir": str(vulndb.db_dir()), "stale_days": vulndb.STALE_DAYS}
+
+
+def targets(con: sqlite3.Connection, limit: int = 100) -> dict[str, Any]:
+    """Scored candidate targets, highest first. The `targets` table had no reader
+    anywhere in the dashboard. Archived targets are listed and marked, not hidden."""
+    rows = []
+    for r in con.execute("SELECT * FROM targets ORDER BY score DESC, slug LIMIT ?", (limit,)):
+        d = dict(r)
+        d["ingest_cmd"] = shell("quarry", "ingest", d["slug"])
+        d["why_cmd"] = shell("quarry", "targets", "why", d["slug"])
+        rows.append(d)
+    total = con.execute("SELECT COUNT(*) c FROM targets").fetchone()["c"]
+    scanned = con.execute("SELECT COUNT(*) c FROM targets WHERE scanned_run IS NOT NULL"
+                          ).fetchone()["c"]
+    return {"rows": rows, "total": total, "scanned": scanned}
+
+
 def advisory_count(con: sqlite3.Connection, run_id: int) -> int:
     return con.execute("SELECT COUNT(*) c FROM advisories WHERE run_id=?",
                        (run_id,)).fetchone()["c"]
@@ -1042,31 +1515,50 @@ def advisory_count(con: sqlite3.Connection, run_id: int) -> int:
 
 # ------------------------------------------------------------------ pipeline strip
 
-def pipeline(con: sqlite3.Connection, run: dict[str, Any]) -> list[dict[str, Any]]:
+def run_urls(rid: int) -> dict[str, str]:
+    """Where each of a run's pages lives. The run is in the path, not a query
+    parameter, so a link copied from one page and the nav on the next both keep it:
+    the nav used to drop it, and Triage opened from run 1 showed run 2."""
+    return {"run": f"/runs/{rid}", "triage": f"/runs/{rid}/triage",
+            "validation": f"/runs/{rid}/validation",
+            "advisories": f"/runs/{rid}/advisories"}
+
+
+def pipeline(con: sqlite3.Connection, run: dict[str, Any],
+             reports_root: "Path | None" = None) -> list[dict[str, Any]]:
     """The five stages of one run, each with its count and the set that count opens.
 
     Every count is a link, like every other number in the product. Ingest counts what
     it quarantined; scan counts raw occurrences and the tools that produced them; the
     funnel counts what is still live; validate counts latest-verdict slots; report
-    counts advisory drafts recorded for the run.
+    counts advisory drafts recorded for the run, and says when a deep-review digest
+    sits beside them (found through `reports_root`, when given).
     """
     rid = run["id"]
+    u = run_urls(rid)
     quarantined = con.execute("SELECT COUNT(*) c FROM quarantined WHERE run_id=?",
                               (rid,)).fetchone()["c"]
-    tools = con.execute(
-        "SELECT COUNT(DISTINCT p.tool) c FROM occurrences o "
-        "JOIN producers p ON p.id = o.producer_id WHERE o.run_id=?",
-        (rid,)).fetchone()["c"]
+    # Layer 1 only. Deep review writes occurrences under the producer tool `deep`,
+    # and counting it made the card read "8 tool(s)" for seven scanners.
+    scan = con.execute(
+        "SELECT COUNT(DISTINCT p.tool) tools, COUNT(o.id) n FROM occurrences o "
+        "JOIN producers p ON p.id = o.producer_id WHERE o.run_id=? AND p.tool != 'deep'",
+        (rid,)).fetchone()
+    n_deep = run["total"] - scan["n"]
     vc = verdict_counts(con, rid)
     return [
         {"name": "Ingest", "n": quarantined, "unit": "quarantined",
-         "href": f"/runs/{rid}#quarantine"},
-        {"name": "Scan", "n": run["total"], "unit": f"raw, {tools} tool(s)",
-         "href": f"/runs/{rid}#funnel"},
+         "href": f"{u['run']}#quarantine", "page": "run"},
+        {"name": "Scan", "n": scan["n"],
+         "unit": f"raw, {scan['tools']} scanner(s)"
+                 + (f"; {n_deep} more from deep review" if n_deep else ""),
+         "href": f"{u['run']}#funnel", "page": "run"},
         {"name": "Funnel", "n": run["live"], "unit": "live",
-         "href": f"/triage?run={rid}"},
+         "href": u["triage"], "page": "triage"},
         {"name": "Validate", "n": vc["total"], "unit": f"verdicts, {vc['confirmed']} confirmed",
-         "href": f"/validation?run={rid}"},
-        {"name": "Report", "n": advisory_count(con, rid), "unit": "drafts",
-         "href": f"/advisories?run={rid}"},
+         "href": u["validation"], "page": "validation"},
+        {"name": "Report", "n": advisory_count(con, rid),
+         "unit": "drafts" + ("; deep-review digest" if digest(con, rid, reports_root)
+                             else ""),
+         "href": u["advisories"], "page": "advisories"},
     ]
