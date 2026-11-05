@@ -109,6 +109,11 @@ def _osv_seed(root: Path) -> Path:
 
 
 def sync_all(con: sqlite3.Connection | None = None, *, timeout: int = 900) -> list[SyncResult]:
+    """Fetch the databases the scanners read: Trivy's and OSV's. Grype's is no longer
+    fetched (decision A, 2026-11-05): no adapter reads it, it is the same sca-db class
+    as OSV and Trivy so sca-merge would fold its findings into theirs, and it was the
+    largest disk cost (3,358 MB on 2026-11-02) and one more network step. A copy
+    already on disk is left alone and shown by `db status` as unused."""
     root = db_dir()
     root.mkdir(parents=True, exist_ok=True)
     # Trivy consults the docker credential helper even for a filesystem DB pull. This
@@ -124,8 +129,6 @@ def sync_all(con: sqlite3.Connection | None = None, *, timeout: int = 900) -> li
         _sync("trivy", ["trivy", "fs", "--download-db-only", "--quiet"],
               _env(root, {"TRIVY_CACHE_DIR": str(root / "trivy"),
                           "DOCKER_CONFIG": str(empty_docker)}), timeout),
-        _sync("grype", ["grype", "db", "update"],
-              _env(root, {"GRYPE_DB_CACHE_DIR": str(root / "grype")}), timeout),
         _sync("osv-scanner", ["osv-scanner", "scan", "source", "--recursive",
                               "--download-offline-databases", "--offline-vulnerabilities",
                               str(_osv_seed(root))],
@@ -152,6 +155,8 @@ def status() -> dict[str, str]:
             continue
         total = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
         out[name] = f"{total / 1e6:.0f} MB"
+        if name == "grype":
+            out[name] += f" (not synced or read since decision A; safe to delete {d})"
     return out
 
 

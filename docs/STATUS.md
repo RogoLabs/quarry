@@ -33,7 +33,7 @@ Seven scanners under Tier 1 containment. Zero model calls, zero dollars.
 On `OWASP/Nettacker` (860 files): **616 findings in ~38 s** — opengrep 105, bandit 355,
 gitleaks 13, zizmor 23, osv-scanner 71, trivy 39, checkov 10.
 
-`quarry db sync` provisions Trivy (1.3 GB), Grype (2.1 GB) and OSV (48 MB) *outside*
+`quarry db sync` provisions Trivy (1.3 GB) and OSV (48 MB) *outside*
 the sandbox — the one deliberate network step — and writes every fetch to the egress ledger.
 
 ### The funnel — Seat 1's twelve canonical stages
@@ -193,7 +193,8 @@ ceiling.
   unimplemented.
 - **Rule rot.** `opengrep/opengrep-rules` was archived 2025-11-28 and is the only substantial
   free pack (1,942 rule files); `AikidoSec/opengrep-rules` holds **two**.
-- **Grype's 2.1 GB database** is the largest disk cost and grype is not yet in the scan path.
+- **Grype is not synced** (decision A, 2026-11-05). A database already on disk is unused
+  and can be deleted; `quarry db status` names the path.
 - **Cross-tool clustering is coarse** — same file, same ten-line window, different detector
   classes. It has not been tuned.
 - No container runtime installed; not needed for P1 (Seat 5's ruling). Colima is P3/P5.

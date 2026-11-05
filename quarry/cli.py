@@ -43,7 +43,7 @@ app.add_typer(db_app, name="db")
 
 @db_app.command("sync")
 def db_sync(timeout: int = typer.Option(900)) -> None:
-    """Fetch Trivy/Grype/OSV databases into the sandbox-readable DB directory."""
+    """Fetch the Trivy and OSV databases into the sandbox-readable DB directory."""
     _, connection = _open()
     con_out.print(f"[dim]{_e(vulndb.db_dir())}[/]")
     for r in vulndb.sync_all(connection, timeout=timeout):

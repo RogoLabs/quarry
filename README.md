@@ -14,7 +14,7 @@ A [RogoLabs](https://rogolabs.net) project.
 
 ```bash
 quarry doctor                   # environment, sandbox profiles, tool inventory
-quarry db sync                  # Trivy, Grype and OSV databases: the one network step
+quarry db sync                  # Trivy and OSV databases: the one network step
 quarry targets score owner/repo # rank candidates on attack surface and responsiveness
 quarry ingest owner/repo        # anonymous clone into a per-run APFS sparse image
 quarry scan 1                   # seven scanners under sandbox-exec, no network, no models

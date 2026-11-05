@@ -114,13 +114,13 @@ def test_sync_runs_with_a_minimal_environment_and_logs_real_hosts(tmp_path, monk
 
     c = db.init(tmp_path / "t.db")
     vulndb.sync_all(c)
-    assert len(seen) == 3
+    assert len(seen) == 2                     # trivy and osv; grype is not synced
     for env in seen:
         assert "AWS_SECRET_ACCESS_KEY" not in env and "GITHUB_TOKEN" not in env
         assert env["HTTPS_PROXY"] == "http://proxy.internal:3128"
         assert env["HOME"].startswith(str(tmp_path))
     hosts = {r["destination"] for r in c.execute("SELECT destination FROM egress")}
-    assert hosts == {"mirror.gcr.io", "ghcr.io", "grype.anchore.io",
+    assert hosts == {"mirror.gcr.io", "ghcr.io",
                      "osv-vulnerabilities.storage.googleapis.com"}
 
 
