@@ -239,7 +239,11 @@ def deep(run_id: int = typer.Argument(..., help="an ingested run"),
 
 
 @app.command()
-def doctor() -> None:
+def doctor(coverage: bool = typer.Option(
+        False, "--coverage",
+        help="also run every installed scanner, under Tier 1, over a fixture planted in "
+             "12 directories, and fail if any tool returns nothing from a planted file "
+             "it is expected to read (32 s when measured, 26 of them opengrep)")) -> None:
     """Check the environment: data root, containment, and which tools are present."""
     paths, _ = _open()
     t = Table(title="quarry doctor", show_header=True, header_style="bold")
@@ -286,6 +290,72 @@ def doctor() -> None:
     for k, v in m.items():
         t2.add_row(_e(k), _e(v) if v else "[dim]absent[/]")
     con_out.print(t2)
+
+    if coverage and not _coverage_sweep():
+        raise typer.Exit(1)
+
+
+def _coverage_sweep() -> bool:
+    """IMPROVEMENT-PLAN item 23's fixture run, against whatever versions are installed
+    now. Four tools once skipped whole directories by default, and an upgrade can bring
+    a default skip back silently. -> True when no tool that ran missed anything."""
+    import subprocess
+    from .scanners import sweep
+    try:
+        with con_out.status("coverage sweep: planting the fixture") as st:
+            results, wall = sweep.run_sweep(
+                progress=lambda n: st.update(f"coverage sweep: running {n}"))
+    except (OSError, subprocess.SubprocessError) as e:
+        con_out.print(f"[red]coverage sweep could not plant its fixture:[/] {_e(e)}")
+        return False
+    t = Table(title=f"coverage sweep: {len(sweep.PLANTED_DIRS)} planted directories "
+                    f"plus {sweep.WORKFLOW_DIR}, under Tier 1",
+              show_header=True, header_style="bold")
+    for c, j in (("tool", "left"), ("version", "left"), ("result", "left"),
+                 ("secs", "right"), ("results", "right"), ("dirs read", "right"),
+                 ("missed, or why not run", "left")):
+        t.add_column(c, justify=j, overflow="fold")
+    for r in results:
+        got, of = r.dirs_read
+        if r.state == "skipped":
+            mark, detail = "[dim]skipped[/]", _e(r.detail)
+        elif r.state == "pass":
+            mark, detail = "[green]pass[/]", _e(r.detail)
+        else:
+            mark = "[red]failed[/]" if r.state == "failed" else "[red]MISSED[/]"
+            detail = _e("; ".join(f"{d} ({', '.join(fs)})" if fs else d
+                                  for d, fs in sweep.missed_by_dir(r.missed).items()))
+            if r.state == "failed":
+                detail = f"{_e(r.detail)}. Missed: {detail}"
+        t.add_row(_e(r.tool), _e(r.version or "?"), mark,
+                  "" if r.state == "skipped" else f"{r.seconds:.1f}",
+                  "" if r.state == "skipped" else str(r.records),
+                  "" if r.state == "skipped" else f"{got}/{of}", detail)
+    con_out.print(t)
+    for r in results:
+        if not r.coverage:
+            continue
+        cov = r.coverage
+        un = (cov.get("unexplained") or {}).get("n", 0)
+        con_out.print(f"{_e(r.tool)} target report: {cov['scanned']} file(s) scanned, "
+                      f"{cov['expected']} planted source file(s), {un} neither scanned "
+                      f"nor reported skipped, {len(cov.get('unreported') or [])} "
+                      f"invocation(s) with no report")
+        for msg in orchestrator.coverage_health(cov):
+            con_out.print(f"  [yellow]{_e(r.tool)}[/]: {_e(msg)}")
+    ran = [r for r in results if r.state != "skipped"]
+    bad = [r for r in ran if r.problem]
+    skipped = len(results) - len(ran)
+    tail = f"{skipped} skipped. Wall time {wall:.0f} s."
+    if bad:
+        con_out.print(f"[red bold]coverage:[/] {len(bad)} of {len(ran)} tool(s) that ran "
+                      f"returned nothing from planted files they are expected to read: "
+                      f"{_e(', '.join(r.tool for r in bad))}. {tail} A default skip "
+                      f"after an upgrade looks like this; see IMPROVEMENT-PLAN item 23.")
+        return False
+    con_out.print(f"[green]coverage:[/] all {len(ran)} tool(s) that ran returned results "
+                  f"from every planted file they are expected to read. {tail}")
+    return True
 
 
 @app.command()
