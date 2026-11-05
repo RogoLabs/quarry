@@ -568,6 +568,175 @@ def runs() -> None:
     con_out.print(t)
 
 
+def run_status(con, run_id: int) -> dict | None:
+    """Everything /runs/<id> shows about a run, as one document. `quarry status` prints
+    it as labelled lines or as JSON; both come from this dict, so they cannot disagree.
+
+    Built only from `web.queries`, the functions the run page renders, so an agent
+    reading this and an operator reading the page see the same numbers. A second copy
+    of the SQL would drift from the page the way the funnel table once drifted from
+    its own links (IMPROVEMENT-PLAN items 8 and 22)."""
+    from .web import queries as q
+    run = q.run_summary(con, run_id)
+    if run is None:
+        return None
+    header = {k: run.get(k) for k in ("id", "target", "git_sha", "status", "started_at",
+                                       "finished_at", "license_spdx", "license_osi")}
+    header.update(occurrences=run["total"], live=run["live"],
+                  suppressed=run["total"] - run["live"], producers=run["producers"])
+    stages = []
+    for i, s in enumerate(q.funnel_stages(con, run_id), 1):
+        row = {"step": i, **s, "in": None, "out": s.get("remaining")}
+        if row["out"] is not None:
+            # What entered this stage: what left it, plus what it took out, less what
+            # it brought back or what arrived. Equal to the previous row's `out`.
+            row["in"] = (row["out"] + s["kill"] + s["defer"] + s["merge"]
+                         - s.get("restored", 0) - s.get("arrived", 0))
+        stages.append(row)
+    return {
+        "run": header,
+        "scanners": [{**t, "outcome": q.scan_outcome(t)} for t in run["scan_tools"]],
+        "health": run["health"],
+        "funnel": stages,
+        "verdicts": {"by_verdict": q.verdict_counts(con, run_id),
+                     "by_seat": q.verdict_counts_by_seat(con, run_id)},
+        "advisories": q.advisories(con, run_id),
+    }
+
+
+def _line(value) -> str:
+    """A value for one `key: value` line. Paths, notes and tool messages can come from
+    the target or a sandboxed tool, so control and invisible characters are removed
+    and line breaks flattened: one fact has to stay one line."""
+    if value is None or value == "":
+        return "none"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    from . import taint
+    return " ".join(taint.scrub_text(value, 2000).split())
+
+
+def _key(value) -> str:
+    """A key segment: never empty, never containing a space or a colon."""
+    return _line(value).replace(" ", "-").replace(":", "-")
+
+
+def _pairs(**fields) -> str:
+    return " ".join(f"{k.replace('_', '-')}={_key(v)}" for k, v in fields.items())
+
+
+def status_lines(s: dict) -> list[str]:
+    """`run_status` as text. Every line is `key: value`. A key has no spaces, so
+    `grep '^scanner\\.'` or `grep '^funnel\\.'` selects a section. Counts about one
+    thing share its line as `name=value` pairs; free text gets a line of its own."""
+    r = s["run"]
+    out = [f"run: {r['id']}",
+           f"run.target: {_line(r['target'])}",
+           f"run.git_sha: {_line(r['git_sha'])}",
+           f"run.status: {_line(r['status'])}",
+           f"run.started_at: {_line(r['started_at'])}",
+           f"run.finished_at: {_line(r['finished_at'])}",
+           f"run.license: {_line(r['license_spdx'])} "
+           + _pairs(osi=None if r["license_osi"] is None else bool(r["license_osi"])),
+           "run.occurrences: " + _pairs(total=r["occurrences"], live=r["live"],
+                                        suppressed=r["suppressed"],
+                                        producers=r["producers"])]
+
+    if not s["scanners"]:
+        out.append("scanners: none recorded")
+    for t in s["scanners"]:
+        k = f"scanner.{_key(t['tool'])}"
+        out.append(f"{k}: " + _pairs(outcome=t["outcome"], rc=t.get("rc"),
+                                     records=t.get("records"), seconds=t.get("seconds"),
+                                     evidence=f"{t.get('captured', 0)}/{t.get('lined', 0)}"))
+        for field in ("skipped", "error", "note"):
+            if t.get(field):
+                out.append(f"{k}.{field}: {_line(t[field])}")
+        cov = t.get("coverage")
+        if isinstance(cov, dict):
+            un = cov.get("unexplained") if isinstance(cov.get("unexplained"), dict) else {}
+            out.append(f"{k}.coverage: " + _pairs(
+                scanned=cov.get("scanned"), expected=cov.get("expected"),
+                unexplained=un.get("n", 0), unreported=len(cov.get("unreported") or [])))
+            for path in un.get("examples") or []:
+                out.append(f"{k}.coverage.unexplained.example: {_line(path)}")
+            for label in cov.get("unreported") or []:
+                out.append(f"{k}.coverage.unreported: {_line(label)}")
+            for reason, sk in sorted((cov.get("skipped") or {}).items()):
+                sk = sk if isinstance(sk, dict) else {}
+                out.append(f"{k}.coverage.skipped.{_key(reason)}: {sk.get('n', 0)}")
+                for path in sk.get("examples") or []:
+                    out.append(f"{k}.coverage.skipped.{_key(reason)}.example: {_line(path)}")
+            for kind, n in sorted((cov.get("errors") or {}).items()):
+                out.append(f"{k}.coverage.errors.{_key(kind)}: {n}")
+
+    if not s["health"]:
+        out.append("health: none")
+    for h in s["health"]:
+        out.append(f"health.{_key(h['source'])}.{_key(h['tool'])}: {_line(h['message'])}")
+
+    if not s["funnel"]:
+        out.append("funnel: not run")
+    for st in s["funnel"]:
+        fields = {"step": st["step"], "in": st["in"]}
+        if st.get("arrived"):
+            fields["arrived"] = st["arrived"]
+        else:
+            fields.update({a: st.get(a, 0) for a in ("kill", "defer", "merge", "boost")})
+            fields["restored"] = st.get("restored", 0)
+        fields.update(out=st["out"], heuristic=bool(st.get("heuristic")))
+        out.append(f"funnel.{_key(st['stage'])}: " + _pairs(**fields))
+    if s["funnel"] and "drift" in s["funnel"][-1]:
+        # The ledger arithmetic against the live count; anything but 0 is a defect.
+        out.append(f"funnel.drift: {s['funnel'][-1]['drift']}")
+
+    v = s["verdicts"]
+    out.append("verdicts: " + _pairs(**v["by_verdict"]))
+    for seat, counts in sorted(v["by_seat"].items()):
+        out.append(f"verdicts.{_key(seat)}: " + _pairs(**counts))
+
+    out.append(f"advisories: {len(s['advisories'])}")
+    for a in s["advisories"]:
+        k = f"advisory.{a['id']}"
+        out.append(f"{k}: " + _pairs(verdict=a.get("verdict"), lens=a.get("model"),
+                                     finding=a.get("finding_id")))
+        out.append(f"{k}.finding_path: {_line(a.get('finding_path'))}")
+        out.append(f"{k}.file: {_line(a.get('path'))}")
+        out.append(f"{k}.sha256: {_line(a.get('sha256'))}")
+        out.append(f"{k}.created_at: {_line(a.get('created_at'))}")
+    return out
+
+
+@app.command()
+def status(run_id: int = typer.Argument(..., help="a run id, as `quarry runs` lists"),
+           as_json: bool = typer.Option(False, "--json",
+                                        help="the same facts as one JSON document")) -> None:
+    """A run as plain text: scanners, health warnings, funnel, verdicts and advisories,
+    one labelled fact per line. The same queries as the run page; opens the database
+    read-only."""
+    from .migrations import MIGRATIONS
+    paths = config.paths()
+    if not paths.db.exists():
+        typer.echo(f"no database at {paths.db}", err=True)
+        raise typer.Exit(1)
+    connection = db.connect(paths.db, readonly=True)
+    if connection.execute("PRAGMA user_version").fetchone()[0] < len(MIGRATIONS):
+        # An older schema lacks tables the queries read. Upgrade it the way every
+        # other command does, which is the one case where status writes.
+        connection.close()
+        connection = db.connect(paths.db)
+    data = run_status(connection, run_id)
+    if data is None:
+        typer.echo(f"no run {run_id}", err=True)
+        raise typer.Exit(1)
+    if as_json:
+        # ensure_ascii: a control or bidi character from a target path reaches the
+        # terminal as an escape sequence written out, never as the character.
+        typer.echo(json.dumps(data, indent=2, sort_keys=True, default=str))
+    else:
+        typer.echo("\n".join(status_lines(data)))
+
+
 @app.command()
 def quarantine(run_id: int) -> None:
     """Show what ingest moved aside for a run: symlinks destroyed, configs quarantined."""

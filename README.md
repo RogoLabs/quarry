@@ -20,6 +20,7 @@ quarry ingest owner/repo        # anonymous clone into a per-run APFS sparse ima
 quarry scan 1                   # seven scanners under sandbox-exec, no network, no models
 quarry funnel 1                 # thirteen ordered stages; nothing is deleted
 quarry killed 1                 # audit what the funnel suppressed, and why
+quarry status 1                 # the run page as text, one fact per line (or --json)
 quarry validate 1 --dry-run     # plan which probes fit this codebase
 quarry validate 1               # stand the target up in Docker and probe the survivors
 # a real-world target usually needs more, e.g. VulnLookup:
