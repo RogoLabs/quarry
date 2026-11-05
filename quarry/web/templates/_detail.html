@@ -202,7 +202,9 @@
    assignments would have silently overridden the stylesheet. They live in CSS now and
    only the scroll position is set from script.
 
-   Re-runs on htmx settle so the killed-set peek centres too, not just the include. */
+   Re-runs on htmx settle so the killed-set peek centres too, not just the include.
+   This script arrives again with every swapped-in detail column, so the listener is
+   added once per page rather than once per swap. */
 (function () {
   function centre() {
     var hit = document.getElementById('hitline'),
@@ -212,6 +214,9 @@
       0, hit.offsetTop - pane.clientHeight / 2 + hit.offsetHeight / 2);
   }
   centre();
-  document.body.addEventListener('htmx:afterSettle', centre);
+  if (!window.quarryCentreBound) {
+    window.quarryCentreBound = true;
+    document.body.addEventListener('htmx:afterSettle', centre);
+  }
 })();
 </script>

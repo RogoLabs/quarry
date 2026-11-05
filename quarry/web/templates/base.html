@@ -25,6 +25,10 @@ if(t==='light'||t==='dark')d.dataset.theme=t;else if(t!=='system')d.dataset.them
 <link rel="icon" href="{{ asset('favicon.svg') }}" type="image/svg+xml">
 <link rel="stylesheet" href="{{ asset('theme.css') }}">
 <link rel="stylesheet" href="{{ asset('app.css') }}">
+{#  htmx keeps a snapshot of each page in localStorage for Back, by default. Here a
+    page holds findings from untrusted repositories and the form token, and neither
+    should outlive the tab on disk; Back reloads the page from the server instead. #}
+<meta name="htmx-config" content='{"historyCacheSize":0,"refreshOnHistoryMiss":true}'>
 <script src="{{ asset('htmx.min.js') }}" defer></script>
 <script src="{{ asset('alpine.min.js') }}" defer></script>
 {% block head %}{% endblock %}

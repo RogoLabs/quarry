@@ -26,7 +26,9 @@
 {% include "_pipeline.html" %}
 
 {# Below 720px the console refuses rather than reflowing: `D` on a phone is one tap
-   from a corpus-wide write, and the dispose controls are not in the DOM at all. #}
+   from a corpus-wide write. The console is hidden by CSS, but its forms are still in
+   the DOM, and `d` used to submit the hidden dismiss form; the key handler below now
+   refuses at the same width. #}
 <div class="too-small">
   <div class="m-tight center">
     <h2 class="as-text">Quarry is a keyboard console</h2>
@@ -36,10 +38,16 @@
   </div>
 </div>
 
-<div class="shell" x-data="triageKeys()" @keydown.window="key($event)">
+{#  Moving between rows swaps columns in place rather than loading the page, so the
+    columns that did not change keep their scroll position: `j` and `k` replace only
+    the detail column, `J` and `K` the occurrence and detail columns. Each row is
+    still a real link with `href`, which is what is followed before htmx has loaded,
+    and `hx-push-url` keeps the address bar and Back on the selected row. #}
+<div class="shell" x-data="triageKeys()" @keydown.window="key($event)"
+     @htmx:before-request="pick($event.detail.elt)">
 
   <!-- ---------------- column 1: producers ---------------- -->
-  <div class="col scrollable" role="region" aria-label="Producers, the unit of decision">
+  <div class="col scrollable" id="pcol" role="region" aria-label="Producers, the unit of decision">
     <div class="colhead">
       <h2>Producers</h2>
       <span class="dim sm">the unit of decision</span>
@@ -97,10 +105,12 @@
           <span class="hint">{{ bands[g.band] }}</span>
         </div>
       {% endif %}
+      {% set purl = base ~ 'producer=' ~ g.producer_id|urlencode %}
       <a class="prow {{ 'sel' if g.producer_id == selected }}"
          {% if g.producer_id == selected %}aria-current="true"{% endif %}
          title="{{ g.producer_id|visible }}"
-         href="{{ base }}producer={{ g.producer_id|urlencode }}">
+         href="{{ purl }}" hx-get="{{ purl }}" hx-push-url="true"
+         hx-target="#ocol" hx-select="#ocol" hx-select-oob="#dcol" hx-swap="outerHTML">
         <span>
           <span class="tool">{{ g.tool }}</span>
           <span class="rule">{{ g.rule_id|rule_id|visible }}</span>
@@ -126,7 +136,7 @@
   </div>
 
   <!-- ---------------- column 2: occurrences ---------------- -->
-  <div class="col scrollable" role="region" aria-label="Occurrences">
+  <div class="col scrollable" id="ocol" role="region" aria-label="Occurrences">
     <div class="colhead">
       <h2>Occurrences</h2>
       <span class="dim sm">
@@ -138,10 +148,12 @@
       </span>
     </div>
     {% for o in occurrences %}
+      {% set ourl = base ~ 'producer=' ~ selected|urlencode ~ '&occ=' ~ o.id %}
       <a class="orow {{ 'sel' if detail and o.id == detail.id }}"
          {% if detail and o.id == detail.id %}aria-current="true"{% endif %}
          title="{{ o.path|visible }}{% if o.start_line %}:{{ o.start_line }}{% endif %}"
-         href="{{ base }}producer={{ selected|urlencode }}&occ={{ o.id }}">
+         href="{{ ourl }}" hx-get="{{ ourl }}" hx-push-url="true"
+         hx-target="#dcol" hx-select="#dcol" hx-swap="outerHTML">
         <span class="p">{{ (o.path ~ (":" ~ o.start_line if o.start_line else ""))|tail_path|visible }}</span>
         <span class="s">score {{ '%.0f'|format(o.score) }}{% if o.issue_id %} · clustered{% endif %}{% if o.redacted %} · redacted{% endif %}</span>
       </a>
@@ -153,7 +165,7 @@
   </div>
 
   <!-- ---------------- column 3: detail ---------------- -->
-  <div class="col detail" role="region" aria-label="Finding detail">
+  <div class="col detail" id="dcol" role="region" aria-label="Finding detail">
     {% if detail %}
       {% include "_detail.html" %}
       {#  The note is the operator's reason, kept in the ledger beside the kill. The
@@ -238,7 +250,27 @@ function triageKeys() {
       this.$nextTick(() => this.$refs.helpBtn.focus());
     },
 
+    /* Mark the row whose column swap is starting. Only the swapped columns come back
+       from the server, so the column the row lives in keeps its old selection unless
+       it is moved here; `j` reads `.sel` to find where it is. Any other htmx request
+       inside the console (none today) is left alone. */
+    pick(el) {
+      const row = el && el.closest && el.closest('.prow,.orow');
+      if (!row) return;
+      const kind = row.classList.contains('prow') ? '.prow' : '.orow';
+      for (const r of document.querySelectorAll(kind)) {
+        r.classList.remove('sel');
+        r.removeAttribute('aria-current');
+      }
+      row.classList.add('sel');
+      row.setAttribute('aria-current', 'true');
+    },
+
     key(e) {
+      /* The console is hidden below 720px (app.css), but its forms are still in the
+         DOM, and `d` submitted the hidden dismiss form. Refuse at the same width. */
+      if (window.matchMedia('(max-width: 719px)').matches) return;
+
       /* Modifier chords are the browser's, not ours. Cmd-D arrived as key 'd' with
          metaKey set and dismissed a producer behind the bookmark dialog. */
       if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -262,8 +294,10 @@ function triageKeys() {
         const i = rows.findIndex(r => r.classList.contains('sel'));
         const next = rows[i + delta];
         if (!next) return false;
-        /* Keep the keyboard cursor in the viewport. */
+        /* Keep the keyboard cursor in the viewport. Selected before the click, so a
+           second `j` pressed before the swap lands still steps from here. */
         next.scrollIntoView({ block: 'nearest' });
+        this.pick(next);
         next.click();
         return true;
       };

@@ -409,6 +409,77 @@ def test_dismissals_that_reach_a_run_are_listed_with_a_way_back(seeded):
     assert r.headers["location"] == "/runs/2/triage", "back is a choice, never a URL"
 
 
+# ============================================================ 5. keyboard
+
+def _attrs(tag: str) -> dict[str, str]:
+    import re
+    return dict(re.findall(r'([\w:-]+)="([^"]*)"', tag))
+
+
+def test_the_key_handler_refuses_where_the_console_is_hidden(seeded):
+    """P3 item 5. Below 720px the console is hidden by CSS but its forms stay in the
+    DOM, and `d` still submitted the hidden dismiss form."""
+    client, _ = seeded
+    page = client.get("/runs/1/triage").text
+    css = client.get("/static/app.css").text
+    assert "@media (max-width:719px)" in css, "the breakpoint the handler mirrors"
+    handler = page.split("key(e) {", 1)[1]
+    gate = "if (window.matchMedia('(max-width: 719px)').matches) return;"
+    assert gate in handler
+    assert handler.index(gate) < handler.index("e.key === 'd'"), \
+        "the gate must run before any key is dispatched"
+
+
+def test_row_moves_swap_columns_in_place_and_keep_the_url(seeded):
+    """`j`/`k` did full page loads, which lost every column's scroll position."""
+    import re
+    client, _ = seeded
+    page = client.get("/runs/1/triage").text
+    for col in ("pcol", "ocol", "dcol"):
+        assert f'id="{col}"' in page, col
+    prows = [_attrs(t) for t in re.findall(r'<a class="prow[^>]*>', page)]
+    orows = [_attrs(t) for t in re.findall(r'<a class="orow[^>]*>', page)]
+    assert prows and orows
+    for a in prows:
+        assert a["hx-get"] == a["href"] and a["hx-push-url"] == "true"
+        assert (a["hx-target"], a["hx-select"], a["hx-select-oob"]) == \
+            ("#ocol", "#ocol", "#dcol"), "a producer move replaces columns 2 and 3"
+    for a in orows:
+        assert a["hx-get"] == a["href"] and a["hx-push-url"] == "true"
+        assert (a["hx-target"], a["hx-select"]) == ("#dcol", "#dcol"), \
+            "an occurrence move replaces only the detail column"
+        assert "hx-select-oob" not in a
+    # the swap moves the selection in the column that was not replaced
+    assert '@htmx:before-request="pick($event.detail.elt)"' in page
+    assert "this.pick(next);" in page
+
+
+def test_an_htmx_row_request_returns_the_columns_it_selects(seeded):
+    client, con = seeded
+    oid = con.execute("SELECT id FROM live_occurrences WHERE run_id=1 AND "
+                      "producer_id='bandit:B101' LIMIT 1").fetchone()["id"]
+    r = client.get(f"/runs/1/triage?producer=bandit%3AB101&occ={oid}",
+                   headers={"HX-Request": "true"})
+    assert r.status_code == 200
+    assert 'id="ocol"' in r.text and 'id="dcol"' in r.text
+    selected = r.text.split('class="orow sel"', 1)[1].split(">", 1)[0]
+    assert f"occ={oid}" in selected, "the response selects the requested row"
+
+
+def test_history_is_not_cached_in_local_storage(seeded):
+    """htmx's Back cache would write findings from untrusted repositories, and the
+    form token, to localStorage."""
+    client, _ = seeded
+    page = client.get("/runs/1/triage").text
+    assert '"historyCacheSize":0' in page and '"refreshOnHistoryMiss":true' in page
+
+
+def test_the_centring_script_binds_once_however_often_it_is_swapped_in(seeded):
+    client, _ = seeded
+    page = client.get("/runs/1/triage").text
+    assert "window.quarryCentreBound" in page
+
+
 def test_a_scanner_occurrence_has_no_deep_review_section(seeded):
     client, con = seeded
     oid = con.execute("SELECT id FROM live_occurrences WHERE run_id=1 LIMIT 1"
