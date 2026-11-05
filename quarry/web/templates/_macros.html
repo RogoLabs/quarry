@@ -8,13 +8,18 @@
     shown. The command is built and shell-quoted in Python (queries.shell), because a
     target name is text from a database. The copy reads the <code> element's text, so
     no data ever enters the JavaScript expression. A <button> outside a form: copying
-    changes nothing on the server. #}
+    changes nothing on the server.
+
+    A browser can refuse the clipboard (an embedded pane did, with NotAllowedError),
+    and a button that silently does nothing reads as broken. On refusal the command
+    is selected instead, so Cmd+C copies it, and the button says so. #}
 {% macro cmd(text) -%}
-<span class="cmd" x-data="{ copied: false }"><code>{{ text }}</code><button type="button"
+<span class="cmd" x-data="{ state: '' }"><code>{{ text }}</code><button type="button"
   class="ghost xs" aria-label="Copy the command: {{ text }}"
-  x-on:click="navigator.clipboard.writeText($root.querySelector('code').textContent).then(() => { copied = true; setTimeout(() => copied = false, 1500) })"
-  ><span x-text="copied ? 'Copied' : 'Copy'">Copy</span></button><span class="sr-only"
-  role="status" x-text="copied ? 'Copied to clipboard' : ''"></span></span>
+  x-on:click="const c = $root.querySelector('code'); navigator.clipboard.writeText(c.textContent).then(() => { state = 'copied' }, () => { const r = document.createRange(); r.selectNodeContents(c); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); state = 'selected' }).finally(() => setTimeout(() => state = '', 2500))"
+  ><span x-text="state === 'copied' ? 'Copied' : (state === 'selected' ? 'Selected' : 'Copy')">Copy</span></button><span
+  class="sr-only" role="status"
+  x-text="state === 'copied' ? 'Copied to clipboard' : (state === 'selected' ? 'The browser refused the clipboard; the command is selected' : '')"></span></span>
 {%- endmacro %}
 
 {#  A stage's state, for the terminal-stage tables. Same roles as everywhere else:
