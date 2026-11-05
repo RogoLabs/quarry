@@ -53,8 +53,11 @@ def _concrete(running: RunningTarget, path: str) -> str:
     return "/" + _fill(running, path)
 
 
+# curl drops dot segments from a URL's path unless told not to, so the traversal
+# probe's `/files/../../etc/passwd` went out as `GET /etc/passwd`. Every probe request
+# goes out as written, which is also what its recorded `request` says it sent.
 def _status(exec_fn, url: str) -> str:
-    rc, code = exec_fn(["-s", "-o", "/dev/null", "-w", "%{http_code}",
+    rc, code = exec_fn(["-s", "--path-as-is", "-o", "/dev/null", "-w", "%{http_code}",
                         "--max-time", "5", url])
     return code.strip() if rc == 0 else ""
 
@@ -62,8 +65,8 @@ def _status(exec_fn, url: str) -> str:
 def _timing(exec_fn, url: str) -> tuple[str, float] | None:
     """(status, seconds). The status is what makes a timing comparison mean anything:
     two identifiers that both 404 time the router, not the auth check."""
-    rc, out = exec_fn(["-s", "-o", "/dev/null", "-w", "%{http_code} %{time_total}",
-                       "--max-time", "5", url])
+    rc, out = exec_fn(["-s", "--path-as-is", "-o", "/dev/null",
+                       "-w", "%{http_code} %{time_total}", "--max-time", "5", url])
     try:
         code, t = out.split()
         return (code, float(t)) if rc == 0 else None
@@ -78,7 +81,7 @@ def _auth_first(routes: list) -> list:
 
 
 def _body(exec_fn, url: str) -> str:
-    rc, out = exec_fn(["-s", "--max-time", "5", url])
+    rc, out = exec_fn(["-s", "--path-as-is", "--max-time", "5", url])
     return out if rc == 0 else ""
 
 
