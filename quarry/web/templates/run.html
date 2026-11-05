@@ -320,12 +320,7 @@
       {% for s in suppressed %}
         <tr>
           <td>
-            {% if s.action == 'kill' %}<span class="pill killed">kill</span>
-            {% elif s.action == 'defer' %}<span class="pill incomplete">defer</span>
-            {% elif s.action == 'merge' %}<span class="pill inert">merge</span>
-            {% elif s.action == 'boost' %}<span class="pill accent">boost</span>
-            {% elif s.action == 'arrived' %}<span class="pill incomplete">not funnelled</span>
-            {% else %}<span class="pill inert">{{ s.action }}</span>{% endif %}
+            {{ m.action_pill(s.action) }}
             {% if all_suppressed %}<span class="dim sm">{{ s.stage }}</span>{% endif %}
           </td>
           <td class="mono sm">{{ s.producer_id|visible }}</td>

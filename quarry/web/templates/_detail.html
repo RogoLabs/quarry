@@ -9,6 +9,7 @@
   shape as the operator pressed `j`, and injecting the fragment into run.html put a
   second <h1> after four <h2>s.
 #}
+{% import "_macros.html" as m %}
 <div class="dhead">
   <h2>{{ (detail.message or detail.rule_id)|visible }}</h2>
   <div class="loc">{{ detail.path|visible }}{% if detail.start_line %}:{{ detail.start_line }}{% endif %}</div>
@@ -125,10 +126,7 @@
     {% for v in detail.verdicts %}
     <div class="verdict v-{{ v.verdict }}">
       <div class="vhead">
-        {% if v.verdict == 'confirmed' %}<span class="pill verified">confirmed</span>
-        {% elif v.verdict == 'needs-review' %}<span class="pill incomplete">needs review</span>
-        {% elif v.verdict == 'rejected' %}<span class="pill killed">rejected</span>
-        {% else %}<span class="pill inert">{{ v.verdict }}</span>{% endif %}
+        {{ m.verdict_pill(v.verdict) }}
         <span class="pill inert">{{ v.seat|visible }}</span>
         <span class="pill inert">lens {{ v.model|visible }}</span>
         <span class="vmeta">executed {{ v.executed_score }} · evidence {{ v.evidence_score }}
@@ -166,19 +164,12 @@
         {% for p in detail.provenance %}
         <tr>
           <td class="ink">{{ p.stage }}</td>
-          <td>
-            {#  `defer` is NOT `kill`. It was rendered in the same red as a kill, one
-                line from a legend saying it means "a rate limiter ran out, not
-                evidence" — the palette asserting an equivalence the schema was built
-                to refuse. A defer is unfinished work that may still be a real
-                finding; a merge is bookkeeping with no recall loss. #}
-            {% if p.action == 'kill' %}<span class="pill killed">kill</span>
-            {% elif p.action == 'defer' %}<span class="pill incomplete">defer</span>
-            {% elif p.action == 'merge' %}<span class="pill inert">merge</span>
-            {% elif p.action == 'boost' %}<span class="pill accent">boost</span>
-            {% elif p.action == 'resurrect' %}<span class="pill verified">resurrect</span>
-            {% else %}<span class="pill inert">{{ p.action }}</span>{% endif %}
-          </td>
+          {#  `defer` is NOT `kill`. It was rendered in the same red as a kill, one
+              line from a legend saying it means "a rate limiter ran out, not
+              evidence" — the palette asserting an equivalence the schema was built
+              to refuse. A defer is unfinished work that may still be a real
+              finding; a merge is bookkeeping with no recall loss. #}
+          <td>{{ m.action_pill(p.action) }}</td>
           <td class="delta">{{ '%+.0f'|format(p.score_delta) if p.score_delta else '' }}</td>
           <td class="wrap-normal dim">
             {% if not p.deterministic %}<span class="pill incomplete">recall risk</span> {% endif %}{{ p.reason|visible }}</td>

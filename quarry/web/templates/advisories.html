@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
 {% set nav = 'advisories' %}
 {% set nav_run = run.id if run else none %}
 {% block title %}Advisories{% if run %} · {{ run.target }}{% endif %} · Quarry{% endblock %}
@@ -28,9 +29,7 @@
             <span class="dim sm">{{ a.target|visible }}</span></td>
           <td class="mono sm">{{ (a.finding_path or a.finding_id)|tail_path(40)|visible }}{% if a.symbol %}
             <span class="dim">{{ a.symbol|visible }}</span>{% endif %}</td>
-          <td>{% if a.verdict == 'confirmed' %}<span class="pill verified">confirmed</span>
-              {% elif a.verdict %}<span class="pill inert">{{ a.verdict }}</span>
-              {% else %}<span class="pill unmeasured">no verdict row</span>{% endif %}
+          <td>{{ m.verdict_pill(a.verdict) }}
               {% if a.model %}<span class="dim sm">{{ a.model|visible }}</span>{% endif %}</td>
           <td class="mono sm nowrap"><a href="/advisories/{{ a.id }}">{{ a.path.rsplit('/', 1)[-1]|visible }}</a></td>
           <td class="mono sm dim nowrap">{{ a.created_at|local }}</td>

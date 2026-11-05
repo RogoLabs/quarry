@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
 {% set nav = 'research' %}
 {% block title %}Deep review{% endblock %}
 {% block body %}
@@ -92,11 +93,7 @@
           <td class="r"><a href="/research/{{ r.id }}">{{ r.id }}</a></td>
           <td>{{ r.target }}</td>
           <td>
-            {% if r.status == 'done' %}<span class="pill verified">done</span>
-            {% elif r.status in ('running', 'starting') %}<span class="pill accent">{{ r.status }}</span>
-            {% elif r.status == 'stopped' %}<span class="pill inert">stopped</span>
-            {% elif r.status in ('died','stalled') %}<span class="pill alarm">{{ r.status }}</span>
-            {% else %}<span class="pill unmeasured">{{ r.status }}</span>{% endif %}
+            {{ m.research_pill(r.status) }}
             {#  The reason is visible text, not a `title=`. It already was here; the
                 detail page was the regression. #}
             {% if r.status_why %}<div class="dim xs mt-1">{{ r.status_why }}</div>{% endif %}
