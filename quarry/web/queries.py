@@ -54,12 +54,34 @@ def _band(n_adjudicated: int, n_confirmed: int, n_total: int) -> str:
     return "unmeasured"
 
 
+#: A WHERE fragment over `live_occurrences o`: the occurrence is ready for triage.
+#: A deep-review candidate is ready only once a funnel pass has seen it, which means
+#: it cleared the Layer 2 gate: a gate failure is a kill or a defer, so a live deep
+#: occurrence with any funnel event passed. Before this, candidates that no pass had
+#: seen (a review still running, or one finished since the last `quarry funnel`)
+#: reached triage with their quote unchecked and their refutation unread. An
+#: operator event does not count: dismissing is not funnelling.
+TRIAGE_READY = """(o.producer_id NOT IN (SELECT id FROM producers WHERE tool = 'deep')
+     OR EXISTS (SELECT 1 FROM funnel_events g
+                WHERE g.occurrence_id = o.id AND g.stage != 'operator'))"""
+
+
+def held_for_funnel(con: sqlite3.Connection, run_id: int) -> int:
+    """Live deep-review candidates that triage holds back until a funnel pass has
+    seen them. The triage page states this number, so the live count above the
+    console still adds up."""
+    return con.execute(
+        f"SELECT COUNT(*) c FROM live_occurrences o WHERE o.run_id = ? "
+        f"AND NOT {TRIAGE_READY}", (run_id,)).fetchone()["c"]
+
+
 def producer_groups(con: sqlite3.Connection, run_id: int,
                     verdict: str | None = None) -> list[ProducerGroup]:
     """Live findings, grouped by producer, banded and ordered for triage.
 
     `verdict` narrows to occurrences whose finding's latest verdict in this run is in
-    that state (see FINDING_HAS_VERDICT); an unknown state yields no groups."""
+    that state (see FINDING_HAS_VERDICT); an unknown state yields no groups. Deep
+    candidates no funnel pass has seen are left out (TRIAGE_READY)."""
     if verdict is not None and verdict not in VERDICT_STATES:
         return []
     extra, args = ("", (run_id,)) if not verdict else (
@@ -74,7 +96,7 @@ def producer_groups(con: sqlite3.Connection, run_id: int,
         JOIN producers p       ON p.id = o.producer_id
         JOIN findings  f       ON f.id = o.finding_id
         LEFT JOIN occurrence_rank rk ON rk.occurrence_id = o.id
-        WHERE o.run_id = ?""" + extra + """
+        WHERE o.run_id = ? AND """ + TRIAGE_READY + extra + """
         GROUP BY p.id
     """, args).fetchall()
 
@@ -113,7 +135,7 @@ def occurrences_for(con: sqlite3.Connection, run_id: int, producer_id: str,
         FROM live_occurrences o
         JOIN findings f ON f.id = o.finding_id
         LEFT JOIN occurrence_rank rk ON rk.occurrence_id = o.id
-        WHERE o.run_id = ? AND o.producer_id = ?""" + extra + """
+        WHERE o.run_id = ? AND o.producer_id = ? AND """ + TRIAGE_READY + extra + """
         ORDER BY rk.score DESC, o.path, o.start_line
         LIMIT ?""", (run_id, producer_id, *args, limit))]
 
@@ -131,8 +153,8 @@ def occurrences_total(con: sqlite3.Connection, run_id: int, producer_id: str,
     extra, args = ("", ()) if not verdict else (" AND " + FINDING_HAS_VERDICT,
                                                 (run_id, verdict))
     return con.execute(
-        "SELECT COUNT(*) c FROM live_occurrences o WHERE o.run_id=? AND o.producer_id=?"
-        + extra, (run_id, producer_id, *args)).fetchone()["c"]
+        "SELECT COUNT(*) c FROM live_occurrences o WHERE o.run_id=? AND o.producer_id=? "
+        "AND " + TRIAGE_READY + extra, (run_id, producer_id, *args)).fetchone()["c"]
 
 
 def occurrence(con: sqlite3.Connection, oid: int) -> dict[str, Any] | None:
@@ -162,6 +184,30 @@ def evidence(con: sqlite3.Connection, blob_sha: str | None) -> dict[str, Any] | 
     return {"path": r["path"], "start_line": r["start_line"],
             "end_line": r["end_line"], "lines": text.split("\n"),
             "file_sha256": r["file_sha256"]}
+
+
+def research_finding(con: sqlite3.Connection, oid: int) -> dict[str, Any] | None:
+    """The deep-review record behind an occurrence, or None for a scanner's.
+
+    A deep occurrence used to show in the detail pane like any scanner hit: no model,
+    no quote check, no refutation. Those are the facts its Layer 2 gate decided on,
+    so the pane shows them and links back to the research run."""
+    r = con.execute(
+        """SELECT rf.id, rf.research_id, rf.lens, rf.model, rf.family, rf.title,
+                  rf.quote_verified, rf.n_refuted, rf.n_survived, rf.refuter_errors,
+                  rf.refutations, rr.run_id
+           FROM research_findings rf JOIN research_runs rr ON rr.id = rf.research_id
+           WHERE rf.occurrence_id = ? ORDER BY rf.id LIMIT 1""", (oid,)).fetchone()
+    if r is None:
+        return None
+    d = dict(r)
+    try:
+        refs = json.loads(d.get("refutations") or "[]")
+    except ValueError:
+        refs = []
+    d["refutations"] = [x for x in refs if isinstance(x, dict)] \
+        if isinstance(refs, list) else []
+    return d
 
 
 def provenance(con: sqlite3.Connection, oid: int) -> list[dict[str, Any]]:
@@ -434,9 +480,11 @@ def run_summary(con: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
                              (run_id,)).fetchone()["c"]
     d["live"] = con.execute("SELECT COUNT(*) c FROM live_occurrences WHERE run_id=?",
                             (run_id,)).fetchone()["c"]
+    # The producers triage lists, so the card and the console agree.
     d["producers"] = con.execute(
-        "SELECT COUNT(DISTINCT producer_id) c FROM live_occurrences WHERE run_id=?",
-        (run_id,)).fetchone()["c"]
+        "SELECT COUNT(DISTINCT o.producer_id) c FROM live_occurrences o "
+        f"WHERE o.run_id=? AND {TRIAGE_READY}", (run_id,)).fetchone()["c"]
+    d["held"] = held_for_funnel(con, run_id)
     m = db.read_manifest(con, run_id)
     tools = (m.get("scan") or {}).get("tools") or {}
     d["scan_tools"] = [{"tool": t, **i} for t, i in sorted(tools.items())
@@ -728,10 +776,21 @@ def research_detail(con: sqlite3.Connection, rid: int) -> dict[str, Any] | None:
            ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'error' THEN 1
                                 WHEN 'pending' THEN 2 ELSE 3 END,
                     updated_at DESC LIMIT ?""", (rid, UNITS_SHOWN))]
+    # Each candidate carries where its occurrence stands, so the card can link to it:
+    # into triage when it is there, otherwise to its evidence and ledger, which say
+    # what the funnel did with it.
     head["findings"] = [dict(r) for r in con.execute(
-        """SELECT * FROM research_findings WHERE research_id=?
-           ORDER BY quote_verified DESC, n_survived DESC, n_refuted ASC, id
-           LIMIT ?""", (rid, FINDINGS_SHOWN))]
+        f"""SELECT rf.*, o.run_id AS occ_run, o.producer_id AS occ_producer,
+                   EXISTS (SELECT 1 FROM live_occurrences l
+                           WHERE l.id = rf.occurrence_id) AS occ_live,
+                   EXISTS (SELECT 1 FROM funnel_events g
+                           WHERE g.occurrence_id = rf.occurrence_id
+                             AND g.stage != 'operator') AS occ_funnelled
+            FROM research_findings rf
+            LEFT JOIN occurrences o ON o.id = rf.occurrence_id
+            WHERE rf.research_id=?
+            ORDER BY rf.quote_verified DESC, rf.n_survived DESC, rf.n_refuted ASC, rf.id
+            LIMIT ?""", (rid, FINDINGS_SHOWN))]
     for f in head["findings"]:
         try:
             f["refutations"] = json.loads(f.get("refutations") or "[]")

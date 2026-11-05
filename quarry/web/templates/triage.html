@@ -9,6 +9,7 @@
   <span><a href="/runs/{{ run.id }}">{{ run.target }}</a>
     <span class="dim">@{{ (run.git_sha or '')[:8] }}</span></span>
   <span><b>{{ run.live }}</b> live <span class="dim">of {{ run.total }}</span></span>
+  {% if run.held %}<span><b>{{ run.held }}</b> held for the funnel</span>{% endif %}
   <span><b>{{ run.producers }}</b> producers</span>
   <span class="dim">sorted by band, never severity</span>
 </div>
@@ -59,6 +60,15 @@
          class="{{ 'on' if verdict == s }}" {% if verdict == s %}aria-current="true"{% endif %}>{{ s }} <span class="num">{{ verdict_counts[s] }}</span></a>
       {% endfor %}
     </nav>
+
+    {#  Deep candidates wait here until a funnel pass has run their Layer 2 gate. The
+        count is stated so the live number above still adds up. #}
+    {% if run.held %}
+    <p class="note pad-x" role="note"><b>{{ run.held }}</b> deep-review candidate(s) are not
+      listed: no funnel pass has seen them, so their quote check and refutation have not
+      been applied. <a href="/runs/{{ run.id }}?arrived=1">See them</a>, or run
+      <code>quarry funnel {{ run.id }}</code>.</p>
+    {% endif %}
 
     {% if undo %}
     {# Pinned until the next disposition, not a toast. A toast that carries the only

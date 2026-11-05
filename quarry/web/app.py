@@ -506,6 +506,7 @@ def create_app() -> FastAPI:
                     detail["evidence"] = q.evidence(c, detail["blob_sha"])
                     detail["provenance"] = q.provenance(c, detail_id)
                     detail["verdicts"] = q.verdicts_for_finding(c, detail["finding_id"])
+                    detail["research"] = q.research_finding(c, detail_id)
             # The undo strip is a restore button. It renders only when there is a
             # dismissal of this producer in this run to undo, never because a URL
             # said so: `?undo=<anything>` used to render a working restore form.
@@ -919,6 +920,7 @@ def create_app() -> FastAPI:
             d["evidence"] = q.evidence(c, d["blob_sha"])
             d["provenance"] = q.provenance(c, occurrence_id)
             d["verdicts"] = q.verdicts_for_finding(c, d["finding_id"])
+            d["research"] = q.research_finding(c, occurrence_id)
             if request.headers.get("hx-request"):
                 return templates.TemplateResponse(request, "_detail.html", {"detail": d})
             return render(request, "evidence.html", {"detail": d}, c)

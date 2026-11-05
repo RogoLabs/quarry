@@ -38,6 +38,37 @@
 
 <div class="dbody scrollable">
 
+  {#  A deep-review candidate: the facts its Layer 2 gate decided on, and the way back
+      to the research run. Every string is model output about attacker code. #}
+  {% if detail.research %}{% set rf = detail.research %}
+  <div class="sec" id="deep-review">
+    <h3>Deep review <span class="dim">· research run {{ rf.research_id }}</span></h3>
+    <div class="dtags">
+      {% if rf.quote_verified %}<span class="pill verified">quote verified</span>
+      {% else %}<span class="pill alarm">quote NOT in source</span>{% endif %}
+      <span class="pill inert">{{ rf.model|visible }}</span>
+      <span class="pill inert">family {{ rf.family|visible }}</span>
+      <span class="pill inert">lens {{ rf.lens|visible }}</span>
+      {% if rf.n_survived %}<span class="pill verified">survived ×{{ rf.n_survived }}</span>{% endif %}
+      {% if rf.n_refuted %}<span class="pill killed">refuted ×{{ rf.n_refuted }}</span>{% endif %}
+      {% if rf.refuter_errors %}<span class="pill alarm">{{ rf.refuter_errors }} refuter error</span>{% endif %}
+    </div>
+    {% if rf.refutations %}
+    <ul class="whylist">
+      {% for x in rf.refutations %}
+      <li><span class="mono">{{ (x.model or '?')|visible }}</span>: <b>{{ (x.verdict or '?')|visible }}</b>{% if x.discarded %}
+        <span class="pill incomplete">discarded: {{ x.discarded|visible }}</span>{% endif %}
+        {% if x.reason %}{{ x.reason|visible }}{% endif %}</li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="dim fs-cell">No cross-family model has answered yet.</p>
+    {% endif %}
+    <p class="fs-cell mt-2"><a href="/research/{{ rf.research_id }}#cand-{{ rf.id }}">Open this
+      candidate in deep review {{ rf.research_id }}</a></p>
+  </div>
+  {% endif %}
+
   {% if detail.redacted %}
   <div class="sec">
     <h3>Secret material</h3>
