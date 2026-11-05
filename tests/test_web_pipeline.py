@@ -86,6 +86,18 @@ def test_the_detail_pane_shows_the_verdict_and_its_evidence_as_code(seeded):
         assert RLO not in page and "‹U+202E›" in page
 
 
+def test_the_detail_pane_says_which_way_a_missing_defence_reads(seeded):
+    # A confirmed rate-limit verdict stores differs_from_baseline False, which reads as
+    # "no difference" unless the page also shows that it reproduces on sameness.
+    client, con = seeded
+    fid, oid = _finding(con, "mod3")
+    _verdict(con, fid, "confirmed", executed_score=100, reason="statistical",
+             rationale=json.dumps({**EVIDENCE, "differs_from_baseline": False,
+                                   "reproduces_when": "same"}))
+    page = client.get(f"/evidence/{oid}").text
+    assert "reproduces when" in page and ">same<" in page
+
+
 def test_a_non_json_rationale_is_still_shown(seeded):
     client, con = seeded
     fid, oid = _finding(con, "mod2")

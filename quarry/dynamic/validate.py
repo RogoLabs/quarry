@@ -86,9 +86,9 @@ class ProbeEvidence:
     # probe: the finding's effect is something the control lacks (a SQL error the plain
     # value did not raise, a cross-user delete the anonymous control was refused). "same"
     # for a finding that is the absence of a defence: a missing rate limit reproduces
-    # when the tenth request of a burst is answered exactly like a lone request, and the
-    # defence shows as a difference (a 429). Stored in the rationale, so the disclosure
-    # step reads a "same" confirmation the right way round.
+    # when every request of a bounded burst is answered exactly like a lone request, and
+    # the defence shows as a difference (a 429). Stored in the rationale, so the
+    # disclosure step reads a "same" confirmation the right way round.
     reproduces_when: str = "differs"
 
     @property

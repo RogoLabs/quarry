@@ -107,7 +107,7 @@
       {% if v.reason %}<p class="msg">{{ v.reason|visible }}</p>{% endif %}
       {% if v.fields %}
         <dl class="rationale">
-          {% for k in ['summary', 'request', 'observed', 'baseline', 'differs_from_baseline', 'determinism'] %}
+          {% for k in ['summary', 'request', 'observed', 'baseline', 'differs_from_baseline', 'reproduces_when', 'determinism'] %}
             {% if k in v.fields %}
             <dt>{{ k|replace('_', ' ') }}</dt>
             <dd><pre class="vcode">{{ v.fields[k]|string|visible }}</pre></dd>
