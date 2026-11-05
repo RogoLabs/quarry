@@ -141,9 +141,12 @@ def execute(con: sqlite3.Connection, rid: int, src: Path, *,
         text = sub.render(tag)
         t0 = time.time()
         try:
+            # 8192, not 2200: a thinking model that ignores think:false needs room for its
+            # reasoning trace plus the answer or it truncates (see ensemble.call). This is
+            # a ceiling, not a cost; a model that stops early never reaches it.
             raw, meta = E.call(u["model"],
                                E.hunt_prompt(text, lens, sub.pack.manifest(), tag),
-                               E.FINDING_SCHEMA, num_ctx=num_ctx, num_predict=2200)
+                               E.FINDING_SCHEMA, num_ctx=num_ctx, num_predict=8192)
             found = E.parse_findings(raw, lens.key, u["model"])
             for f in found:
                 f.quote_verified = E.verify_quote(f, src)

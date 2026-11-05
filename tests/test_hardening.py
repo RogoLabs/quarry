@@ -169,6 +169,47 @@ def test_public_json_curl_ignores_curlrc(monkeypatch):
     assert "--noproxy" not in seen[0]
 
 
+def test_length_truncation_is_retried_with_a_bigger_budget(monkeypatch):
+    # A thinking model that ignores think:false spends its whole budget on a reasoning
+    # trace and truncates (done_reason=length) before the JSON. call() must retry once
+    # with room for trace+answer and recover the result, not error the unit. Regression:
+    # qwen3.6:27b failed 42 units this exact way on run 3.
+    monkeypatch.setattr(E, "supports_thinking", lambda m: False)  # keep to generate calls
+    budgets: list = []
+    answer = json.dumps({"findings": []})
+
+    def run(argv, **kw):
+        body = json.loads(argv[argv.index("-d") + 1])
+        budgets.append(body["options"]["num_predict"])
+        done = "length" if len(budgets) == 1 else "stop"      # first truncates, retry ok
+        resp = "" if done == "length" else answer
+        out = json.dumps({"response": resp, "done_reason": done})
+        return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(E.subprocess, "run", run)
+    resp, meta = E.call("qwen3-coder:30b", "prompt", E.FINDING_SCHEMA, num_predict=2200)
+    assert len(budgets) == 2, "a length truncation must trigger exactly one retry"
+    assert budgets[0] == 2200 and budgets[1] >= 8192 and budgets[1] > budgets[0]
+    assert resp == answer                          # the unit recovers instead of erroring
+    assert meta.get("length_retry_num_predict") == budgets[1]
+
+
+def test_a_clean_first_response_makes_no_length_retry(monkeypatch):
+    # The retry must fire only on truncation: a model that answers cleanly is called once.
+    monkeypatch.setattr(E, "supports_thinking", lambda m: False)
+    calls: list = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        out = json.dumps({"response": json.dumps({"findings": []}), "done_reason": "stop"})
+        return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(E.subprocess, "run", run)
+    _, meta = E.call("qwen3-coder:30b", "prompt", E.FINDING_SCHEMA, num_predict=2200)
+    assert len(calls) == 1
+    assert "length_retry_num_predict" not in meta
+
+
 # ------------------------------------------------------------------ hdiutil detach
 
 class _FakeMount:

@@ -414,18 +414,19 @@ def _recover(d: dict) -> str:
 def supports_thinking(model: str) -> bool:
     """True when ollama reports the `thinking` capability for this model.
 
-    MEASURED (qwen3.6:27b, api/generate, num_ctx 65536, num_predict 2200, the findings
-    phase's own budget): the model spent all 2200 output tokens on an 8847-character
-    reasoning trace and returned `response: ""` with `done_reason: "length"` — the JSON
-    answer never started, so the unit produced nothing but an error. The same call with
-    `think: false` returned valid findings in 404 tokens with `done_reason: "stop"`. A
-    thinking model counts its reasoning against the same output budget as the answer, so
-    a bounded num_predict truncates it before the schema is satisfied; `_recover`'s read
-    of the `thinking` field cannot help once that field is itself cut off mid-token.
+    A thinking model counts its reasoning against the same output budget as the answer,
+    so a bounded num_predict truncates it before the schema is satisfied; `_recover`'s
+    read of the `thinking` field cannot help once that field is itself cut off mid-token.
+    Sending `think: false` is meant to stop the reasoning, and on an earlier qwen3.6:27b
+    build it did (valid findings in 404 tokens, done_reason=stop). It is NOT reliable:
+    the qwen3.5-renderer build (thinking default true) ignores it and still truncated 42
+    of its units on run 3. So treat this gate as a cheap first attempt only; the real
+    guarantee is the length-retry with a larger budget in `call`, which completes the
+    trace and lets `_recover` read the answer out of `thinking`.
 
-    This gate is load-bearing, not an optimisation: ollama rejects the `think` option
-    for a model that does not advertise the capability (devstral:24b, qwen3-coder:30b),
-    so `think: false` may only be sent to a model this returns True for.
+    This gate is load-bearing even so, not an optimisation: ollama rejects the `think`
+    option for a model that does not advertise the capability (devstral:24b,
+    qwen3-coder:30b), so `think: false` may only be sent to a model this returns True for.
     """
     try:
         p = subprocess.run(["ollama", "show", model],
@@ -481,6 +482,22 @@ def call(model: str, prompt: str, schema: dict | None, *, num_ctx: int = 65536,
     if p.returncode != 0:
         raise RuntimeError(f"{model}: curl failed: {p.stderr[:200]}")
     d = json.loads(p.stdout)
+    # A thinking model can ignore `think: false` and spend the whole output budget on a
+    # reasoning trace, truncating before the JSON answer begins (done_reason=length).
+    # MEASURED: on run 3, qwen3.6:27b (qwen3.5 renderer, thinking default true) did this
+    # at num_predict=2200 despite think:false and errored 42 of its units (~28%). The
+    # think:false gate above is a cheap first attempt, not a guarantee; this retry is the
+    # guarantee. Give the call room for trace plus answer and _recover reads the JSON from
+    # the `thinking` field. num_ctx (65536) bounds how far this can grow.
+    if d.get("done_reason") == "length":
+        body["options"]["num_predict"] = max(num_predict * 4, 8192)
+        p = subprocess.run([*CURL_LOOPBACK, "--max-time", str(timeout), OLLAMA,
+                            "-H", "Content-Type: application/json", "-d", json.dumps(body)],
+                           capture_output=True, text=True, timeout=timeout + 60)
+        if p.returncode != 0:
+            raise RuntimeError(f"{model}: curl failed on length retry: {p.stderr[:200]}")
+        d = json.loads(p.stdout)
+        d["length_retry_num_predict"] = body["options"]["num_predict"]
     if d.get("done_reason") not in (None, "stop"):
         raise RuntimeError(f"{model}: done_reason={d.get('done_reason')} — output truncated")
     resp = _recover(d)
