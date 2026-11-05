@@ -18,17 +18,36 @@ from typing import Callable, Iterable
 
 from .. import db, taint
 from . import ensemble as E
+from . import intent as intent_mod
+from . import verdicts
 from .pack import Subsystem, pack_subsystems
 from .profile import profile_repo
 
 Progress = Callable[[str], None]
 
+# The budget a deep run holds fixed. Named so a replay (research.replay) can record the
+# exact values it ran under, and a change to one shows up as a changed configuration
+# rather than as a silent difference in results.
+UNIT_BUDGET_TOKENS = 45_000
+NUM_CTX = 65536
+HUNT_NUM_PREDICT = 8192
+REFUTE_NUM_PREDICT = 700
+
 
 def plan(con: sqlite3.Connection, run_id: int, src: Path, *, models: list[str],
-         budget_tokens: int = 45_000, note: str = "") -> tuple[int, list[Subsystem], list]:
-    """Profile, select lenses, pack subsystems, and write the work list."""
+         budget_tokens: int = UNIT_BUDGET_TOKENS, note: str = "",
+         lenses: Iterable[str] | None = None) -> tuple[int, list[Subsystem], list]:
+    """Profile, select lenses, pack subsystems, and write the work list.
+
+    `lenses` narrows the profile's selection to those keys (a replay holds its lens set
+    fixed). It never adds a lens the profile rejected: a profile change that loses a
+    lens is something a replay should show as missed plants, not paper over."""
     prof = profile_repo(src)
-    lenses, rejected = E.select_lenses(prof)
+    selected, rejected = E.select_lenses(prof)
+    lenses_arg, wanted = lenses, set(lenses or ())
+    if lenses_arg is not None:
+        selected = [l for l in selected if l.key in wanted]
+    lenses = selected
     subs = pack_subsystems(src, budget_tokens=budget_tokens,
                            profile_summary=prof.summary())
 
@@ -42,7 +61,8 @@ def plan(con: sqlite3.Connection, run_id: int, src: Path, *, models: list[str],
                          "capabilities": prof.capabilities,
                          "artifact_kind": prof.artifact_kind,
                          "frameworks": prof.frameworks,
-                         "skipped_lenses": [{"lens": k, "why": w} for k, w in rejected]},
+                         "skipped_lenses": [{"lens": k, "why": w} for k, w in rejected],
+                         "lens_filter": sorted(wanted) if lenses_arg is not None else None},
                         default=str),
              note))
         rid = int(cur.lastrowid)
@@ -77,9 +97,14 @@ def _beat(con, rid: int) -> None:
 
 def execute(con: sqlite3.Connection, rid: int, src: Path, *,
             deadline: datetime | None = None, progress: Progress = print,
-            refute: bool = True, num_ctx: int = 65536) -> dict:
+            refute: bool = True, num_ctx: int = NUM_CTX,
+            route_intent: bool = True) -> dict:
     """Run the pending units. Safe to call again on the same research id — completed
-    units are skipped, so a killed run resumes rather than restarts."""
+    units are skipped, so a killed run resumes rather than restarts.
+
+    `route_intent` gives the authorization lens and the refuter each route's declared
+    access (research.intent). Off reproduces the prompts as they were before item 20,
+    which is what a replay compares against."""
     row = con.execute("SELECT * FROM research_runs WHERE id=?", (rid,)).fetchone()
     if row is None:
         raise RuntimeError(f"no research run {rid}")
@@ -87,16 +112,20 @@ def execute(con: sqlite3.Connection, rid: int, src: Path, *,
     prof = profile_repo(src)
     lens_by_key = {l.key: l for l in E.CATALOGUE}
     refused: list[tuple[str, str]] = []
-    subs = {s.name: s for s in pack_subsystems(src, budget_tokens=45_000,
+    subs = {s.name: s for s in pack_subsystems(src, budget_tokens=UNIT_BUDGET_TOKENS,
                                                profile_summary=prof.summary(),
                                                refused=refused)}
     for path, why in refused:
         progress(f"  [refused] {taint.scrub_text(path, 120)}: {why}")
+    imap = intent_mod.build(src) if route_intent else None
+    if imap is not None and imap.error:
+        progress(f"  [intent] route intent unavailable: {imap.error}")
     _claim(con, rid)
     # What answered, so a run can be reproduced: the Ollama version and each model's
     # digest. A tag like qwen3-coder:30b is mutable; the digest is not.
     prov = E.model_provenance(models)
     prov["refused_files"] = [{"path": p, "why": w} for p, w in refused]
+    prov["route_intent"] = imap.summary() if imap is not None else {"disabled": True}
     with db.tx(con):
         db.update_manifest(con, row["run_id"],
                            lambda m: m.setdefault("deep", {}).__setitem__(str(rid), prov))
@@ -106,6 +135,7 @@ def execute(con: sqlite3.Connection, rid: int, src: Path, *,
 
     stats = {"hunted": 0, "findings": 0, "verified": 0, "refuted": 0,
              "survived": 0, "errors": 0, "skipped_deadline": 0}
+    t_hunt = time.time()
 
     # 'running' is included deliberately: a worker killed mid-unit leaves that row
     # claimed, and without it resume would skip the one unit that never finished.
@@ -139,14 +169,18 @@ def execute(con: sqlite3.Connection, rid: int, src: Path, *,
 
         tag = E.new_tag()
         text = sub.render(tag)
+        declared = (imap.for_files([f.path for f in sub.pack.files])
+                    if imap is not None and lens.key in E.INTENT_LENSES else "")
         t0 = time.time()
         try:
             # 8192, not 2200: a thinking model that ignores think:false needs room for its
             # reasoning trace plus the answer or it truncates (see ensemble.call). This is
             # a ceiling, not a cost; a model that stops early never reaches it.
             raw, meta = E.call(u["model"],
-                               E.hunt_prompt(text, lens, sub.pack.manifest(), tag),
-                               E.FINDING_SCHEMA, num_ctx=num_ctx, num_predict=8192)
+                               E.hunt_prompt(text, lens, sub.pack.manifest(), tag,
+                                             intent=declared),
+                               E.FINDING_SCHEMA, num_ctx=num_ctx,
+                               num_predict=HUNT_NUM_PREDICT)
             found = E.parse_findings(raw, lens.key, u["model"])
             for f in found:
                 f.quote_verified = E.verify_quote(f, src)
@@ -170,8 +204,22 @@ def execute(con: sqlite3.Connection, rid: int, src: Path, *,
             progress(f"  [error] {u['subsystem'][:28]} {u['lens'][:18]} "
                      f"{u['model'][:16]}: {str(e)[:80]}")
 
+    stats["hunt_seconds"] = round(time.time() - t_hunt, 1)
+    t_refute = time.time()
     if refute:
-        stats.update(_refute_pass(con, rid, src, subs, models, deadline, progress))
+        stats.update(_refute_pass(con, rid, src, subs, models, deadline, progress,
+                                  intent=imap))
+    stats["refute_seconds"] = round(time.time() - t_refute, 1)
+    # Findings a human already judged intended on an earlier run. Still stored, refuted
+    # and funnelled like any other; counted here so the run says how many of its
+    # survivors are not new.
+    prior = con.execute(
+        """SELECT COUNT(*) AS n,
+                  COALESCE(SUM(rf.quote_verified = 1 AND rf.n_survived > 0), 0) AS kept
+             FROM research_findings rf JOIN deep_verdicts dv ON dv.id = rf.prior_verdict_id
+            WHERE rf.research_id = ? AND dv.verdict = 'intended'""", (rid,)).fetchone()
+    stats["prior_intended"] = prior["n"]
+    stats["prior_intended_survived"] = prior["kept"]
 
     remaining = con.execute("SELECT COUNT(*) c FROM research_units WHERE research_id=? "
                             "AND status='pending'", (rid,)).fetchone()["c"]
@@ -190,12 +238,17 @@ def _persist(con, rid: int, run_id: int, unit, found: list[E.Finding], src: Path
     # exactly the lines that hold secrets, and the quote and raw_result went to the DB
     # and the digest verbatim. Verification already ran on the unredacted quote.
     secrets = taint.run_secrets(src.parent)
+    # The definition enclosing each quote, read from this run's clone before the quote is
+    # redacted (a redacted quote is no longer in the file). Stored, because a later run
+    # compares against it after this clone is gone.
+    symbols = [intent_mod.locate(src, f.file, f.quote, f.line) if f.file else None
+               for f in found]
     for f in found:
         for k in ("title", "quote", "reasoning", "attacker_control",
                   "why_it_might_be_wrong"):
             setattr(f, k, taint.redact_in(getattr(f, k) or "", secrets))
     with db.tx(con):
-        for f in found:
+        for f, sym in zip(found, symbols):
             # `file` is model output, i.e. target-influenced text. "/etc/hosts" or
             # "../../.ssh/id_ed25519" here used to be read UNSANDBOXED by
             # extract_evidence and stored as an evidence blob. It crosses the same taint
@@ -220,6 +273,14 @@ def _persist(con, rid: int, run_id: int, unit, found: list[E.Finding], src: Path
                          ev.start_line, ev.end_line, ev.body, ev.bytes_raw))
             fid = finding_id(target["target"], f.file, pid,
                              ev.match_sha if ev else None, fallback=f.quote or f.title)
+            # An earlier human verdict on the same behaviour (same target, lens and file,
+            # and a matching quote or enclosing symbol). Recorded, never used to drop.
+            hit = verdicts.match(
+                verdicts.candidates(con, target["target"], f.lens, f.file, rid),
+                quote=f.quote, symbol=sym) if f.file else None
+            prior = ({"verdict_id": hit[0]["verdict_id"], "verdict": hit[0]["verdict"],
+                      "research_finding_id": hit[0]["rf_id"], "basis": hit[1]}
+                     if hit else None)
             con.execute(
                 """INSERT INTO findings (id,target,path,symbol_sha,producer_id,
                                          first_seen_run,last_seen_run)
@@ -239,23 +300,29 @@ def _persist(con, rid: int, run_id: int, unit, found: list[E.Finding], src: Path
                              "reasoning": f.reasoning,
                              "attacker_control": f.attacker_control,
                              "why_it_might_be_wrong": f.why_it_might_be_wrong,
-                             "quote": f.quote}, default=str)[:200_000]))
+                             "quote": f.quote, "symbol": sym,
+                             **({"prior_human_verdict": prior} if prior else {})},
+                            default=str)[:200_000]))
             con.execute(
                 """INSERT INTO research_findings
                      (research_id,occurrence_id,subsystem,lens,model,family,title,file,
                       quote,quote_verified,severity,reasoning,attacker_control,
-                      self_critique)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                      self_critique,symbol,prior_verdict_id,prior_match)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (rid, cur.lastrowid, unit["subsystem"], f.lens, f.model,
                  E.family(f.model), taint.scrub_text(f.title, 200), f.file,
                  taint.scrub_text(f.quote, 400), int(f.quote_verified), f.severity,
                  taint.scrub_text(f.reasoning, 1200),
                  taint.scrub_text(f.attacker_control, 600),
-                 taint.scrub_text(f.why_it_might_be_wrong, 600)))
+                 taint.scrub_text(f.why_it_might_be_wrong, 600),
+                 taint.scrub_text(sym, 200) if sym else None,
+                 prior["verdict_id"] if prior else None,
+                 prior["basis"] if prior else None))
 
 
 def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
-                 deadline, progress: Progress) -> dict:
+                 deadline, progress: Progress, *,
+                 intent: intent_mod.IntentMap | None = None) -> dict:
     """Every finding is refuted by every model from a DIFFERENT family. Same-family
     review is the configuration measured to degrade findings by 37.6%, so a finding
     with no cross-family refuter available is left unrefuted rather than self-reviewed.
@@ -270,9 +337,25 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
     deadline that cuts the pass short still spends the model on the strongest findings.
     Each finding's row is written the moment a refuter answers (the connection is in
     autocommit), so an interrupted pass resumes at the (finding, model) pair rather than
-    restarting the whole run."""
+    restarting the whole run.
+
+    Two kinds of context reach the refuter (IMPROVEMENT-PLAN item 20): the declared
+    access of the routes in the claim's file, when `intent` is given, and, when the
+    claim matched an earlier human verdict of `intended`, that verdict and its note.
+    Both are evidence for the refuter to weigh, and the prompt says so."""
     out = {"refuted": 0, "survived": 0}
     secrets = taint.run_secrets(src.parent)
+    priors: dict[int, str] = {}
+
+    def prior_text(r) -> str:
+        vid = r["prior_verdict_id"] if "prior_verdict_id" in r.keys() else None
+        if not vid:
+            return ""
+        if vid not in priors:
+            d = verdicts.detail(con, vid)
+            priors[vid] = (verdicts.prior_context(d, r["prior_match"] or "matched")
+                           if d and d["verdict"] == "intended" else "")
+        return priors[vid]
     pending = con.execute(
         "SELECT COUNT(*) FROM research_findings WHERE research_id=? AND refutations='[]'",
         (rid,)).fetchone()[0]
@@ -311,9 +394,12 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
                           refutations=json.loads(r["refutations"]))
             tag = E.new_tag()
             text = sub.render(tag)
+            declared = intent.for_file(f.file) if intent is not None else ""
             try:
-                raw, _ = E.call(m, E.refute_prompt(text, f, tag), E.REFUTE_SCHEMA,
-                                num_ctx=65536, num_predict=700)
+                raw, _ = E.call(m, E.refute_prompt(text, f, tag, intent=declared,
+                                                   prior=prior_text(r)),
+                                E.REFUTE_SCHEMA, num_ctx=NUM_CTX,
+                                num_predict=REFUTE_NUM_PREDICT)
                 rec = E.refutation_record(m, raw)
                 for k in ("reason", "counter_quote"):
                     if k in rec:

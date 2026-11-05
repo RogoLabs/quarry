@@ -238,6 +238,189 @@ def deep(run_id: int = typer.Argument(..., help="an ingested run"),
     con_out.print(f"[dim]watch it at http://127.0.0.1:8099/research/{rid}[/]")
 
 
+@app.command("deep-verdict")
+def deep_verdict(research_finding_id: int = typer.Argument(
+                     ..., help="a research finding id (quarry deep-survivors lists them)"),
+                 verdict: str = typer.Argument(..., help="intended | real | unclear"),
+                 note: str = typer.Option(..., "--note",
+                                          help="why; a later run shows it to the refuter"),
+                 by: str = typer.Option("operator", "--by", help="who judged it")) -> None:
+    """Record a human verdict on a Layer 2 deep-review finding.
+
+    Appended, never overwritten: the newest verdict on a finding is its current one. The
+    next deep run on the same target matches its findings against this one (same lens and
+    file, and a matching quote or enclosing symbol). An `intended` match is shown to the
+    refuter, and if it survives it is listed as previously judged intended, not as new.
+    """
+    from .research import verdicts
+    _, connection = _open()
+    try:
+        vid = verdicts.record(connection, research_finding_id, verdict, note, actor=by)
+    except verdicts.VerdictError as e:
+        con_out.print(f"[red]refusing:[/] {_e(e)}")
+        raise typer.Exit(1)
+    rf = connection.execute("SELECT lens, file, quote_verified, n_survived "
+                            "FROM research_findings WHERE id=?",
+                            (research_finding_id,)).fetchone()
+    con_out.print(f"verdict {vid}: research finding {research_finding_id} "
+                  f"({_e(rf['lens'])}, {_e(rf['file'])}) is "
+                  f"[bold]{_e(verdict.strip().lower())}[/]")
+    if not (rf["quote_verified"] and rf["n_survived"]):
+        con_out.print("[yellow]note:[/] this finding is not a Layer 2 survivor (quote not "
+                      "verified, or no cross-family model defended it); recorded anyway")
+
+
+@app.command("deep-survivors")
+def deep_survivors(run_id: int = typer.Argument(..., help="a run with a deep review")) -> None:
+    """List a run's Layer 2 survivors with their human verdicts.
+
+    A survivor clears the bar the report digest uses: the quote verified, and a model of
+    another family defended it. Survivors that matched an earlier human verdict are
+    listed apart from new ones, so a finding already judged intended is not presented as
+    new."""
+    from .research import verdicts
+    _, connection = _open()
+    rows = verdicts.survivors(connection, run_id)
+    if not rows:
+        con_out.print(f"[dim]no deep-review survivors for run {run_id}[/]")
+        return
+    groups = (("new", [r for r in rows if not r["prior_verdict"]]),
+              ("previously judged intended",
+               [r for r in rows if r["prior_verdict"] == "intended"]),
+              ("previously judged real or unclear",
+               [r for r in rows if r["prior_verdict"] in ("real", "unclear")]))
+    for label, group in groups:
+        if not group:
+            continue
+        t = Table(title=f"{len(group)} {label}", show_header=True, header_style="bold")
+        for c in ("id", "lens", "file", "title", "vote", "verdict", "prior"):
+            t.add_column(c)
+        for r in group:
+            prior = f"{r['prior_verdict']} (#{r['prior_rf']})" if r["prior_verdict"] else "-"
+            t.add_row(str(r["id"]), _e(r["lens"]), _e(r["file"]), _e(r["title"]),
+                      f"{r['n_survived']} defended / {r['n_refuted']} refuted",
+                      _e(r["verdict"] or "-"), _e(prior))
+        con_out.print(t)
+    for r in rows:
+        if r["verdict"]:
+            con_out.print(f"  #{r['id']} {_e(r['verdict'])} ({_e(r['verdict_at'])} UTC, "
+                          f"{_e(r['verdict_by'])}): {_e(r['note'])}")
+        if r["prior_verdict"]:
+            con_out.print(f"  #{r['id']} matched #{r['prior_rf']} ({_e(r['prior_match'])}), "
+                          f"judged {_e(r['prior_verdict'])} {_e(r['prior_at'])} UTC: "
+                          f"{_e(r['prior_note'])}")
+    con_out.print(f"[dim]{len(rows)} survivor(s): {len(groups[0][1])} new, "
+                  f"{len(groups[1][1])} previously judged intended, "
+                  f"{sum(1 for r in rows if not r['verdict'])} without a verdict of their "
+                  f"own. Record one with: quarry deep-verdict <id> intended|real|unclear "
+                  f"--note \"...\"[/]")
+
+
+def _print_replay(result: dict) -> None:
+    s = result["score"]
+    t = Table(show_header=True, header_style="bold")
+    for c in ("repo", "lenses", "units", "claims", "unsupported", "survivors",
+              "plants found (hunt)", "plants found (after refute)", "wall s"):
+        t.add_column(c)
+    for repo, r in result["repos"].items():
+        p = s["per_repo"][repo]
+        t.add_row(_e(repo), _e(", ".join(r["lenses"])), str(r["units"]), str(p["claims"]),
+                  str(p["unsupported"]), str(p["survivors"]),
+                  f"{p['found_at_hunt']}/{p['plants']}",
+                  f"{p['found_after_refute']}/{p['plants']}", f"{r['wall_seconds']:.0f}")
+    con_out.print(t)
+    m, u = s["missed_after_refute"], s["unsupported_claims"]
+    con_out.print(f"missed at the hunt: {s['missed_at_hunt']['n']}/{s['plants']} "
+                  f"{_e(s['missed_at_hunt']['ids'])}; missed after refutation: "
+                  f"{m['n']}/{s['plants']} {_e(m['ids'])}; unsupported claims: "
+                  f"{u['n']}/{u['of']}; wall {result['wall_seconds']:.0f} s"
+                  + ("" if result["complete"] else " [red](incomplete: cut by the cap)[/]"))
+
+
+@app.command("deep-replay")
+def deep_replay(models: str = typer.Option("qwen3-coder:30b,devstral:24b",
+                                           help="comma-separated; must span >=2 families"),
+                corpus: str = typer.Option("", help="corpus dir (default: the committed "
+                                                    "tests/fixtures/replay)"),
+                out: str = typer.Option("", help="result JSON (default: "
+                                                 "<data>/replay/<stamp>.json)"),
+                no_route_intent: bool = typer.Option(False, help="prompts as before item "
+                                                                 "20, to measure it"),
+                max_minutes: float = typer.Option(0.0, help="safety cap; a cut replay is "
+                                                            "marked incomplete")) -> None:
+    """Replay the fixed planted-bug set through Layer 2 and score it.
+
+    Scores missed plants (at the hunt and after cross-family refutation), unsupported
+    claims (quote not in the source) and wall time, with the models, their digests, the
+    budget and the lens set recorded. Uses a scratch database, never the operator's.
+    Compare two results with `quarry deep-replay-compare`."""
+    from datetime import datetime
+    from .research import replay
+    paths = config.paths()
+    c = replay.load(Path(corpus) if corpus else replay.DEFAULT_CORPUS)
+    problems = replay.preflight(c)
+    if problems:
+        for p in problems:
+            con_out.print(f"[red]preflight:[/] {_e(p)}")
+        raise typer.Exit(1)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    workdir = paths.root / "replay" / stamp
+    mods = [m.strip() for m in models.split(",") if m.strip()]
+    con_out.print(f"replaying {_e(c.name)}: {len(c.plants)} plants in "
+                  f"{len(c.repos)} repositories, models {_e(', '.join(mods))}, "
+                  f"route intent {'off' if no_route_intent else 'on'}")
+    try:
+        result = replay.run(c, mods, workdir=workdir, route_intent=not no_route_intent,
+                            max_minutes=max_minutes,
+                            progress=lambda m: con_out.print(_e(m)))
+    except ValueError as e:
+        con_out.print(f"[red]refusing:[/] {_e(e)}")
+        raise typer.Exit(1)
+    dest = Path(out) if out else paths.root / "replay" / f"{stamp}.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(result, indent=2, default=str))
+    _print_replay(result)
+    con_out.print(f"[dim]result: {_e(dest)}[/]")
+
+
+@app.command("deep-replay-compare")
+def deep_replay_compare(before: str = typer.Argument(..., help="earlier result JSON"),
+                        after: str = typer.Argument(..., help="later result JSON"),
+                        rescore: bool = typer.Option(False, help="score both again with "
+                                                                 "the current scorer"),
+                        corpus: str = typer.Option("", help="corpus dir for --rescore")
+                        ) -> None:
+    """Compare two replay results. A tie is a valid result; differing models, digests,
+    budget, lens set or corpus make the pair not comparable, and it says which."""
+    from .research import replay
+    a, b = (json.loads(Path(p).read_text()) for p in (before, after))
+    if rescore:
+        c = replay.load(Path(corpus) if corpus else replay.DEFAULT_CORPUS)
+        try:
+            a, b = replay.rescore(a, c), replay.rescore(b, c)
+        except ValueError as e:
+            con_out.print(f"[red]refusing:[/] {_e(e)}")
+            raise typer.Exit(1)
+        con_out.print("[dim]both rescored with the current scorer[/]")
+    d = replay.compare(a, b)
+    colour = {"better": "green", "worse": "red", "tie": "bold",
+              "mixed": "yellow"}.get(d["verdict"], "red")
+    con_out.print(f"[{colour}]{_e(d['verdict'])}[/]"
+                  + (f" [yellow]({_e(d['caution'])})[/]" if d["caution"] else ""))
+    for k, v in d["deltas"].items():
+        con_out.print(f"  {_e(k)}: {v:+}")
+    con_out.print(f"  claims: {d['claims'][0]} -> {d['claims'][1]}; unsupported: "
+                  f"{_e(d['unsupported_claims'][0])} -> {_e(d['unsupported_claims'][1])}")
+    con_out.print(f"  missed after refutation: {_e(d['missed_after_refute_ids'][0])} -> "
+                  f"{_e(d['missed_after_refute_ids'][1])}")
+    con_out.print(f"  wall seconds: {d['wall_seconds'][0]} -> {d['wall_seconds'][1]} "
+                  f"(reported, not scored)")
+    for k, v in d["what_changed"].items():
+        con_out.print(f"  changed {_e(k)}: {_e(v[0])} -> {_e(v[1])}")
+    for k, v in d["fixed_differs"].items():
+        con_out.print(f"  [red]fixed but differs[/] {_e(k)}: {_e(v[0])} -> {_e(v[1])}")
+
+
 @app.command()
 def doctor(coverage: bool = typer.Option(
         False, "--coverage",

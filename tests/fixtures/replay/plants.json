@@ -1,0 +1,105 @@
+{
+  "corpus": "quarry-replay-v1",
+  "about": "The answer key for the Layer 2 replay (IMPROVEMENT-PLAN item 21). Two small synthetic services built on docs/LEGA-CORPUS.md's Leg A idea, so the ground truth is known by construction and nothing is cloned. This file sits beside the repositories, never inside one: replay copies only each repository directory, so no model reads it. Each plant is matched by location (a quote whose enclosing definition is the planted one, or a quote that contains an anchor line) or by mention (a verified quote in a planted file whose title or reasoning names the planted route or function).",
+  "lenses": ["broken-authz-idor", "injection", "filesystem-and-path"],
+  "plants": [
+    {
+      "id": "N1",
+      "repo": "notes_app",
+      "lens": "broken-authz-idor",
+      "kind": "guard-deletion",
+      "describe": "POST /admin/users/<id>/password lost @admin_required; its three admin siblings keep it, so any logged-in user can reset any user's password.",
+      "guard": "admin_required",
+      "route": {"file": "notes/admin.py", "method": "POST", "path": "/users/<int:user_id>/password"},
+      "locations": [
+        {"file": "notes/admin.py", "symbol": "reset_password",
+         "anchors": ["def reset_password(user_id):",
+                     "@bp.route(\"/users/<int:user_id>/password\", methods=[\"POST\"])"]}
+      ],
+      "mentions": ["reset_password", "/password"]
+    },
+    {
+      "id": "N2",
+      "repo": "notes_app",
+      "lens": "broken-authz-idor",
+      "kind": "missing-ownership-check",
+      "describe": "GET /notes/<id> loads any note by id; its PUT, DELETE and share siblings go through owned_note_or_404.",
+      "locations": [
+        {"file": "notes/views.py", "symbol": "view_note",
+         "anchors": ["def view_note(note_id):"]}
+      ],
+      "mentions": ["view_note"]
+    },
+    {
+      "id": "N3",
+      "repo": "notes_app",
+      "lens": "filesystem-and-path",
+      "kind": "path-traversal",
+      "describe": "GET /files/<path:name> joins the caller's path onto the upload directory unchecked; the DELETE sibling runs it through secure_filename.",
+      "locations": [
+        {"file": "notes/files.py", "symbol": "download",
+         "anchors": ["path = os.path.join(_user_dir(), name)", "def download(name):"]}
+      ],
+      "mentions": ["download"]
+    },
+    {
+      "id": "N4",
+      "repo": "notes_app",
+      "lens": "injection",
+      "kind": "sql-injection",
+      "describe": "GET /notes/search interpolates the q parameter into SQL; every other query is parameterised.",
+      "locations": [
+        {"file": "notes/views.py", "symbol": "search_notes",
+         "anchors": ["f\"AND title LIKE '%{q}%' ORDER BY id DESC\").fetchall()",
+                     "def search_notes():"]}
+      ],
+      "mentions": ["search_notes", "/search"]
+    },
+    {
+      "id": "T1",
+      "repo": "ticket_api",
+      "lens": "broken-authz-idor",
+      "kind": "guard-deletion",
+      "describe": "GET /api/tickets/:id/history lost auth.requireUser; its eight siblings keep it, and the handler does no organisation check either.",
+      "guard": "auth.requireUser",
+      "route": {"file": "routes/tickets.js", "method": "GET", "path": "/tickets/:id/history"},
+      "locations": [
+        {"file": "routes/tickets.js", "symbol": "GET /tickets/:id/history",
+         "anchors": ["router.get('/tickets/:id/history', tickets.history)"]},
+        {"file": "controllers/tickets.js", "symbol": "history",
+         "anchors": ["exports.history = (req, res) => {"]}
+      ],
+      "mentions": ["/history", "tickets.history", "exports.history"]
+    },
+    {
+      "id": "T2",
+      "repo": "ticket_api",
+      "lens": "broken-authz-idor",
+      "kind": "guard-deletion",
+      "describe": "POST /api/admin/users/:id/role lost auth.requireAdmin; its three admin siblings keep it, so any user can make themselves admin.",
+      "guard": "auth.requireAdmin",
+      "route": {"file": "routes/admin.js", "method": "POST", "path": "/users/:id/role"},
+      "locations": [
+        {"file": "routes/admin.js", "symbol": "POST /users/:id/role",
+         "anchors": ["router.post('/users/:id/role', auth.requireUser, admin.setRole)"]},
+        {"file": "controllers/admin.js", "symbol": "setRole",
+         "anchors": ["exports.setRole = (req, res) => {"]}
+      ],
+      "mentions": ["setRole", "/role"]
+    },
+    {
+      "id": "T3",
+      "repo": "ticket_api",
+      "lens": "broken-authz-idor",
+      "kind": "missing-ownership-check",
+      "describe": "GET /api/comments/:commentId returns any comment by id; every ticket and comment sibling checks the ticket's orgId against the caller's.",
+      "locations": [
+        {"file": "controllers/tickets.js", "symbol": "showComment",
+         "anchors": ["exports.showComment = (req, res) => {"]},
+        {"file": "routes/tickets.js", "symbol": "GET /comments/:commentId",
+         "anchors": ["router.get('/comments/:commentId', auth.requireUser, tickets.showComment)"]}
+      ],
+      "mentions": ["showComment", "/comments/:commentId", "commentId"]
+    }
+  ]
+}
