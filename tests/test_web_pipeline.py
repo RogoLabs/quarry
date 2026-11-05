@@ -117,11 +117,11 @@ def test_run_page_has_the_pipeline_strip_and_a_linked_validation_card(seeded):
     page = client.get("/runs/1").text
     for stage in ("Ingest", "Scan", "Funnel", "Validate", "Report"):
         assert f'<span class="pn">{stage}</span>' in page, stage
-    for href in ("/runs/1#quarantine", "/runs/1#funnel", "/triage?run=1",
-                 "/validation?run=1", "/advisories?run=1"):
+    for href in ("/runs/1#quarantine", "/runs/1#funnel", "/runs/1/triage",
+                 "/runs/1/validation", "/runs/1/advisories"):
         assert f'href="{href}"' in page, href
     for state in ("confirmed", "needs-review", "rejected"):
-        assert f"/validation?run=1&amp;state={state}" in page, state
+        assert f"/runs/1/validation?state={state}" in page, state
     assert 'id="funnel"' in page and 'id="quarantine"' in page
 
 
@@ -137,7 +137,7 @@ def test_triage_filters_by_verdict_state(seeded):
     assert f"occ={oid}" in page, "the one confirmed occurrence is in the filtered queue"
     assert page.count('class="orow') == 1
     # the filter survives the j/k links
-    assert "verdict=confirmed&producer=" in page
+    assert "verdict=confirmed&amp;producer=" in page
     empty = client.get("/triage?run=1&verdict=rejected").text
     assert "No live finding in this run has a latest verdict" in empty
 

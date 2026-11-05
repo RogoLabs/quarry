@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% set nav = 'triage' %}
+{% set nav_run = run.id %}
 {% block title %}Triage · {{ run.target }}{% endblock %}
 
 {% block topmeta %}
@@ -17,6 +18,11 @@
 {# The document needs an h1 that does not move. The finding title in _detail.html is
    an h2, so the outline stops changing shape as the operator presses `j`. #}
 <h1 class="sr-only">Triage: {{ run.target }}</h1>
+
+{# The same strip as the run page, compact: which run this is, and the way to the
+   stage before and after it. #}
+{% set compact = true %}
+{% include "_pipeline.html" %}
 
 {# Below 720px the console refuses rather than reflowing: `D` on a phone is one tap
    from a corpus-wide write, and the dispose controls are not in the DOM at all. #}
@@ -37,7 +43,7 @@
       <h2>Producers</h2>
       <span class="dim sm">the unit of decision</span>
       <div class="spacer"></div>
-      {% if band %}<a href="/triage?run={{ run.id }}{% if verdict %}&verdict={{ verdict|urlencode }}{% endif %}" class="pill inert">clear band</a>{% endif %}
+      {% if band %}<a href="{{ here }}{% if verdict %}?verdict={{ verdict|urlencode }}{% endif %}" class="pill inert">clear band</a>{% endif %}
       <button class="ghost xs" type="button" x-ref="helpBtn" x-on:click="openHelp()"
               aria-haspopup="dialog" aria-label="Keyboard shortcuts"><kbd>?</kbd></button>
     </div>
@@ -46,10 +52,10 @@
         run in that state, and each one narrows the console to the findings behind it. #}
     <nav class="vfilter" aria-label="Filter by verdict">
       <span class="lbl">verdict</span>
-      <a href="/triage?run={{ run.id }}{% if band %}&band={{ band|urlencode }}{% endif %}"
+      <a href="{{ here }}{% if band %}?band={{ band|urlencode }}{% endif %}"
          class="{{ 'on' if not verdict }}" {% if not verdict %}aria-current="true"{% endif %}>any</a>
       {% for s in verdict_states %}
-      <a href="/triage?run={{ run.id }}&verdict={{ s }}{% if band %}&band={{ band|urlencode }}{% endif %}"
+      <a href="{{ here }}?verdict={{ s }}{% if band %}&band={{ band|urlencode }}{% endif %}"
          class="{{ 'on' if verdict == s }}" {% if verdict == s %}aria-current="true"{% endif %}>{{ s }} <span class="num">{{ verdict_counts[s] }}</span></a>
       {% endfor %}
     </nav>
@@ -77,14 +83,14 @@
         {% set ns.cur = g.band %}
         {# The band header is a link, which activates the `band` filter. #}
         <div class="band">
-          <a class="plain dim" href="/triage?run={{ run.id }}&band={{ g.band }}{% if verdict %}&verdict={{ verdict|urlencode }}{% endif %}">{{ g.band }}</a>
+          <a class="plain dim" href="{{ here }}?band={{ g.band }}{% if verdict %}&verdict={{ verdict|urlencode }}{% endif %}">{{ g.band }}</a>
           <span class="hint">{{ bands[g.band] }}</span>
         </div>
       {% endif %}
       <a class="prow {{ 'sel' if g.producer_id == selected }}"
          {% if g.producer_id == selected %}aria-current="true"{% endif %}
          title="{{ g.producer_id|visible }}"
-         href="{{ base }}&producer={{ g.producer_id|urlencode }}">
+         href="{{ base }}producer={{ g.producer_id|urlencode }}">
         <span>
           <span class="tool">{{ g.tool }}</span>
           <span class="rule">{{ g.rule_id|rule_id|visible }}</span>
@@ -101,7 +107,7 @@
     {% if not groups %}
       {% if verdict %}
       <p class="dim pad">No live finding in this run has a latest verdict of
-        <b>{{ verdict|visible }}</b>. <a href="/validation?run={{ run.id }}">See every verdict</a>.</p>
+        <b>{{ verdict|visible }}</b>. <a href="/runs/{{ run.id }}/validation">See every verdict</a>.</p>
       {% else %}
       <p class="dim pad">Nothing live. Every finding was suppressed.
         <a href="/runs/{{ run.id }}">Audit the funnel</a>.</p>
@@ -125,7 +131,7 @@
       <a class="orow {{ 'sel' if detail and o.id == detail.id }}"
          {% if detail and o.id == detail.id %}aria-current="true"{% endif %}
          title="{{ o.path|visible }}{% if o.start_line %}:{{ o.start_line }}{% endif %}"
-         href="{{ base }}&producer={{ selected|urlencode }}&occ={{ o.id }}">
+         href="{{ base }}producer={{ selected|urlencode }}&occ={{ o.id }}">
         <span class="p">{{ (o.path ~ (":" ~ o.start_line if o.start_line else ""))|tail_path|visible }}</span>
         <span class="s">score {{ '%.0f'|format(o.score) }}{% if o.issue_id %} · clustered{% endif %}{% if o.redacted %} · redacted{% endif %}</span>
       </a>

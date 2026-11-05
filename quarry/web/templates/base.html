@@ -37,12 +37,17 @@ if(t==='light'||t==='dark')d.dataset.theme=t;else if(t!=='system')d.dataset.them
       <a class="word" href="/runs">Quarry</a>
       <a class="by" href="https://rogolabs.net" rel="noopener noreferrer">by Rogo<span class="labs">Labs</span></a>
     </span>
-    {#  Pipeline order: where a run starts, then what each stage produced. #}
-    <nav aria-label="Sections">
+    {#  Pipeline order: where a run starts, then what each stage produced.
+
+        A page inside one run sets `nav_run`, and the three per-run sections then
+        link to that run's pages. Without it the nav dropped the run, so Triage
+        opened from run 1 showed whichever run was newest. #}
+    {% set _nr = nav_run|default(none) %}
+    <nav aria-label="Sections{{ ', run %d'|format(_nr) if _nr is not none }}">
       <a href="/runs" {% if nav=='runs' %}class="on" aria-current="page"{% endif %}>Runs</a>
-      <a href="/triage" {% if nav=='triage' %}class="on" aria-current="page"{% endif %}>Triage</a>
-      <a href="/validation" {% if nav=='validation' %}class="on" aria-current="page"{% endif %}>Validation</a>
-      <a href="/advisories" {% if nav=='advisories' %}class="on" aria-current="page"{% endif %}>Advisories</a>
+      <a href="{{ '/runs/%d/triage'|format(_nr) if _nr is not none else '/triage' }}" {% if nav=='triage' %}class="on" aria-current="page"{% endif %}>Triage</a>
+      <a href="{{ '/runs/%d/validation'|format(_nr) if _nr is not none else '/validation' }}" {% if nav=='validation' %}class="on" aria-current="page"{% endif %}>Validation</a>
+      <a href="{{ '/runs/%d/advisories'|format(_nr) if _nr is not none else '/advisories' }}" {% if nav=='advisories' %}class="on" aria-current="page"{% endif %}>Advisories</a>
       <a href="/research" {% if nav=='research' %}class="on" aria-current="page"{% endif %}>Deep review</a>
       <a href="/egress" {% if nav=='egress' %}class="on" aria-current="page"{% endif %}>Egress</a>
     </nav>

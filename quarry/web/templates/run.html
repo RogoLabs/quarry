@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% set nav = 'runs' %}
+{% set nav_run = run.id %}
 {% block title %}Run {{ run.id }} · {{ run.target }}{% endblock %}
 {% block body %}
 <div class="page"><div class="wrap">
@@ -23,16 +24,7 @@
   {% endif %}
 
   {#  The pipeline, left to right, each stage's count linking to its set. #}
-  <nav class="pipeline" aria-label="Pipeline for run {{ run.id }}">
-    <ol>
-    {% for st in pipeline %}
-      <li><a href="{{ st.href }}">
-        <span class="pn">{{ st.name }}</span>
-        <span class="pv">{{ st.n }}</span>
-        <span class="pu">{{ st.unit }}</span></a></li>
-    {% endfor %}
-    </ol>
-  </nav>
+  {% include "_pipeline.html" %}
 
   {#  Four stat cards, all links. A card is a promise of a drill-down; cards that do
       not drill down teach the operator that numbers here are decoration, and that
@@ -49,13 +41,13 @@
       `suppressed` carries no kill colour: suppression is the deterministic layer
       working, and red would frame it as damage. It is a count, not a warning.    #}
   <div class="cards">
-    <a class="card" href="/triage?run={{ run.id }}">
+    <a class="card" href="/runs/{{ run.id }}/triage">
       <span class="k">raw occurrences</span>
       <span class="v">{{ run.total }}</span></a>
-    <a class="card" href="/triage?run={{ run.id }}">
+    <a class="card" href="/runs/{{ run.id }}/triage">
       <span class="k">live</span>
       <span class="v">{{ run.live }}</span></a>
-    <a class="card" href="/triage?run={{ run.id }}">
+    <a class="card" href="/runs/{{ run.id }}/triage">
       <span class="k">producers to triage</span>
       <span class="v">{{ run.producers }}</span></a>
     <a class="card" href="/runs/{{ run.id }}?suppressed=all">
@@ -69,14 +61,14 @@
       seat and lens) in that state. #}
   <h2 class="h-sec">Validation: latest verdict per finding and lens</h2>
   <div class="vcard {{ 'hl' if vc.confirmed }}">
-    <a href="/validation?run={{ run.id }}&amp;state=confirmed" class="vstat">
+    <a href="/runs/{{ run.id }}/validation?state=confirmed" class="vstat">
       <span class="pill verified">confirmed</span><span class="v">{{ vc.confirmed }}</span></a>
-    <a href="/validation?run={{ run.id }}&amp;state=needs-review" class="vstat">
+    <a href="/runs/{{ run.id }}/validation?state=needs-review" class="vstat">
       <span class="pill incomplete">needs review</span><span class="v">{{ vc['needs-review'] }}</span></a>
-    <a href="/validation?run={{ run.id }}&amp;state=rejected" class="vstat">
+    <a href="/runs/{{ run.id }}/validation?state=rejected" class="vstat">
       <span class="pill killed">rejected</span><span class="v">{{ vc.rejected }}</span></a>
     <p class="note">{% if vc.total %}{{ vc.total }} verdict(s) in this run.
-      <a href="/validation?run={{ run.id }}">All of them</a>. A probe with no recorded
+      <a href="/runs/{{ run.id }}/validation">All of them</a>. A probe with no recorded
       baseline is held as needs review, so that state is the common one.{% else %}No
       verdicts yet. <code>quarry validate {{ run.id }} --dry-run</code> plans the probes;
       <code>quarry validate {{ run.id }}</code> builds the target with no network and

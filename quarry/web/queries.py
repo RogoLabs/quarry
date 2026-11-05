@@ -1018,6 +1018,15 @@ def advisory_count(con: sqlite3.Connection, run_id: int) -> int:
 
 # ------------------------------------------------------------------ pipeline strip
 
+def run_urls(rid: int) -> dict[str, str]:
+    """Where each of a run's pages lives. The run is in the path, not a query
+    parameter, so a link copied from one page and the nav on the next both keep it:
+    the nav used to drop it, and Triage opened from run 1 showed run 2."""
+    return {"run": f"/runs/{rid}", "triage": f"/runs/{rid}/triage",
+            "validation": f"/runs/{rid}/validation",
+            "advisories": f"/runs/{rid}/advisories"}
+
+
 def pipeline(con: sqlite3.Connection, run: dict[str, Any]) -> list[dict[str, Any]]:
     """The five stages of one run, each with its count and the set that count opens.
 
@@ -1027,6 +1036,7 @@ def pipeline(con: sqlite3.Connection, run: dict[str, Any]) -> list[dict[str, Any
     counts advisory drafts recorded for the run.
     """
     rid = run["id"]
+    u = run_urls(rid)
     quarantined = con.execute("SELECT COUNT(*) c FROM quarantined WHERE run_id=?",
                               (rid,)).fetchone()["c"]
     tools = con.execute(
@@ -1036,13 +1046,13 @@ def pipeline(con: sqlite3.Connection, run: dict[str, Any]) -> list[dict[str, Any
     vc = verdict_counts(con, rid)
     return [
         {"name": "Ingest", "n": quarantined, "unit": "quarantined",
-         "href": f"/runs/{rid}#quarantine"},
+         "href": f"{u['run']}#quarantine", "page": "run"},
         {"name": "Scan", "n": run["total"], "unit": f"raw, {tools} tool(s)",
-         "href": f"/runs/{rid}#funnel"},
+         "href": f"{u['run']}#funnel", "page": "run"},
         {"name": "Funnel", "n": run["live"], "unit": "live",
-         "href": f"/triage?run={rid}"},
+         "href": u["triage"], "page": "triage"},
         {"name": "Validate", "n": vc["total"], "unit": f"verdicts, {vc['confirmed']} confirmed",
-         "href": f"/validation?run={rid}"},
+         "href": u["validation"], "page": "validation"},
         {"name": "Report", "n": advisory_count(con, rid), "unit": "drafts",
-         "href": f"/advisories?run={rid}"},
+         "href": u["advisories"], "page": "advisories"},
     ]

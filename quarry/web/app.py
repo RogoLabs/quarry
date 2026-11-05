@@ -1,10 +1,12 @@
 """The triage dashboard. Loopback only.
 
-Per Seat 4: `/triage` (the queue and its detail, no route change ever),
+Per Seat 4: `/runs/{id}/triage` (the queue and its detail, no route change ever),
 `/runs/{id}` (the funnel, which *is* the live progress view), `/runs` (history).
-`/validation` lists the latest dynamic verdicts, `/advisories` the drafts `quarry
-report` wrote. `/research*` is the deep-review layer; `/egress` is the containment
-ledger. The nav runs in pipeline order.
+`/runs/{id}/validation` lists the latest dynamic verdicts, `/runs/{id}/advisories`
+the drafts `quarry report` wrote; `/validation` and `/advisories` are the same across
+every run. The run is in the path so the nav can keep it. `/research*` is the
+deep-review layer; `/egress` is the containment ledger. The nav runs in pipeline
+order.
 
 The build constraint that drives the whole design: **every number in the funnel is a
 link to the set it killed, and it renders code, not paths.** A funnel you cannot audit
@@ -455,15 +457,31 @@ def create_app() -> FastAPI:
         """Was a 404 on every page load, into the one log an operator might read."""
         return RedirectResponse(asset("favicon.svg"), status_code=302)
 
+    def scoped(request: Request, run: int | None, page: str) -> RedirectResponse:
+        """The old `/<page>?run=N` form, sent to `/runs/N/<page>` with every other
+        parameter kept. Bookmarks and links written before the run moved into the
+        path keep working, and there is one URL per view."""
+        from urllib.parse import urlencode
+        rest = [(k, v) for k, v in request.query_params.multi_items() if k != "run"]
+        url = f"/runs/{run}/{page}" + (f"?{urlencode(rest)}" if rest else "")
+        return RedirectResponse(url, status_code=302)
+
     @app.get("/triage", response_class=HTMLResponse)
-    def triage(request: Request, run: int | None = None, producer: str | None = None,
-               occ: int | None = None, band: str = "", undo: str = "",
-               verdict: str = ""):
+    def triage_latest(request: Request, run: int | None = None):
+        """Triage has no cross-run view: it always belongs to one run. With no run
+        named, that is the newest one worth opening."""
         with opened() as c:
             run_id = row_id(run) if run is not None else latest_run(c)
             if run_id is None:
                 return render(request, "empty.html", {}, c)
-            summary = q.run_summary(c, run_id)
+        return scoped(request, run_id, "triage")
+
+    @app.get("/runs/{run_id}/triage", response_class=HTMLResponse)
+    def triage(request: Request, run_id: int, producer: str | None = None,
+               occ: int | None = None, band: str = "", undo: str = "",
+               verdict: str = ""):
+        with opened() as c:
+            summary = q.run_summary(c, row_id(run_id))
             if summary is None:
                 raise HTTPException(404, "No such run.")
             # An unknown state narrows to nothing (the queries refuse it) rather
@@ -494,20 +512,24 @@ def create_app() -> FastAPI:
             if undo and not q.restorable(c, run_id, undo):
                 undo = ""
             # Every link inside the console keeps the active filters, so `J` and `j`
-            # walk the filtered set rather than silently dropping the filter.
+            # walk the filtered set rather than silently dropping the filter. `base`
+            # ends in `?` or `&`, ready for the next parameter.
             from urllib.parse import urlencode
-            keep = {"run": run_id}
+            keep = {}
             if band:
                 keep["band"] = band
             if verdict:
                 keep["verdict"] = verdict
+            here = q.run_urls(run_id)["triage"]
             return render(request, "triage.html", {
                 "run": summary, "groups": groups,
                 "selected": selected, "occurrences": occs, "detail": detail, "band": band,
                 "n_occ_total": n_occ_total, "undo": undo, "verdict": verdict,
-                "base": "/triage?" + urlencode(keep),
+                "here": here,
+                "base": here + "?" + (urlencode(keep) + "&" if keep else ""),
                 "verdict_counts": q.verdict_counts(c, run_id),
                 "verdict_states": q.VERDICT_STATES,
+                "pipeline": q.pipeline(c, summary),
             }, c)
 
     @app.post("/producers/{producer_id:path}/dismiss")
@@ -553,7 +575,8 @@ def create_app() -> FastAPI:
                               reason=note or (f"producer dismissed {'corpus-wide' if scope == 'corpus' else 'for this repo'}"))
         from urllib.parse import quote
         return RedirectResponse(
-            f"/triage?run={run_id}&undo={quote(producer_id, safe='')}", status_code=303)
+            f"{q.run_urls(run_id)['triage']}?undo={quote(producer_id, safe='')}",
+            status_code=303)
 
     @app.post("/producers/{producer_id:path}/restore")
     def restore(producer_id: str, run_id: int = Form(...)):
@@ -585,7 +608,7 @@ def create_app() -> FastAPI:
                     db.funnel(c, run_id, occurrence_id=oid, producer_id=producer_id,
                               stage="operator", action="resurrect", deterministic=False,
                               actor="operator", reason="operator dismissal withdrawn")
-        return RedirectResponse(f"/triage?run={run_id}", status_code=303)
+        return RedirectResponse(q.run_urls(run_id)["triage"], status_code=303)
 
     # ------------------------------------------------------------ deep mode
 
@@ -779,7 +802,17 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------ validation
 
     @app.get("/validation", response_class=HTMLResponse)
-    def validation(request: Request, run: int | None = None, state: str = ""):
+    def validation_all(request: Request, run: int | None = None, state: str = ""):
+        """Every run's verdicts. `?run=N` is the old spelling of `/runs/N/validation`."""
+        if run is not None:
+            return scoped(request, row_id(run), "validation")
+        return validation_page(request, None, state)
+
+    @app.get("/runs/{run_id}/validation", response_class=HTMLResponse)
+    def validation(request: Request, run_id: int, state: str = ""):
+        return validation_page(request, row_id(run_id), state)
+
+    def validation_page(request: Request, run: int | None, state: str):
         """Latest verdict per (run, finding, seat, lens), newest first.
 
         `verdicts` had a writer (validate.record_verdict) and no reader anywhere in
@@ -790,7 +823,7 @@ def create_app() -> FastAPI:
         with opened() as c:
             run_row = None
             if run is not None:
-                run_row = q.run_summary(c, row_id(run))
+                run_row = q.run_summary(c, run)
                 if run_row is None:
                     raise HTTPException(404, "No such run.")
             rows = q.latest_verdicts(c, run_id=run, state=state or None)
@@ -799,6 +832,8 @@ def create_app() -> FastAPI:
             return render(request, "validation.html", {
                 "rows": rows, "counts": counts, "state": state, "run": run_row,
                 "states": q.VERDICT_STATES, "shown_total": shown_total,
+                "here": q.run_urls(run)["validation"] if run is not None else "/validation",
+                "pipeline": q.pipeline(c, run_row) if run_row else None,
             }, c)
 
     # ------------------------------------------------------------ advisories
@@ -835,15 +870,26 @@ def create_app() -> FastAPI:
                 "sha256": hashlib.sha256(body).hexdigest(), "bytes": size}
 
     @app.get("/advisories", response_class=HTMLResponse)
-    def advisories_list(request: Request, run: int | None = None):
+    def advisories_all(request: Request, run: int | None = None):
+        """Every run's drafts. `?run=N` is the old spelling of `/runs/N/advisories`."""
+        if run is not None:
+            return scoped(request, row_id(run), "advisories")
+        return advisories_page(request, None)
+
+    @app.get("/runs/{run_id}/advisories", response_class=HTMLResponse)
+    def advisories_list(request: Request, run_id: int):
+        return advisories_page(request, row_id(run_id))
+
+    def advisories_page(request: Request, run: int | None):
         with opened() as c:
             run_row = None
             if run is not None:
-                run_row = q.run_summary(c, row_id(run))
+                run_row = q.run_summary(c, run)
                 if run_row is None:
                     raise HTTPException(404, "No such run.")
             return render(request, "advisories.html", {
                 "rows": q.advisories(c, run), "run": run_row,
+                "pipeline": q.pipeline(c, run_row) if run_row else None,
             }, c)
 
     @app.get("/advisories/{aid}", response_class=HTMLResponse)

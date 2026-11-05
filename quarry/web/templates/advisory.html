@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% set nav = 'advisories' %}
+{% set nav_run = a.run_id %}
 {% block title %}Advisory {{ a.id }} · {{ a.target }} · Quarry{% endblock %}
 {% block body %}
 <div class="page"><div class="wrap">

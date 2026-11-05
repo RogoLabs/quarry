@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% set nav = 'runs' %}
+{% set nav_run = detail.run_id %}
 {% block title %}{{ detail.path|visible }} · Quarry{% endblock %}
 {% block body %}
 {#  The no-JS fallback for /evidence/{id}. The killed-set link carries both `href` and
@@ -8,7 +9,7 @@
 <div class="page"><div class="wrap">
   <h1 class="sr-only">Evidence for {{ detail.path|visible }}</h1>
   <p class="sub"><a href="/runs/{{ detail.run_id }}">← run {{ detail.run_id }}</a>
-    · <a href="/validation?run={{ detail.run_id }}">validation</a></p>
+    · <a href="/runs/{{ detail.run_id }}/validation">validation</a></p>
   <div class="tbl detail evidence-page">{% include "_detail.html" %}</div>
 </div></div>
 {% endblock %}

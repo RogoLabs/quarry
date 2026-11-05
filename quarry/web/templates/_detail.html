@@ -101,7 +101,7 @@
         <span class="pill inert">{{ v.seat|visible }}</span>
         <span class="pill inert">lens {{ v.model|visible }}</span>
         <span class="vmeta">executed {{ v.executed_score }} · evidence {{ v.evidence_score }}
-          · run <a href="/validation?run={{ v.run_id }}">{{ v.run_id }}</a>
+          · run <a href="/runs/{{ v.run_id }}/validation">{{ v.run_id }}</a>
           · {{ v.created_at|local }}</span>
       </div>
       {% if v.reason %}<p class="msg">{{ v.reason|visible }}</p>{% endif %}

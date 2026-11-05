@@ -33,10 +33,10 @@
             {% else %}<span class="pill inert">{{ r.status }}</span>{% endif %}
           </td>
           <td class="num r"><a class="plain" href="/runs/{{ r.id }}#funnel">{{ r.total }}</a></td>
-          <td class="num r"><a class="plain" href="/triage?run={{ r.id }}">{{ r.live }}</a></td>
-          <td class="num r"><a class="plain" href="/validation?run={{ r.id }}">{{ r.n_verdicts }}</a>{% if r.n_confirmed %}
-            <a class="pill verified" href="/validation?run={{ r.id }}&amp;state=confirmed">{{ r.n_confirmed }} confirmed</a>{% endif %}</td>
-          <td class="num r"><a class="plain" href="/advisories?run={{ r.id }}">{{ r.n_advisories }}</a></td>
+          <td class="num r"><a class="plain" href="/runs/{{ r.id }}/triage">{{ r.live }}</a></td>
+          <td class="num r"><a class="plain" href="/runs/{{ r.id }}/validation">{{ r.n_verdicts }}</a>{% if r.n_confirmed %}
+            <a class="pill verified" href="/runs/{{ r.id }}/validation?state=confirmed">{{ r.n_confirmed }} confirmed</a>{% endif %}</td>
+          <td class="num r"><a class="plain" href="/runs/{{ r.id }}/advisories">{{ r.n_advisories }}</a></td>
           <td class="mono sm dim">{{ r.started_at|local }}</td>
         </tr>
       {% else %}

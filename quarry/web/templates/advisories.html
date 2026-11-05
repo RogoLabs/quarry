@@ -1,11 +1,13 @@
 {% extends "base.html" %}
 {% set nav = 'advisories' %}
+{% set nav_run = run.id if run else none %}
 {% block title %}Advisories{% if run %} · {{ run.target }}{% endif %} · Quarry{% endblock %}
 {% block body %}
 <div class="page"><div class="wrap">
   <h1>Advisories</h1>
-  <p class="sub">{% if run %}run {{ run.id }} · {{ run.target }} ·
+  <p class="sub">{% if run %}<a href="/runs/{{ run.id }}">run {{ run.id }}</a> · {{ run.target }} ·
     <a href="/advisories">every run</a>{% else %}every run{% endif %}</p>
+  {% if run %}{% include "_pipeline.html" %}{% endif %}
   <p class="prose mb-6">Markdown drafts written by <code>quarry report</code>, one per
     finding whose latest dynamic verdict is confirmed with a baseline. They are drafts:
     read each one before it goes to a maintainer.</p>
