@@ -872,8 +872,11 @@ review before sending, not a published advisory.
 
 
 def _has_baseline(ev: dict) -> bool:
-    """The stored evidence carries the control comparison a confirmation requires."""
-    return bool(ev.get("baseline")) and ev.get("differs_from_baseline") is True
+    """The stored evidence carries the control comparison a confirmation requires. A
+    probe whose finding is a missing defence records `reproduces_when: same` and confirms
+    on sameness (validate.ProbeEvidence), so for it the supporting value is False."""
+    supporting = ev.get("reproduces_when", "differs") != "same"
+    return bool(ev.get("baseline")) and ev.get("differs_from_baseline") is supporting
 
 
 def _slug(text: str) -> str:

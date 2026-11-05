@@ -29,12 +29,18 @@ from quarry.dynamic.validate import (                                  # noqa: E
 RUNNING = RunningTarget(base_url="http://web:8080", stop=lambda: None, network="net")
 # One of each shape a probe selects on: a declared-protected route, an auth-like route,
 # and routes with a path parameter to inject into.
+# Each handler spans the finding's line 3, so every probe decides on its own route
+# rather than recording a sibling's measurement as undecided (probes decide only on the
+# route whose handler holds the finding's line). That makes "no rejection on 404"
+# a claim about probes that were allowed to decide.
 ROUTES = [
     Route("GET", "/api/users/{uid}", "app.py", "openapi", auth_required=True,
-          params=("uid",)),
-    Route("GET", "/login", "app.py", "static"),
-    Route("GET", "/files/<name>", "app.py", "static", params=("name",)),
-    Route("GET", "/fetch", "app.py", "static", params=("url",)),
+          params=("uid",), auth_scope="operation", line=1, end_line=10),
+    Route("GET", "/login", "app.py", "static", query=("q",), line=1, end_line=10),
+    Route("GET", "/files/<name>", "app.py", "static", params=("name",), line=1,
+          end_line=10),
+    Route("GET", "/fetch", "app.py", "static", params=("url",), query=("url",), line=1,
+          end_line=10),
 ]
 CASES = [(lens, cwe) for lens in lenses.CATALOGUE for cwe in sorted(lens.cwes)]
 

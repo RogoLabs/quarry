@@ -35,5 +35,5 @@ from .routes import (  # noqa: F401
     build_route_map, routes_from_openapi, fetch_openapi_routes, crawl_routes,
 )
 from .probes import (  # noqa: F401
-    probe_broken_authz, probe_missing_rate_limit, probe_auth_timing_oracle,
-    probe_injection_observable, probe_path_traversal_ssrf)
+    probe_broken_authz, probe_cross_user, probe_authz, probe_missing_rate_limit,
+    probe_auth_timing_oracle, probe_injection_observable, probe_path_traversal_ssrf)

@@ -14,8 +14,12 @@ from `research.profile`. A probe lens runs only when three things coincide:
 evidence that selected it, and what will not and why. No lens is hardcoded as "first".
 
 Safety invariant for every probe body: non-destructive. A probe observes, it does not
-mutate or delete target data, and it does not try to take the target down. Confirmation
-is a measured, replayable observation a maintainer can reproduce, not an exploit.
+mutate or delete target data, and it does not try to take the target down. The one
+bounded exception is the cross-user authz check, which may create two canary records of
+its own through the target's API as a seeded test account, inside the contained
+throwaway instance, and then delete or modify only those two; its verdict says so.
+Confirmation is a measured, replayable observation a maintainer can reproduce, not an
+exploit.
 """
 from __future__ import annotations
 
@@ -24,7 +28,7 @@ from typing import Callable
 
 from ..cwe import probe_class
 from .validate import Candidate, ProbeEvidence, RunningTarget
-from .probes import (probe_broken_authz, probe_missing_rate_limit,
+from .probes import (probe_authz, probe_missing_rate_limit,
                      probe_auth_timing_oracle, probe_injection_observable,
                      probe_path_traversal_ssrf)
 
@@ -75,10 +79,12 @@ CATALOGUE: tuple[ProbeLens, ...] = (
         key="broken-authz-idor",
         cwes=frozenset({"CWE-862", "CWE-863", "CWE-639"}),
         requires=("http_routes",), min_hits=3,
-        rationale="Highest signal and the cleanest non-destructive confirmation: reach "
-                  "an object or action with the intended identity, then without it (or "
-                  "with another's), and compare. Deterministic, idempotent, read-only.",
-        run=probe_broken_authz),
+        rationale="Highest signal and the cleanest confirmation: reach an object or "
+                  "action with the intended identity, then without it (or with another "
+                  "account's), and compare. Deterministic. Read-only, except that the "
+                  "cross-user check may create and delete two canary records of its own "
+                  "as a seeded test account inside the contained instance.",
+        run=probe_authz),
     ProbeLens(
         key="missing-rate-limit",
         cwes=frozenset({"CWE-307", "CWE-400"}),

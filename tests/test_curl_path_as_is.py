@@ -31,12 +31,19 @@ from quarry.dynamic.probes import probe_path_traversal_ssrf            # noqa: E
 from quarry.dynamic.routes import Route                                # noqa: E402
 from quarry.dynamic.validate import Candidate, RunningTarget           # noqa: E402
 
+# Each handler spans the finding's line 3, so every probe decides on its own route
+# (since the probe-controls merge, a probe only decides on a route whose handler holds
+# the finding's line), and the users route declares per-operation security.
 ROUTES = [
     Route("GET", "/api/users/{uid}", "app.py", "openapi", auth_required=True,
-          params=("uid",)),
-    Route("GET", "/login", "app.py", "static"),
-    Route("GET", "/files/<name>", "app.py", "static", params=("name",)),
+          params=("uid",), auth_scope="operation", line=1, end_line=10),
+    Route("GET", "/login", "app.py", "static", query=("q",), line=1, end_line=10),
+    Route("GET", "/files/<name>", "app.py", "static", params=("name",), line=1,
+          end_line=10),
 ]
+# Lens and CWE pairs that send nothing by design: a request rate says nothing about
+# CWE-400 (ReDoS and the like), so the rate-limit probe leaves it unprobed.
+SILENT = {("missing-rate-limit", "CWE-400")}
 CASES = [(lens, cwe) for lens in lenses.CATALOGUE for cwe in sorted(lens.cwes)]
 PASSWD = "root:x:0:0:root:/root:/bin/sh\n"
 
@@ -56,6 +63,9 @@ def test_every_probe_request_keeps_its_path_as_written(lens, cwe):
     running = RunningTarget("http://web:8080", stop=lambda: None, network="net")
     lens.probe(running, Candidate("f", 1, "o/r", "app.py", 3, "p", cwe, "m"), ROUTES,
                exec_fn)
+    if (lens.key, cwe) in SILENT:
+        assert not seen
+        return
     assert seen, f"{lens.key} sent nothing"
     assert all("--path-as-is" in argv for argv in seen), \
         [a for a in seen if "--path-as-is" not in a][:1]
@@ -117,10 +127,15 @@ def test_a_traversal_probe_reaches_the_server_unnormalised(server):
     running = RunningTarget(base, stop=lambda: None, network="")
     ev = probe_path_traversal_ssrf(
         running, Candidate("f", 1, "o/r", "app.py", 3, "p", "CWE-22", "m"),
-        [Route("GET", "/files/<name>", "app.py", "static", params=("name",))], exec_fn)
+        [Route("GET", "/files/<name>", "app.py", "static", params=("name",), line=1,
+               end_line=10)], exec_fn)
 
+    # Since the probe-controls merge a benign control request goes first, so the
+    # traversal is looked for among the lines, not at the front.
     assert lines, "the listener saw no request"
-    assert lines[0] == "GET /files/../../../../../../etc/passwd HTTP/1.1"
+    raw = [ln for ln in lines
+           if ln.startswith("GET /files/../") and ln.endswith("/etc/passwd HTTP/1.1")]
+    assert raw, lines                              # dot segments arrived as written
     assert "GET /etc/passwd HTTP/1.1" not in lines
     assert ev.reproduced is True                   # the handler was reached and read it
-    assert ev.request.endswith("/files/../../../../../../etc/passwd")
+    assert raw[0].split(" ")[1] in ev.request      # the record names what was sent

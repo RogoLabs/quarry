@@ -892,9 +892,10 @@ LATEST_VERDICTS = """
     JOIN (SELECT MAX(id) AS id FROM verdicts
           GROUP BY run_id, finding_id, seat, model) latest ON latest.id = v.id"""
 
-#: The rationale keys validate.record_verdict writes, in display order.
+#: The rationale keys validate.record_verdict writes, in display order. reproduces_when
+#: says which way differs_from_baseline reads: "same" for a missing defence (rate limit).
 RATIONALE_KEYS = ("summary", "request", "observed", "baseline", "differs_from_baseline",
-                  "determinism")
+                  "reproduces_when", "determinism")
 
 
 def _rationale(text: str | None) -> tuple[dict[str, Any] | None, str | None]:

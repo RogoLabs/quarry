@@ -17,6 +17,7 @@ from quarry import db                                              # noqa: E402
 from quarry.dynamic import lenses, probes                          # noqa: E402
 from quarry.dynamic.validate import (                              # noqa: E402
     NO_BASELINE, NO_CONTROL, RuntimeSpec, RunningTarget, run_validation)
+from fakecurl import Reply, curl                                   # noqa: E402
 
 SPEC = {"openapi": "3.0.0", "paths": {
     "/secret": {"get": {"security": [{"b": []}]}},
@@ -29,6 +30,7 @@ class FakeRuntime:
     def __init__(self, status):
         self.status = status
         self.stopped = False
+        self.http = curl(self.handle)
 
     def detect(self, src):
         return RuntimeSpec("compose", "docker-compose.yml", base_url="http://web:8080")
@@ -39,16 +41,19 @@ class FakeRuntime:
     def _stop(self):
         self.stopped = True
 
+    def handle(self, req):
+        if req.path == "/openapi.json":                   # spec fetch
+            return Reply(200, json.dumps(SPEC), "application/json")
+        for suffix, code in self.status.items():
+            if req.path.endswith(suffix):
+                return Reply(int(code), "record", "application/json")
+        return Reply(404, "", "text/plain")
+
     def probe_exec(self, running, argv):
-        url = argv[-1]
-        if "-w" in argv:                                  # status probe
-            for suffix, code in self.status.items():
-                if url.endswith(suffix):
-                    return 0, code
-            return 0, "404"
-        if url.endswith("/openapi.json"):                 # spec fetch
-            return 0, json.dumps(SPEC)
-        return 0, ""
+        if "-w" not in argv:                              # the fetch/crawl helpers
+            url = argv[-1]
+            return 0, json.dumps(SPEC) if url.endswith("/openapi.json") else ""
+        return self.http(argv)
 
 
 @pytest.fixture
@@ -422,3 +427,104 @@ def test_only_confirmations_are_replayed(scanned, monkeypatch):
     assert runtime.restarts == 0
     ev = json.loads(con.execute("SELECT rationale FROM verdicts").fetchone()["rationale"])
     assert "replay" not in ev and ev["probe"]["id"] == "broken-authz-idor"
+
+
+# ------------------------------------------------------------------ cross-user, end to end
+
+SIGHTING_PY = (
+    "ns = Namespace('sighting')\n"
+    "@ns.route('/<uuid:sighting_uuid>')\n"
+    "class SightingItem(Resource):\n"
+    "    def get(self, sighting_uuid):\n"
+    "        return {}\n"
+    "\n"
+    "    @auth_func\n"
+    "    def delete(self, sighting_uuid):\n"
+    "        obj = Sighting.query.get(sighting_uuid)  # the flagged line\n"
+    "        return {}, 200\n"
+    "@ns.route('/')\n"
+    "class Sightings(Resource):\n"
+    "    def post(self):\n"
+    "        return {}, 201\n")
+
+
+@pytest.mark.parametrize("delete_any, verdict", [(False, "rejected"), (True, "confirmed")])
+def test_a_seeded_cross_user_run_decides_on_the_findings_own_handler(tmp_path, delete_any,
+                                                                     verdict):
+    """Seed three accounts with the target's own commands, then let the authz lens test
+    the flagged DELETE handler as another account. The verdict names the canaries it
+    made and no key, and the precision ledger counts it."""
+    from test_probes_cross_user import VL, CREDS, SPEC as XU
+    from quarry.dynamic.seed import SeedRecipe, SeedStep
+
+    src = tmp_path / "src"
+    (src / "website" / "api").mkdir(parents=True)
+    (src / "website" / "api" / "__init__.py").write_text(
+        "bp = Blueprint('apiv1', __name__, url_prefix='/api')\n"
+        "def setup():\n"
+        "    api = Api(bp)\n"
+        "    from website.api import sighting\n"
+        "    api.add_namespace(sighting.ns, path='/sighting')\n")
+    (src / "website" / "api" / "sighting.py").write_text(SIGHTING_PY)
+    (src / "website" / "app.py").write_text(            # enough routes to profile a service
+        "@app.get('/health')\ndef h(): ...\n@app.get('/v')\ndef v(): ...\n"
+        "@app.post('/x')\ndef x(): ...\n")
+    (src / "docker-compose.yml").write_text("services:\n  web:\n    image: x\n")
+    flagged = SIGHTING_PY.splitlines().index(
+        "        obj = Sighting.query.get(sighting_uuid)  # the flagged line") + 1
+    p = tmp_path / "quarry.db"
+    db.init(p)
+    con = db.connect(p)
+    with db.tx(con):
+        con.execute("INSERT INTO runs (id, target, clone_url) VALUES (1,'o/r','https://x')")
+        con.execute("""INSERT INTO producers (id,tool,rule_id,cwe,n_adjudicated,n_confirmed)
+                       VALUES ('t:idor','opengrep','idor','CWE-639',0,0)""")
+        con.execute("""INSERT INTO findings (id,target,path,producer_id,first_seen_run,
+                       last_seen_run) VALUES ('f-idor','o/r','website/api/sighting.py',
+                       't:idor',1,1)""")
+        con.execute("""INSERT INTO occurrences (id,run_id,finding_id,producer_id,path,
+                       start_line,message) VALUES (10,1,'f-idor','t:idor',
+                       'website/api/sighting.py',?,'idor')""", (flagged,))
+
+    vl = VL(delete_any=delete_any)
+
+    class Seeded(FakeRuntime):
+        def start(self, spec, rundir):
+            return RunningTarget("http://web:10001", stop=self._stop, network="net",
+                                 project="p", compose_file="/x/compose.yml")
+
+        def service_exec(self, running, argv, *, service="", timeout=900):
+            return 0, CREDS.get(argv[-1], "ok")       # `getkey <name>` prints the key
+
+        def probe_exec(self, running, argv):
+            return vl.fake(argv) if "-w" in argv else (0, "")
+
+    recipe = SeedRecipe(
+        name="t", param_values={"vulnerability_id": "CVE-2021-44228"}, cross_user=XU,
+        steps=tuple(SeedStep(argv=("getkey", k), capture=r"(\S{16,})", capture_as=k)
+                    for k in CREDS))
+    res = run_validation(con, 1, tmp_path, Seeded({}), seed=recipe)
+    assert res.verdicts == [("f-idor", "broken-authz-idor", verdict)]
+    row = dict(con.execute("SELECT * FROM verdicts WHERE finding_id='f-idor'").fetchone())
+    stored = json.loads(row["rationale"])
+    assert row["verdict"] == verdict and row["reason"] == "deterministic"
+    assert "contained throwaway instance" in stored["summary"]
+    assert stored["reproduces_when"] == "differs"
+    assert not any(k in row["rationale"] for k in CREDS.values())    # no key stored
+    assert vl.records == {}                                          # canaries cleaned up
+    assert tuple(con.execute("SELECT n_adjudicated FROM producers WHERE id='t:idor'")
+                 .fetchone()) == (1,)
+
+
+def test_a_sameness_confirmation_counts_its_control_as_held():
+    """A rate-limit probe confirms when a burst is answered the SAME as a lone request
+    (reproduces_when "same", differs_from_baseline False). Counting replays on
+    `differs_from_baseline is True` reported its control as never holding."""
+    from quarry.dynamic.validate import ProbeEvidence, replay_confirmation
+    ev = ProbeEvidence(reproduced=True, summary="20 requests, no throttle",
+                       determinism="deterministic", baseline="GET /login -> 401 (lone)",
+                       differs_from_baseline=False, handled=True,
+                       reproduces_when="same")
+    assert ev.has_baseline_comparison
+    out = replay_confirmation(lambda: ev, times=3)
+    assert (out["reproduced"], out["control_held"], out["held"]) == (3, 3, True)

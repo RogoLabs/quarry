@@ -84,15 +84,29 @@ class ProbeEvidence:
     baseline: str = ""           # the control's result: same route, benign input / creds
     differs_from_baseline: bool | None = None  # True/False only when measured against baseline
     handled: bool | None = None  # True only when a handler answered (not 404/405/nothing)
+    # What a reproduction looks like next to the control. "differs" for almost every
+    # probe: the finding's effect is something the control lacks (a SQL error the plain
+    # value did not raise, a cross-user delete the anonymous control was refused). "same"
+    # for a finding that is the absence of a defence: a missing rate limit reproduces
+    # when every request of a bounded burst is answered exactly like a lone request, and
+    # the defence shows as a difference (a 429). Stored in the rationale, so the
+    # disclosure step reads a "same" confirmation the right way round.
+    reproduces_when: str = "differs"
+
+    @property
+    def _supporting(self) -> bool:
+        """The value of differs_from_baseline that supports the finding."""
+        return self.reproduces_when != "same"
 
     @property
     def has_baseline_comparison(self) -> bool:
-        return bool(self.baseline) and self.differs_from_baseline is True
+        return bool(self.baseline) and self.differs_from_baseline is self._supporting
 
     @property
     def has_negative_control(self) -> bool:
-        """The attack input was handled and behaved like the control did."""
-        return (bool(self.baseline) and self.differs_from_baseline is False
+        """The attack input was handled and behaved like the control did (for a "same"
+        probe: the defence appeared, which the lone control request did not need)."""
+        return (bool(self.baseline) and self.differs_from_baseline is (not self._supporting)
                 and self.handled is True)
 
 
@@ -166,6 +180,10 @@ class RunningTarget:
     # the Docker runtime; a sidecar probe does not need them.
     project: str = ""
     compose_file: str = ""
+    # The per-user resources a seed recipe declared for the cross-user authz probe
+    # (seed.CrossUser): which test account owns what, and how the target's own API
+    # creates, reads and deletes it. None unless a recipe that declares them ran.
+    cross_user: Any = None
 
 
 # Probe lenses and their selection live in lenses.py, keyed to the repo profile. The
@@ -251,7 +269,10 @@ def replay_confirmation(probe_once: Callable[[], ProbeEvidence], *, times: int =
         ev = probe_once()
         runs.append({"verdict": adjudicate_with_reason(ev)[0],
                      "reproduced": bool(ev.reproduced),
-                     "control_differed": ev.differs_from_baseline is True,
+                     # The comparison held in the direction this probe reads: a
+                     # rate-limit burst reproduces by answering the SAME as its lone
+                     # baseline (reproduces_when "same"), so "differed" would undercount.
+                     "control_differed": ev.has_baseline_comparison,
                      "observed": (ev.observed or "")[:200],
                      "after_restart": after_restart})
     for _ in range(times):
@@ -494,6 +515,7 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
             sr = run_seed(runtime, running, seed)
             running.param_values = {**running.param_values, **sr.param_values}
             running.credentials = {**running.credentials, **sr.credentials}
+            running.cross_user = getattr(sr, "cross_user", None) or running.cross_user
             with db.tx(con):
                 db.set_health(con, run_id, "validate",
                               {"seed": sr.notes or []})
@@ -566,6 +588,7 @@ def record_verdict(con: sqlite3.Connection, candidate: Candidate, run_id: int,
         "baseline": evidence.baseline,
         "differs_from_baseline": evidence.differs_from_baseline,
         "handled": evidence.handled,
+        "reproduces_when": evidence.reproduces_when,
     }
     if probe is not None:
         # The evidence window the finding was flagged in. A later run carries this

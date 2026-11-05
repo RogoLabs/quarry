@@ -336,3 +336,86 @@ def test_a_committed_spec_below_the_root_is_found_but_not_a_test_fixture(tmp_pat
     assert [r.path for r in OpenApiFileRouteSource().discover(tmp_path)] == ["/api/users/{uid}"]
     [r] = build_route_map(tmp_path).for_finding("api.py")
     assert r.source == "static+openapi" and r.auth_required is True
+
+
+# ------------------------------------------------------------------ the finding's own route
+# IMPROVEMENT-PLAN item 3: probes picked routes from the finding's file, so a safe
+# sibling could reject a finding on another handler. Each static route now carries its
+# handler's lines, and a probe decides only on the route that encloses the finding.
+
+def test_a_resource_class_gives_each_verb_its_own_method_lines(tmp_path):
+    (tmp_path / "api.py").write_text(
+        "ns = Namespace('b')\n"                                  # 1
+        "@ns.route('/<string:bid>')\n"                           # 2
+        "class Bundle(Resource):\n"                              # 3
+        "    @typed(\n"                                          # 4  multi-line decorator
+        "        ns.doc(responses={200: 'ok'})\n"                # 5
+        "    )\n"                                                # 6
+        "    def get(self, bid):\n"                              # 7
+        "        return {}\n"                                    # 8
+        "\n"                                                     # 9
+        "    @typed(auth_func)\n"                                # 10
+        "    def delete(\n"                                      # 11 multi-line signature
+        "        self, bid,\n"                                   # 12
+        "    ):\n"                                               # 13
+        "        obj = Bundle.query.get(bid)\n"                  # 14
+        "        return {}, 204\n"                               # 15
+        "def helper(): ...\n")                                   # 16
+    by = {r.method: r for r in StaticRouteSource().discover(tmp_path)}
+    assert (by["GET"].line, by["GET"].end_line) == (4, 8)
+    assert (by["DELETE"].line, by["DELETE"].end_line) == (10, 15)
+    assert by["DELETE"].encloses("api.py", 14) and not by["GET"].encloses("api.py", 14)
+    assert not by["DELETE"].encloses("other.py", 14)          # same line, other file
+    assert not any(r.encloses("api.py", 16) for r in by.values())
+
+
+def test_function_routes_and_express_calls_span_their_handlers(tmp_path):
+    (tmp_path / "app.py").write_text(
+        "@login_required\n"                                      # 1
+        "@app.route('/a', methods=['GET', 'POST'])\n"            # 2
+        "def a():\n"                                             # 3
+        "    q = request.args.get('term')\n"                     # 4
+        "    return q\n"                                         # 5
+        "x = 1\n")                                               # 6
+    (tmp_path / "server.js").write_text(
+        "app.get('/u/:id', (req, res) => {\n"                    # 1
+        "  const s = req.query.sort;\n"                          # 2
+        "  res.send(s);\n"                                       # 3
+        "});\n"                                                  # 4
+        "app.get('/h', h)\n")                                    # 5
+    routes = {(r.handler_file, r.method, r.path): r
+              for r in StaticRouteSource().discover(tmp_path)}
+    a = routes[("app.py", "GET", "/a")]
+    assert (a.line, a.end_line) == (1, 5) and a.query == ("term",)
+    assert routes[("app.py", "POST", "/a")].encloses("app.py", 4)
+    u = routes[("server.js", "GET", "/u/:id")]
+    assert (u.line, u.end_line) == (1, 4) and u.query == ("sort",)
+    assert routes[("server.js", "GET", "/h")].line == 5
+
+
+def test_openapi_says_where_a_requirement_was_declared_and_how_to_present_it():
+    doc = {"openapi": "3.0.0", "security": [{"key": []}],
+           "components": {"securitySchemes": {
+               "key": {"type": "apiKey", "in": "header", "name": "X-API-KEY"},
+               "jwt": {"type": "http", "scheme": "bearer"}}},
+           "paths": {
+               "/public": {"get": {"parameters": [{"name": "q", "in": "query"}]}},
+               "/mine": {"get": {"security": [{"jwt": []}]}},
+               "/open": {"get": {"security": []}}}}
+    got = {r.path: r for r in routes_from_openapi(doc)}
+    assert (got["/public"].auth_scope, got["/public"].auth_header) == ("global", "X-API-KEY")
+    assert got["/public"].query == ("q",)
+    assert (got["/mine"].auth_scope, got["/mine"].auth_header) == \
+        ("operation", "Authorization: Bearer")
+    assert got["/open"].auth_required is False and got["/open"].auth_scope == ""
+
+
+def test_the_merge_keeps_handler_lines_and_the_declared_scope():
+    m = RouteMap()
+    m.add(Route("GET", "/u/<int:uid>", handler_file="api.py", line=4, end_line=9,
+                query=("a",)))
+    m.add(Route("GET", "/u/{uid}", source="openapi", auth_required=True,
+                auth_scope="operation", auth_header="X-API-KEY", query=("a", "b")))
+    [r] = m.routes.values()
+    assert (r.line, r.end_line, r.handler_file) == (4, 9, "api.py")
+    assert (r.auth_scope, r.auth_header, r.query) == ("operation", "X-API-KEY", ("a", "b"))
