@@ -14,12 +14,14 @@ A [RogoLabs](https://rogolabs.net) project.
 
 ```bash
 quarry doctor                   # environment, sandbox profiles, tool inventory
+quarry doctor --coverage        # also: does each installed scanner still read every directory
 quarry db sync                  # Trivy and OSV databases: the one network step
 quarry targets score owner/repo # rank candidates on attack surface and responsiveness
 quarry ingest owner/repo        # anonymous clone into a per-run APFS sparse image
 quarry scan 1                   # seven scanners under sandbox-exec, no network, no models
 quarry funnel 1                 # thirteen ordered stages; nothing is deleted
 quarry killed 1                 # audit what the funnel suppressed, and why
+quarry status 1                 # the run page as text, one fact per line (or --json)
 quarry validate 1 --dry-run     # plan which probes fit this codebase
 quarry validate 1               # stand the target up in Docker and probe the survivors
 # a real-world target usually needs more, e.g. VulnLookup:

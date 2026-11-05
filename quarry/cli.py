@@ -239,7 +239,11 @@ def deep(run_id: int = typer.Argument(..., help="an ingested run"),
 
 
 @app.command()
-def doctor() -> None:
+def doctor(coverage: bool = typer.Option(
+        False, "--coverage",
+        help="also run every installed scanner, under Tier 1, over a fixture planted in "
+             "12 directories, and fail if any tool returns nothing from a planted file "
+             "it is expected to read (32 s when measured, 26 of them opengrep)")) -> None:
     """Check the environment: data root, containment, and which tools are present."""
     paths, _ = _open()
     t = Table(title="quarry doctor", show_header=True, header_style="bold")
@@ -286,6 +290,72 @@ def doctor() -> None:
     for k, v in m.items():
         t2.add_row(_e(k), _e(v) if v else "[dim]absent[/]")
     con_out.print(t2)
+
+    if coverage and not _coverage_sweep():
+        raise typer.Exit(1)
+
+
+def _coverage_sweep() -> bool:
+    """IMPROVEMENT-PLAN item 23's fixture run, against whatever versions are installed
+    now. Four tools once skipped whole directories by default, and an upgrade can bring
+    a default skip back silently. -> True when no tool that ran missed anything."""
+    import subprocess
+    from .scanners import sweep
+    try:
+        with con_out.status("coverage sweep: planting the fixture") as st:
+            results, wall = sweep.run_sweep(
+                progress=lambda n: st.update(f"coverage sweep: running {n}"))
+    except (OSError, subprocess.SubprocessError) as e:
+        con_out.print(f"[red]coverage sweep could not plant its fixture:[/] {_e(e)}")
+        return False
+    t = Table(title=f"coverage sweep: {len(sweep.PLANTED_DIRS)} planted directories "
+                    f"plus {sweep.WORKFLOW_DIR}, under Tier 1",
+              show_header=True, header_style="bold")
+    for c, j in (("tool", "left"), ("version", "left"), ("result", "left"),
+                 ("secs", "right"), ("results", "right"), ("dirs read", "right"),
+                 ("missed, or why not run", "left")):
+        t.add_column(c, justify=j, overflow="fold")
+    for r in results:
+        got, of = r.dirs_read
+        if r.state == "skipped":
+            mark, detail = "[dim]skipped[/]", _e(r.detail)
+        elif r.state == "pass":
+            mark, detail = "[green]pass[/]", _e(r.detail)
+        else:
+            mark = "[red]failed[/]" if r.state == "failed" else "[red]MISSED[/]"
+            detail = _e("; ".join(f"{d} ({', '.join(fs)})" if fs else d
+                                  for d, fs in sweep.missed_by_dir(r.missed).items()))
+            if r.state == "failed":
+                detail = f"{_e(r.detail)}. Missed: {detail}"
+        t.add_row(_e(r.tool), _e(r.version or "?"), mark,
+                  "" if r.state == "skipped" else f"{r.seconds:.1f}",
+                  "" if r.state == "skipped" else str(r.records),
+                  "" if r.state == "skipped" else f"{got}/{of}", detail)
+    con_out.print(t)
+    for r in results:
+        if not r.coverage:
+            continue
+        cov = r.coverage
+        un = (cov.get("unexplained") or {}).get("n", 0)
+        con_out.print(f"{_e(r.tool)} target report: {cov['scanned']} file(s) scanned, "
+                      f"{cov['expected']} planted source file(s), {un} neither scanned "
+                      f"nor reported skipped, {len(cov.get('unreported') or [])} "
+                      f"invocation(s) with no report")
+        for msg in orchestrator.coverage_health(cov):
+            con_out.print(f"  [yellow]{_e(r.tool)}[/]: {_e(msg)}")
+    ran = [r for r in results if r.state != "skipped"]
+    bad = [r for r in ran if r.problem]
+    skipped = len(results) - len(ran)
+    tail = f"{skipped} skipped. Wall time {wall:.0f} s."
+    if bad:
+        con_out.print(f"[red bold]coverage:[/] {len(bad)} of {len(ran)} tool(s) that ran "
+                      f"returned nothing from planted files they are expected to read: "
+                      f"{_e(', '.join(r.tool for r in bad))}. {tail} A default skip "
+                      f"after an upgrade looks like this; see IMPROVEMENT-PLAN item 23.")
+        return False
+    con_out.print(f"[green]coverage:[/] all {len(ran)} tool(s) that ran returned results "
+                  f"from every planted file they are expected to read. {tail}")
+    return True
 
 
 @app.command()
@@ -566,6 +636,175 @@ def runs() -> None:
         t.add_row(str(r["id"]), _e(r["target"]), _e((r["git_sha"] or "")[:10]), _e(lic),
                   _e(r["status"]), _e(r["started_at"]))
     con_out.print(t)
+
+
+def run_status(con, run_id: int) -> dict | None:
+    """Everything /runs/<id> shows about a run, as one document. `quarry status` prints
+    it as labelled lines or as JSON; both come from this dict, so they cannot disagree.
+
+    Built only from `web.queries`, the functions the run page renders, so an agent
+    reading this and an operator reading the page see the same numbers. A second copy
+    of the SQL would drift from the page the way the funnel table once drifted from
+    its own links (IMPROVEMENT-PLAN items 8 and 22)."""
+    from .web import queries as q
+    run = q.run_summary(con, run_id)
+    if run is None:
+        return None
+    header = {k: run.get(k) for k in ("id", "target", "git_sha", "status", "started_at",
+                                       "finished_at", "license_spdx", "license_osi")}
+    header.update(occurrences=run["total"], live=run["live"],
+                  suppressed=run["total"] - run["live"], producers=run["producers"])
+    stages = []
+    for i, s in enumerate(q.funnel_stages(con, run_id), 1):
+        row = {"step": i, **s, "in": None, "out": s.get("remaining")}
+        if row["out"] is not None:
+            # What entered this stage: what left it, plus what it took out, less what
+            # it brought back or what arrived. Equal to the previous row's `out`.
+            row["in"] = (row["out"] + s["kill"] + s["defer"] + s["merge"]
+                         - s.get("restored", 0) - s.get("arrived", 0))
+        stages.append(row)
+    return {
+        "run": header,
+        "scanners": [{**t, "outcome": q.scan_outcome(t)} for t in run["scan_tools"]],
+        "health": run["health"],
+        "funnel": stages,
+        "verdicts": {"by_verdict": q.verdict_counts(con, run_id),
+                     "by_seat": q.verdict_counts_by_seat(con, run_id)},
+        "advisories": q.advisories(con, run_id),
+    }
+
+
+def _line(value) -> str:
+    """A value for one `key: value` line. Paths, notes and tool messages can come from
+    the target or a sandboxed tool, so control and invisible characters are removed
+    and line breaks flattened: one fact has to stay one line."""
+    if value is None or value == "":
+        return "none"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    from . import taint
+    return " ".join(taint.scrub_text(value, 2000).split())
+
+
+def _key(value) -> str:
+    """A key segment: never empty, never containing a space or a colon."""
+    return _line(value).replace(" ", "-").replace(":", "-")
+
+
+def _pairs(**fields) -> str:
+    return " ".join(f"{k.replace('_', '-')}={_key(v)}" for k, v in fields.items())
+
+
+def status_lines(s: dict) -> list[str]:
+    """`run_status` as text. Every line is `key: value`. A key has no spaces, so
+    `grep '^scanner\\.'` or `grep '^funnel\\.'` selects a section. Counts about one
+    thing share its line as `name=value` pairs; free text gets a line of its own."""
+    r = s["run"]
+    out = [f"run: {r['id']}",
+           f"run.target: {_line(r['target'])}",
+           f"run.git_sha: {_line(r['git_sha'])}",
+           f"run.status: {_line(r['status'])}",
+           f"run.started_at: {_line(r['started_at'])}",
+           f"run.finished_at: {_line(r['finished_at'])}",
+           f"run.license: {_line(r['license_spdx'])} "
+           + _pairs(osi=None if r["license_osi"] is None else bool(r["license_osi"])),
+           "run.occurrences: " + _pairs(total=r["occurrences"], live=r["live"],
+                                        suppressed=r["suppressed"],
+                                        producers=r["producers"])]
+
+    if not s["scanners"]:
+        out.append("scanners: none recorded")
+    for t in s["scanners"]:
+        k = f"scanner.{_key(t['tool'])}"
+        out.append(f"{k}: " + _pairs(outcome=t["outcome"], rc=t.get("rc"),
+                                     records=t.get("records"), seconds=t.get("seconds"),
+                                     evidence=f"{t.get('captured', 0)}/{t.get('lined', 0)}"))
+        for field in ("skipped", "error", "note"):
+            if t.get(field):
+                out.append(f"{k}.{field}: {_line(t[field])}")
+        cov = t.get("coverage")
+        if isinstance(cov, dict):
+            un = cov.get("unexplained") if isinstance(cov.get("unexplained"), dict) else {}
+            out.append(f"{k}.coverage: " + _pairs(
+                scanned=cov.get("scanned"), expected=cov.get("expected"),
+                unexplained=un.get("n", 0), unreported=len(cov.get("unreported") or [])))
+            for path in un.get("examples") or []:
+                out.append(f"{k}.coverage.unexplained.example: {_line(path)}")
+            for label in cov.get("unreported") or []:
+                out.append(f"{k}.coverage.unreported: {_line(label)}")
+            for reason, sk in sorted((cov.get("skipped") or {}).items()):
+                sk = sk if isinstance(sk, dict) else {}
+                out.append(f"{k}.coverage.skipped.{_key(reason)}: {sk.get('n', 0)}")
+                for path in sk.get("examples") or []:
+                    out.append(f"{k}.coverage.skipped.{_key(reason)}.example: {_line(path)}")
+            for kind, n in sorted((cov.get("errors") or {}).items()):
+                out.append(f"{k}.coverage.errors.{_key(kind)}: {n}")
+
+    if not s["health"]:
+        out.append("health: none")
+    for h in s["health"]:
+        out.append(f"health.{_key(h['source'])}.{_key(h['tool'])}: {_line(h['message'])}")
+
+    if not s["funnel"]:
+        out.append("funnel: not run")
+    for st in s["funnel"]:
+        fields = {"step": st["step"], "in": st["in"]}
+        if st.get("arrived"):
+            fields["arrived"] = st["arrived"]
+        else:
+            fields.update({a: st.get(a, 0) for a in ("kill", "defer", "merge", "boost")})
+            fields["restored"] = st.get("restored", 0)
+        fields.update(out=st["out"], heuristic=bool(st.get("heuristic")))
+        out.append(f"funnel.{_key(st['stage'])}: " + _pairs(**fields))
+    if s["funnel"] and "drift" in s["funnel"][-1]:
+        # The ledger arithmetic against the live count; anything but 0 is a defect.
+        out.append(f"funnel.drift: {s['funnel'][-1]['drift']}")
+
+    v = s["verdicts"]
+    out.append("verdicts: " + _pairs(**v["by_verdict"]))
+    for seat, counts in sorted(v["by_seat"].items()):
+        out.append(f"verdicts.{_key(seat)}: " + _pairs(**counts))
+
+    out.append(f"advisories: {len(s['advisories'])}")
+    for a in s["advisories"]:
+        k = f"advisory.{a['id']}"
+        out.append(f"{k}: " + _pairs(verdict=a.get("verdict"), lens=a.get("model"),
+                                     finding=a.get("finding_id")))
+        out.append(f"{k}.finding_path: {_line(a.get('finding_path'))}")
+        out.append(f"{k}.file: {_line(a.get('path'))}")
+        out.append(f"{k}.sha256: {_line(a.get('sha256'))}")
+        out.append(f"{k}.created_at: {_line(a.get('created_at'))}")
+    return out
+
+
+@app.command()
+def status(run_id: int = typer.Argument(..., help="a run id, as `quarry runs` lists"),
+           as_json: bool = typer.Option(False, "--json",
+                                        help="the same facts as one JSON document")) -> None:
+    """A run as plain text: scanners, health warnings, funnel, verdicts and advisories,
+    one labelled fact per line. The same queries as the run page; opens the database
+    read-only."""
+    from .migrations import MIGRATIONS
+    paths = config.paths()
+    if not paths.db.exists():
+        typer.echo(f"no database at {paths.db}", err=True)
+        raise typer.Exit(1)
+    connection = db.connect(paths.db, readonly=True)
+    if connection.execute("PRAGMA user_version").fetchone()[0] < len(MIGRATIONS):
+        # An older schema lacks tables the queries read. Upgrade it the way every
+        # other command does, which is the one case where status writes.
+        connection.close()
+        connection = db.connect(paths.db)
+    data = run_status(connection, run_id)
+    if data is None:
+        typer.echo(f"no run {run_id}", err=True)
+        raise typer.Exit(1)
+    if as_json:
+        # ensure_ascii: a control or bidi character from a target path reaches the
+        # terminal as an escape sequence written out, never as the character.
+        typer.echo(json.dumps(data, indent=2, sort_keys=True, default=str))
+    else:
+        typer.echo("\n".join(status_lines(data)))
 
 
 @app.command()

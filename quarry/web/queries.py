@@ -453,6 +453,16 @@ def run_summary(con: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
     return d
 
 
+def scan_outcome(t: dict[str, Any]) -> str:
+    """One word for a `run_summary()["scan_tools"]` row, in run.html's pill order:
+    a skip wins over a failure, and a failure over nothing-to-scan."""
+    if t.get("skipped"):
+        return "skipped"
+    if not t.get("ok"):
+        return "failed"
+    return "nothing to scan" if t.get("nothing_to_scan") else "ok"
+
+
 def all_runs(con: sqlite3.Connection) -> list[dict[str, Any]]:
     return [dict(r) for r in con.execute(f"""
         SELECT r.*,
@@ -935,6 +945,19 @@ def verdict_counts(con: sqlite3.Connection, run_id: int | None = None) -> dict[s
     for r in con.execute(sql, args):
         out[r["verdict"]] = r["n"]
     out["total"] = sum(out[s] for s in VERDICT_STATES)
+    return out
+
+
+def verdict_counts_by_seat(con: sqlite3.Connection, run_id: int) -> dict[str, dict[str, int]]:
+    """`verdict_counts` for one run, split by seat. The dynamic seat is a probe that
+    ran; any other seat is a reviewer's opinion, and a sum across them hides which."""
+    out: dict[str, dict[str, int]] = {}
+    for r in con.execute(f"SELECT seat, verdict, COUNT(*) n FROM ({LATEST_VERDICTS}) lv "
+                         "WHERE lv.run_id = ? GROUP BY seat, verdict ORDER BY seat",
+                         (run_id,)):
+        out.setdefault(r["seat"], {s: 0 for s in VERDICT_STATES})[r["verdict"]] = r["n"]
+    for counts in out.values():
+        counts["total"] = sum(counts[s] for s in VERDICT_STATES)
     return out
 
 
