@@ -357,9 +357,18 @@ class Finding:
         the deterministic check outranks the model in both directions: if the quote
         verified against the source, any refutation resting on "that code does not
         exist" is discarded and recorded as a refuter error.
+
+        Only a record naming a model of another family is a cross-family vote. The
+        refute pass asks no other kind, so a record naming the author's own family, or
+        no model name at all, carries a `model` key the answer forged (rows written
+        before refutation_record let it), and counting it let a same-family `survives`
+        defend a finding the real refuters refuted. It is a refuter error too.
         """
         out = []
         for r in self.refutations:
+            m = r.get("model") if isinstance(r, dict) else None
+            if not isinstance(m, str) or family(m) == family(self.model):
+                continue
             reason = (r.get("reason") or "").lower()
             denies_existence = any(k in reason for k in (
                 "not found in", "does not exist", "no such code", "cannot find",
