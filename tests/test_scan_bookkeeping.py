@@ -383,3 +383,18 @@ def test_trivy_inline_ignores_are_reported(tmp_path, monkeypatch):
     assert any("2 file(s) carry trivy:ignore" in m and "Dockerfile" in m
                for m in s.health["trivy"])
     assert orchestrator.trivy_inline_ignores(src) == ["Dockerfile", "node_modules/x.tf"]
+
+
+def test_an_unmeasured_opengrep_version_is_flagged(tmp_path, monkeypatch):
+    """--x-ignore-semgrepignore-files is internal to opengrep. Its effect and the
+    target report were measured on one version; any other is a question to answer."""
+    from quarry.scanners.tools import Opengrep
+    tools = {"opengrep": _Canned("opengrep", lambda: base.ScanOutcome(
+        "opengrep", True, 0, 1.0, [Record("opengrep", "r", "app.py", 1)]))}
+    c, paths = _scan_env(tmp_path, monkeypatch, tools)
+    db.update_manifest(c, 1, lambda m: m.update(opengrep="1.30.0"))
+    s = orchestrator.scan(paths, c, 1)
+    assert any("opengrep 1.30.0 is not 1.27.1" in m for m in s.health["opengrep"])
+    c2, paths2 = _scan_env(tmp_path / "b", monkeypatch, tools)
+    db.update_manifest(c2, 1, lambda m: m.update(opengrep=Opengrep.MEASURED_VERSION))
+    assert orchestrator.scan(paths2, c2, 1).health["opengrep"] == []

@@ -24,6 +24,11 @@ class Opengrep(Scanner):
     were cut from Layer 2 (PLAN §6.2)."""
     name = "opengrep"
     binary = "opengrep"
+    # The version --x-ignore-semgrepignore-files, the --json-output target report and
+    # the --verbose skip list were measured on (IMPROVEMENT-PLAN items 15 and 24).
+    # `--x-` options are internal and may change; another version gets a health warning
+    # until the same checks are run against it (`quarry doctor --coverage`).
+    MEASURED_VERSION = "1.27.1"
 
     # The pack's root holds template.yaml and CI config, which fail rule-schema
     # validation and abort the whole scan (exit 7). Point --config at the language

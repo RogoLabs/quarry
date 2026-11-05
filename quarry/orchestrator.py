@@ -408,6 +408,14 @@ def scan(paths: Paths, con: sqlite3.Connection, run_id: int, *,
             _record_tool(con, run_id, sc.name, summary.per_tool[sc.name])
 
     summary.health = scan_health(summary.per_tool, _lockfiles(src))
+    if "opengrep" in summary.per_tool and not summary.per_tool["opengrep"].get("skipped"):
+        from .scanners.tools import Opengrep
+        have = db.read_manifest(con, run_id).get("opengrep")
+        if have and have.strip() != Opengrep.MEASURED_VERSION:
+            summary.health.setdefault("opengrep", []).append(
+                f"opengrep {have.strip()} is not {Opengrep.MEASURED_VERSION}, the version "
+                f"its internal ignore flag and target report were measured on; check "
+                f"coverage before trusting a clean result")
     if "trivy" in summary.per_tool and (ignored := trivy_inline_ignores(src)):
         shown = ", ".join(ignored[:5])
         if len(ignored) > 5:
