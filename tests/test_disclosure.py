@@ -682,7 +682,11 @@ def test_a_seeded_confirmed_run_drafts_no_credential(scanned, monkeypatch):
     assert "- Seed recipe: `t`" in text and "captured admin_api_key" in text
     assert "- Environment overrides used to boot: `INSTANCE_UUID`" in text
     assert "- Compose service probed: `web`" in text
-    assert "observed once and was not replayed" in text
+    # run_validation replays a confirmation (item 17). This runtime cannot restart, so
+    # the draft reports three in-place replays and says none ran after a restart.
+    assert "were replayed 3 times: the effect reproduced 3 of 3 times" in text
+    assert "No replay ran after a restart of the target service." in text
+    assert "observed once" not in text
 
 
 def test_head_line_is_always_present():
