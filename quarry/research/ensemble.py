@@ -369,6 +369,12 @@ class Finding:
             m = r.get("model") if isinstance(r, dict) else None
             if not isinstance(m, str) or family(m) == family(self.model):
                 continue
+            # Only an answer is a vote. A call that failed is stored as verdict "error";
+            # left in here it counted as neither refuted nor survived and also not as a
+            # refuter error, so the gate could say "0 refuter error(s)" for a finding
+            # every refuter had failed on (IMPROVEMENT-PLAN item 5).
+            if r.get("verdict") not in ("refuted", "survives"):
+                continue
             reason = (r.get("reason") or "").lower()
             denies_existence = any(k in reason for k in (
                 "not found in", "does not exist", "no such code", "cannot find",

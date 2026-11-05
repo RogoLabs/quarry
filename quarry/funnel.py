@@ -355,8 +355,9 @@ def _layer2_gate(con, run_id, rows, src, prior=()) -> StageResult:
             sr.deferred += 1
         else:
             # Measured on runs 1 and 2: 14 candidates, every refuter errored or had its
-            # verdict discarded. `--resume` only refutes findings with no refutations, so
-            # these stay deferred until something re-refutes them.
+            # verdict discarded. `quarry deep --resume` asks a model whose only record
+            # is an error again (item 5), and _revive_layer2 brings the finding back
+            # once a usable verdict lands.
             _defer(con, run_id, r, sr.stage,
                    f"no usable cross-family verdict: {r['refuter_errors'] or 0} refuter "
                    f"error(s) and no valid refutation or defence")

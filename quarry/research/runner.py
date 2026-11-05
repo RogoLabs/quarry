@@ -374,8 +374,13 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
             """SELECT * FROM research_findings
                WHERE research_id=? AND family != ?
                ORDER BY quote_verified DESC, id""", (rid, mfam)).fetchall()
+        # An error is not an answer: a model whose only record on a finding is a failed
+        # call is asked again (IMPROVEMENT-PLAN item 5). Before this, --resume skipped
+        # it forever and the finding stayed deferred at the Layer 2 gate; 14 candidates
+        # on runs 1 and 2 were stuck that way.
         rows = [r for r in rows
-                if not any(x.get("model") == m for x in json.loads(r["refutations"]))]
+                if not any(x.get("model") == m and x.get("verdict") != "error"
+                           for x in json.loads(r["refutations"]))]
         if not rows:
             continue
         progress(f"  {m}: refuting {len(rows)} finding(s)")
@@ -392,6 +397,12 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
                           why_it_might_be_wrong=r["self_critique"] or "",
                           quote_verified=bool(r["quote_verified"]),
                           refutations=json.loads(r["refutations"]))
+            # A retry replaces this model's failed calls with its new record, which keeps
+            # their reasons, so one model never holds two records on one finding.
+            earlier = [x.get("reason", "") for x in f.refutations
+                       if x.get("model") == m and x.get("verdict") == "error"]
+            f.refutations = [x for x in f.refutations
+                             if not (x.get("model") == m and x.get("verdict") == "error")]
             tag = E.new_tag()
             text = sub.render(tag)
             declared = intent.for_file(f.file) if intent is not None else ""
@@ -404,10 +415,11 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
                 for k in ("reason", "counter_quote"):
                     if k in rec:
                         rec[k] = taint.redact_in(str(rec[k]), secrets)
-                f.refutations.append(rec)
             except Exception as e:                      # noqa: BLE001
-                f.refutations.append({"model": m, "verdict": "error",
-                                      "reason": str(e)[:200]})
+                rec = {"model": m, "verdict": "error", "reason": str(e)[:200]}
+            if earlier:
+                rec["earlier_errors"] = earlier[-5:]
+            f.refutations.append(rec)
             con.execute(
                 """UPDATE research_findings SET refutations=?, n_refuted=?, n_survived=?,
                    refuter_errors=? WHERE id=?""",

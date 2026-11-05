@@ -123,3 +123,35 @@ def test_second_full_pass_is_a_no_op(con, monkeypatch):
     seen = _record_calls(monkeypatch)          # fresh recorder
     runner._refute_pass(con, 1, Path("/x"), {"core": _Sub()}, MODELS, None, lambda *_: None)
     assert seen == []                          # everything already refuted
+
+
+def test_a_refuter_that_errored_is_asked_again_on_resume(con, monkeypatch):
+    """IMPROVEMENT-PLAN item 5. 14 candidates on runs 1 and 2 had every refuter error;
+    the pass treated an error record as an answer and never asked again, so they sat
+    deferred at the Layer 2 gate for good."""
+    _add(con, 1, "qwen3.6:27b")
+    con.execute("UPDATE research_findings SET refutations=?, refuter_errors=1 WHERE id=1",
+                (json.dumps([{"model": "devstral:24b", "verdict": "error",
+                              "reason": "timed out"},
+                             {"model": "granite4.2:30b", "verdict": "refuted",
+                              "reason": "guarded upstream"}]),))
+    seen = _record_calls(monkeypatch)
+
+    runner._refute_pass(con, 1, Path("/x"), {"core": _Sub()}, MODELS, None, lambda *_: None)
+
+    assert seen == ["devstral:24b"]                # granite answered; only devstral retried
+    row = con.execute("SELECT * FROM research_findings WHERE id=1").fetchone()
+    recs = json.loads(row["refutations"])
+    dev = [x for x in recs if x["model"] == "devstral:24b"]
+    assert len(dev) == 1 and dev[0]["verdict"] == "survives"
+    assert dev[0]["earlier_errors"] == ["timed out"]
+    assert (row["n_survived"], row["n_refuted"], row["refuter_errors"]) == (1, 1, 0)
+
+
+def test_an_error_record_counts_as_a_refuter_error_not_a_vote():
+    f = E.Finding(lens="authz", model="qwen3.6:27b", title="t", file="a.js", quote="q",
+                  severity="high", reasoning="r", attacker_control="a",
+                  why_it_might_be_wrong="w", quote_verified=True,
+                  refutations=[{"model": "devstral:24b", "verdict": "error", "reason": "x"},
+                               {"model": "granite4.2:30b", "verdict": "error", "reason": "y"}])
+    assert (f.refuted, f.survived, f.refuter_errors) == (0, 0, 2)
