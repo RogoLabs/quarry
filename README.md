@@ -42,7 +42,12 @@ only a deterministic rejection of that kind carries forward to later runs. Anyth
 is stored as needs-review. Today the SQL injection probe records a baseline and the
 auth-timing probe records a control; the other probes record neither yet, so their
 results are all needs-review. `quarry report` only drafts confirmed findings, and every
-draft ends with a reminder to review it before sending.
+draft ends with a reminder to review it before sending. A draft also lists the conditions
+Quarry recorded for the observation (and says which it did not record), names the weakest
+link in the evidence, keeps the per-CWE severity default apart from a confidence line taken
+from the verdict, and searches the local OSV copy for earlier advisories. It does not claim
+the result reproduces unless replays were recorded, and it does not re-check the current
+HEAD.
 
 ## Why it is shaped this way
 

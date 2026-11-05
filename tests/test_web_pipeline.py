@@ -220,7 +220,9 @@ def test_draft_reports_returns_what_the_report_command_records(tmp_path):
     from quarry.disclosure import draft_reports
     con, src = _db(tmp_path)
     _confirm(con, "f1")
-    drafts = draft_reports(con, 1, src, out_dir=tmp_path / "reports")
+    # an empty vulndb directory, so the prior-advisory lookup never reads the live copy
+    drafts = draft_reports(con, 1, src, out_dir=tmp_path / "reports",
+                           vulndb_root=tmp_path / "no-vulndb")
     assert len(drafts) == 1
     d = drafts[0]
     assert d.finding_id == "f1"
