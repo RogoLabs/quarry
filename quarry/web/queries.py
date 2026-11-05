@@ -548,6 +548,79 @@ def dismissals_for_run(con: sqlite3.Connection, run_id: int) -> list[dict[str, A
     return [d for d in out if d["scope"] != "run" or d["held"]]
 
 
+# ------------------------------------------------- small reads the routes used to inline
+
+def has_runs(con: sqlite3.Connection) -> bool:
+    return con.execute("SELECT 1 FROM runs LIMIT 1").fetchone() is not None
+
+
+def run_ids(con: sqlite3.Connection) -> list[int]:
+    """Every run id, newest first."""
+    return [r["id"] for r in con.execute("SELECT id FROM runs ORDER BY id DESC")]
+
+
+def latest_run(con: sqlite3.Connection) -> int | None:
+    """The newest run worth opening.
+
+    `status='done'` alone meant that during your first scan `/triage` told you to
+    go and run a scan. A run in flight is a better answer than an empty state.
+    """
+    r = con.execute("SELECT id FROM runs WHERE status='done' ORDER BY id DESC "
+                    "LIMIT 1").fetchone()
+    if r:
+        return r["id"]
+    r = con.execute("SELECT id FROM runs WHERE status='running' ORDER BY id DESC "
+                    "LIMIT 1").fetchone()
+    return r["id"] if r else None
+
+
+def run_volume(con: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
+    """A run's status and volume path: what deep review needs to start."""
+    r = con.execute("SELECT status, volume_path FROM runs WHERE id=?",
+                    (run_id,)).fetchone()
+    return dict(r) if r else None
+
+
+def producer_exists(con: sqlite3.Connection, producer_id: str) -> bool:
+    return con.execute("SELECT 1 FROM producers WHERE id=?",
+                       (producer_id,)).fetchone() is not None
+
+
+def quarantined(con: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]:
+    """What ingest moved aside for a run."""
+    return [dict(r) for r in con.execute(
+        "SELECT kind,original_path,detail FROM quarantined WHERE run_id=?", (run_id,))]
+
+
+def research_row(con: sqlite3.Connection, rid: int) -> dict[str, Any] | None:
+    """The columns `/research/{id}/stop` checks before it signals anything."""
+    r = con.execute("SELECT id, run_id, pid, status, heartbeat FROM research_runs "
+                    "WHERE id=?", (rid,)).fetchone()
+    return dict(r) if r else None
+
+
+def research_claim_state(con: sqlite3.Connection, rid: int) -> dict[str, Any] | None:
+    """The columns a resume claim overwrites, kept so a failed spawn can put them
+    back (writes.release_research_claim)."""
+    r = con.execute("SELECT status, pid, heartbeat FROM research_runs WHERE id=?",
+                    (rid,)).fetchone()
+    return dict(r) if r else None
+
+
+def occurrence_detail(con: sqlite3.Connection, oid: int) -> dict[str, Any] | None:
+    """One occurrence with everything the detail pane shows: its evidence window,
+    its ledger events, its verdicts and, for a deep candidate, its research record.
+    Triage and /evidence assembled this separately, line for line."""
+    d = occurrence(con, oid)
+    if not d:
+        return None
+    d["evidence"] = evidence(con, d["blob_sha"])
+    d["provenance"] = provenance(con, oid)
+    d["verdicts"] = verdicts_for_finding(con, d["finding_id"])
+    d["research"] = research_finding(con, oid)
+    return d
+
+
 def run_summary(con: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
     r = con.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
     if not r:
