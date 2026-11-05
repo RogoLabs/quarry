@@ -385,11 +385,23 @@ def deep_replay(models: str = typer.Option("qwen3-coder:30b,devstral:24b",
 
 @app.command("deep-replay-compare")
 def deep_replay_compare(before: str = typer.Argument(..., help="earlier result JSON"),
-                        after: str = typer.Argument(..., help="later result JSON")) -> None:
+                        after: str = typer.Argument(..., help="later result JSON"),
+                        rescore: bool = typer.Option(False, help="score both again with "
+                                                                 "the current scorer"),
+                        corpus: str = typer.Option("", help="corpus dir for --rescore")
+                        ) -> None:
     """Compare two replay results. A tie is a valid result; differing models, digests,
     budget, lens set or corpus make the pair not comparable, and it says which."""
     from .research import replay
     a, b = (json.loads(Path(p).read_text()) for p in (before, after))
+    if rescore:
+        c = replay.load(Path(corpus) if corpus else replay.DEFAULT_CORPUS)
+        try:
+            a, b = replay.rescore(a, c), replay.rescore(b, c)
+        except ValueError as e:
+            con_out.print(f"[red]refusing:[/] {_e(e)}")
+            raise typer.Exit(1)
+        con_out.print("[dim]both rescored with the current scorer[/]")
     d = replay.compare(a, b)
     colour = {"better": "green", "worse": "red", "tie": "bold",
               "mixed": "yellow"}.get(d["verdict"], "red")

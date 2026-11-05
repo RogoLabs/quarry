@@ -91,9 +91,16 @@ def test_match_by_symbol_anchor_and_mention():
     assert replay.match(n4, _f(quote="def search_notes():\n    q = request.args.get"),
                         FILES["notes_app"]) == "anchor"
     hit = _f(repo="ticket_api", file="routes/tickets.js",
-             symbol="GET /tickets/:id", title="History endpoint has no auth",
-             reasoning="the /history route skips requireUser")
+             symbol="GET /tickets/:id", title="The /history route has no auth",
+             reasoning="its siblings carry requireUser")
     assert replay.match(t1, hit, FILES["ticket_api"]) == "mention"
+    # In the reasoning only, a mention counts when the quote's definition is unknown,
+    # not when the quote sits in a different, known definition.
+    aside = _f(file="notes/files.py", symbol="remove", title="Traversal in deletion",
+               reasoning="similar to the download function, ../ reaches other files")
+    assert replay.match(_plant("N3"), aside, FILES["notes_app"]) is None
+    assert replay.match(_plant("N3"), {**aside, "symbol": None},
+                        FILES["notes_app"]) == "mention"
     # The model named the file by its basename; one such file, so it stands in.
     assert replay.match(n2, _f(file="views.py", symbol="view_note"),
                         FILES["notes_app"]) == "symbol"
@@ -209,6 +216,16 @@ def test_run_drives_the_real_runner_and_scores_it(tmp_path, monkeypatch):
     assert not list((tmp_path / "w").rglob("plants.json"))
     assert (tmp_path / "w" / "replay.db").is_file()
     json.dumps(res, default=str)                       # the CLI writes it as JSON
+
+
+def test_rescore_uses_the_current_scorer_on_the_same_corpus_only():
+    res = {"config": {"corpus_sha": replay.corpus_sha(CORPUS)},
+           "findings": [_f(id=1, symbol="view_note", n_survived=1)],
+           "score": {"stale": True}}
+    s = replay.rescore(res, CORPUS)["score"]
+    assert s["missed_after_refute"]["n"] == 6 and "N2" not in s["missed_after_refute"]["ids"]
+    with pytest.raises(ValueError, match="different corpus"):
+        replay.rescore({**res, "config": {"corpus_sha": "other"}}, CORPUS)
 
 
 def test_run_refuses_one_family(tmp_path):

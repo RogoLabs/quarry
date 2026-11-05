@@ -215,9 +215,14 @@ def match(plant: Plant, finding: dict[str, Any], repo_files: set[str]) -> str | 
             return "symbol"
         if any(_ws(a) in quote for a in loc.anchors):
             return "anchor"
-    prose = f"{finding.get('title', '')} {finding.get('reasoning', '')}"
-    if any(m in prose for m in plant.mentions):
-        return "mention"
+    # A mention in the title counts. One in the reasoning counts only when the quote's own
+    # definition is unknown: MEASURED on the first replay, a claim about `remove` reasoned
+    # "similar to the download function" and matched the download plant by mention.
+    title = (finding.get("title") or "").lower()
+    reasoning = (finding.get("reasoning") or "").lower()
+    for m in (x.lower() for x in plant.mentions):
+        if m in title or (not finding.get("symbol") and m in reasoning):
+            return "mention"
     return None
 
 
@@ -278,6 +283,18 @@ def score(c: Corpus, findings: list[dict[str, Any]],
         "per_repo": per_repo,
         "per_plant": per_plant,
     }
+
+
+def rescore(result: dict[str, Any], c: Corpus) -> dict[str, Any]:
+    """The result with its score recomputed by the current scorer from the findings it
+    saved, so two replays scored under different matching rules can be compared on
+    one. Only for the corpus the replay ran on: a different corpus is refused."""
+    if result["config"].get("corpus_sha") != corpus_sha(c):
+        raise ValueError("this result was run on a different corpus; it cannot be "
+                         "rescored against this one")
+    files = {r: {str(p.relative_to(c.root / r)) for p in _files(c.root / r)}
+             for r in c.repos}
+    return {**result, "score": score(c, result["findings"], files), "rescored": True}
 
 
 # ------------------------------------------------------------------ comparing
