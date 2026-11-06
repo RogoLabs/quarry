@@ -419,3 +419,54 @@ def test_the_merge_keeps_handler_lines_and_the_declared_scope():
     [r] = m.routes.values()
     assert (r.line, r.end_line, r.handler_file) == (4, 9, "api.py")
     assert (r.auth_scope, r.auth_header, r.query) == ("operation", "X-API-KEY", ("a", "b"))
+
+
+# --- IMPROVEMENT-PLAN item 16: the served spec as readiness evidence ------------------
+
+def _ops(n, prefix="/v"):
+    return {f"{prefix}/{i}": {"get": {}} for i in range(n)}
+
+
+def test_served_spec_comparison_applies_base_paths_and_the_half_rule():
+    from quarry.dynamic.routes import compare_served_spec
+    # Swagger 2 with basePath against OpenAPI 3 with a server path: same operations.
+    committed = [("docs/swagger.json", {"swagger": "2.0", "basePath": "/api",
+                                        "paths": _ops(4, "")})]
+    served = ("/api/openapi.json", {"openapi": "3.0.0", "servers": [{"url": "/api"}],
+                                    "paths": _ops(4, "")})
+    got = compare_served_spec(committed, served)
+    assert (got["matches"], got["identical"], got["shared_ops"]) == (True, False, 4)
+    assert got["compared_with"] == "docs/swagger.json" and got["served_ops"] == 4
+    # A stale committed spec: 2 of the smaller document's 4 operations shared is half.
+    stale = ("/openapi.json", {"openapi": "3.0.0",
+                               "paths": {**_ops(2), "/new/a": {"get": {}},
+                                         "/new/b": {"get": {}}, "/new/c": {"get": {}}}})
+    assert compare_served_spec([("openapi.json", {"openapi": "3.0.0", "paths": _ops(4)})],
+                               stale)["matches"] is True
+    # A different service: 1 of 4 shared.
+    other = ("/openapi.json", {"openapi": "3.0.0",
+                               "paths": {**_ops(1), **_ops(5, "/other")}})
+    got = compare_served_spec([("openapi.json", {"openapi": "3.0.0", "paths": _ops(4)})],
+                              other)
+    assert (got["matches"], got["shared_ops"], got["committed_ops"]) == (False, 1, 4)
+
+
+def test_served_spec_comparison_keeps_the_best_committed_document():
+    from quarry.dynamic.routes import compare_served_spec
+    doc = {"openapi": "3.0.0", "paths": _ops(3)}
+    got = compare_served_spec([("a/openapi.json", {"openapi": "3.0.0",
+                                                   "paths": _ops(3, "/x")}),
+                               ("b/openapi.yaml", dict(doc))], ("/openapi.json", doc))
+    assert got["compared_with"] == "b/openapi.yaml" and got["identical"] is True
+    assert got["committed"] == ["a/openapi.json", "b/openapi.yaml"]
+
+
+def test_nothing_to_compare_is_recorded_not_failed():
+    from quarry.dynamic.routes import compare_served_spec
+    doc = {"openapi": "3.0.0", "paths": _ops(2)}
+    none_served = compare_served_spec([("openapi.json", doc)], None)
+    assert none_served["matches"] is None and none_served["served"] is None
+    assert "served no OpenAPI document" in none_served["note"]
+    none_committed = compare_served_spec([], ("/openapi.json", doc))
+    assert none_committed["matches"] is None and none_committed["served_ops"] == 2
+    assert "commits no OpenAPI document" in none_committed["note"]
