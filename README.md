@@ -38,7 +38,9 @@ quarry serve                    # dashboard on 127.0.0.1:8099
 The scanners are opengrep, bandit, gitleaks, zizmor, osv-scanner, trivy and checkov.
 Opengrep runs all its rule trees at once, but if the engine crashes on one tree or file
 and writes nothing, the scan falls back to one invocation per tree so a single bad
-ruleset cannot zero the others' findings; a crashing tree is recorded, not hidden.
+ruleset cannot zero the others' findings. A tree that still crashes the engine is split
+and rerun until the crash is pinned to a file; that file is retried with `-j 1`, and if
+it still crashes the scan's coverage counts name it as skipped.
 `quarry deep` adds an optional review pass by local models through Ollama; cloud model
 names are refused. A model of another family then tries to refute each claim. A
 refutation counts only when it quotes code and names the guard in that quote (the check,

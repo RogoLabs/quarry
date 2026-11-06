@@ -79,6 +79,14 @@ class ScanOutcome:
     # which the run page read as "nothing to scan" for any note at all, including
     # opengrep's "recovered per tree" on a run with hundreds of findings.
     nothing_to_scan: bool = False
+    # Results the parser read and dropped, by reason (DAMAGED_RESULT, NO_PATH). One bad
+    # result costs that result; the count is what keeps the loss from being silent.
+    dropped: dict[str, int] = field(default_factory=dict)
+
+
+# Reasons a result in a tool's report was dropped by the parser.
+DAMAGED_RESULT = "damaged"        # a field that is there but has the wrong shape
+NO_PATH = "no path in the clone"  # no location, or one rel_or_none refused
 
 
 class Scanner:
@@ -86,6 +94,9 @@ class Scanner:
     binary: str = "?"
     # A tool that only makes sense for some targets declares it here.
     needs_network: bool = False
+    # Filled by run() while parse() reads the report; see ScanOutcome.dropped. None
+    # outside a run, so a parse() called on its own counts nothing.
+    dropped: dict[str, int] | None = None
 
     def available(self) -> str | None:
         """-> absolute path, or None. Searches the same PATH the sandboxed child gets,
@@ -152,6 +163,7 @@ class Scanner:
             return ScanOutcome(self.name, True, res.returncode, res.duration_s, note=why,
                                nothing_to_scan=True)
 
+        self.dropped = {}
         try:
             records = list(self.parse(out, src))
         except taint.TaintError as e:
@@ -160,7 +172,8 @@ class Scanner:
         except Exception as e:                      # noqa: BLE001 - a broken parser is data
             return ScanOutcome(self.name, False, res.returncode, res.duration_s,
                                error=f"{type(e).__name__}: {e}")
-        return ScanOutcome(self.name, True, res.returncode, res.duration_s, records)
+        return ScanOutcome(self.name, True, res.returncode, res.duration_s, records,
+                           dropped=dict(self.dropped))
 
 
 # ---------------------------------------------------------------- helpers
@@ -209,38 +222,94 @@ def rel_or_none(uri: str | None, src: Path) -> str | None:
         return None
 
 
+class _Damaged(Exception):
+    """A SARIF result field that is present but has the wrong shape."""
+
+
+def _obj(value: Any) -> dict:
+    """An optional SARIF object: absent reads as empty, and present but not a mapping
+    is damage to that one result."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise _Damaged
+    return value
+
+
+def _seq(value: Any) -> list:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise _Damaged
+    return value
+
+
+def _opt_str(value: Any) -> str | None:
+    if value is not None and not isinstance(value, str):
+        raise _Damaged
+    return value
+
+
+def count_drop(dropped: dict[str, int] | None, reason: str) -> None:
+    if dropped is not None:
+        dropped[reason] = dropped.get(reason, 0) + 1
+
+
 def sarif_records(doc: dict[str, Any], src: Path, tool: str,
-                  severity_of: Callable[[dict, dict], str] | None = None
-                  ) -> Iterable[Record]:
-    """Parse a SARIF 2.1.0 log. Shared by every tool that speaks it."""
+                  severity_of: Callable[[dict, dict], str] | None = None, *,
+                  dropped: dict[str, int] | None = None) -> Iterable[Record]:
+    """Parse a SARIF 2.1.0 log. Shared by every tool that speaks it.
+
+    The log's own frame (`runs`, each run's `tool`) is the document: if that is broken
+    the report is refused and the tool fails, loudly. Inside it, one result with a
+    damaged field (a location, message or properties that is not a mapping, a ruleId
+    that is not a string) costs that result only. It used to raise out of the parser,
+    which failed the whole tool and lost every good finding beside it (IMPROVEMENT-PLAN
+    P4 side finding). Each dropped result is counted in `dropped` by reason, and the
+    orchestrator turns the count into a health warning."""
     for run in doc.get("runs", []):
         driver = (run.get("tool") or {}).get("driver") or {}
-        rules = {r.get("id"): r for r in driver.get("rules") or [] if isinstance(r, dict)}
+        rules = {r["id"]: r for r in driver.get("rules") or []
+                 if isinstance(r, dict) and isinstance(r.get("id"), str)}
         for result in run.get("results") or []:
-            if not isinstance(result, dict):
+            try:
+                rec = _sarif_record(result, rules, src, tool, severity_of)
+            except _Damaged:
+                count_drop(dropped, DAMAGED_RESULT)
                 continue
-            rule_id = result.get("ruleId") or "unknown"
-            rule = rules.get(rule_id, {})
-            locs = result.get("locations") or []
-            phys = (locs[0].get("physicalLocation") if locs else None) or {}
-            uri = ((phys.get("artifactLocation") or {}).get("uri"))
-            path = rel_or_none(uri, src)
-            if path is None:
+            if rec is None:
+                count_drop(dropped, NO_PATH)
                 continue
-            region = phys.get("region") or {}
-            props = {**(rule.get("properties") or {}), **(result.get("properties") or {})}
-            tags = props.get("tags") or []
-            cwe = next((t for t in tags if isinstance(t, str) and t.upper().startswith("CWE")), None)
+            yield rec
 
-            sev = severity_of(result, rule) if severity_of else _sarif_severity(result, props)
-            fp = (result.get("partialFingerprints") or {}).get("primaryLocationLineHash")
 
-            yield Record(
-                tool=tool, rule_id=rule_id, path=path,
-                start_line=region.get("startLine"), end_line=region.get("endLine"),
-                message=taint.scrub_text((result.get("message") or {}).get("text")),
-                severity=sev, cwe=cwe, fingerprint=fp, raw=strip_source(result),
-            )
+def _sarif_record(result: Any, rules: dict[str, dict], src: Path, tool: str,
+                  severity_of: Callable[[dict, dict], str] | None) -> Record | None:
+    """One SARIF result as a Record; None when it names no path inside the clone."""
+    if not isinstance(result, dict):
+        raise _Damaged
+    rule_id = _opt_str(result.get("ruleId")) or "unknown"
+    rule = rules.get(rule_id, {})
+    locs = _seq(result.get("locations"))
+    phys = _obj(_obj(locs[0]).get("physicalLocation")) if locs else {}
+    path = rel_or_none(_obj(phys.get("artifactLocation")).get("uri"), src)
+    if path is None:
+        return None
+    region = _obj(phys.get("region"))
+    props = {**_obj(rule.get("properties")), **_obj(result.get("properties"))}
+    tags = _seq(props.get("tags"))
+    cwe = next((t for t in tags if isinstance(t, str) and t.upper().startswith("CWE")), None)
+    _opt_str(result.get("level"))
+    sev = severity_of(result, rule) if severity_of else _sarif_severity(result, props)
+    fp = _opt_str(_obj(result.get("partialFingerprints")).get("primaryLocationLineHash"))
+    # startLine and endLine are kept as the tool wrote them: _persist reads a value
+    # that is not a positive integer as no line, and counts it.
+    return Record(
+        tool=tool, rule_id=rule_id, path=path,
+        start_line=region.get("startLine"), end_line=region.get("endLine"),
+        message=taint.scrub_text(_obj(result.get("message")).get("text")),
+        severity=sev, cwe=cwe, fingerprint=fp, raw=strip_source(result),
+    )
 
 
 def strip_source(obj: Any, keys: tuple[str, ...] = ("snippet",)) -> Any:

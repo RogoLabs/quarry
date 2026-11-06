@@ -33,6 +33,53 @@ def test_distinct_findings_count_is_not_the_occurrence_count(tmp_path):
     assert s.findings == 2, "lines 1 and 3 are the same content, so the same finding"
 
 
+# A tool's line number is target-influenced output. SARIF says startLine is a positive
+# integer; nothing makes a tool say so. IMPROVEMENT-PLAN P4 side finding: "12" or 12.5
+# raised TypeError in extract_evidence inside _persist: the tool's rows were rolled back
+# and the exception ended orchestrator.scan, so the tools after it never ran. True, 0
+# and -4 were stored as given, and a negative line built a window around no line.
+_BAD_LINES = ["12", 12.5, [3], {"n": 1}, True, 0, -4]
+
+
+@pytest.mark.parametrize("line", _BAD_LINES, ids=[repr(v) for v in _BAD_LINES])
+def test_a_line_that_is_not_a_positive_integer_is_stored_as_no_line(tmp_path, line):
+    (tmp_path / "a.py").write_text("".join(f"x{i} = {i}\n" for i in range(1, 200)))
+    c = db.init(tmp_path / "t.db")
+    c.execute("INSERT INTO runs (id,target,clone_url,status) VALUES (1,'o/r','x','done')")
+    s = orchestrator.ScanSummary(1)
+    s.per_tool["bandit"] = {"lined": 0, "captured": 0, "bad_lines": 0}
+    recs = [Record(tool="bandit", rule_id="B307", path="a.py", start_line=line),
+            Record(tool="bandit", rule_id="B307", path="a.py", start_line=150,
+                   end_line=line)]
+    orchestrator._persist(c, 1, "o/r", None, tmp_path, "bandit", recs, s)
+    rows = c.execute("SELECT start_line, end_line FROM occurrences ORDER BY id").fetchall()
+    assert [tuple(r) for r in rows] == [(None, None), (150, None)]
+    assert s.per_tool["bandit"]["bad_lines"] == 2
+    # The good line still anchors its window; the bad one is a lineless finding.
+    assert (s.per_tool["bandit"]["lined"], s.per_tool["bandit"]["captured"]) == (1, 1)
+
+
+@pytest.mark.parametrize("line", ["12", 12.5, -4], ids=["str", "float", "negative"])
+def test_extract_evidence_reads_a_bad_line_as_no_line(tmp_path, line):
+    from quarry import taint
+    (tmp_path / "a.py").write_text("".join(f"x{i} = {i}\n" for i in range(1, 200)))
+    ev = taint.extract_evidence(tmp_path, Path("a.py"), line, end_line=line)
+    assert ev is not None and ev.match_sha is None
+    assert ev.start_line == 1                       # the window of a lineless finding
+
+
+def test_bad_lines_are_counted_in_the_manifest_and_health(tmp_path, monkeypatch):
+    tools = {"bandit": _Canned("bandit", _ok(Record("bandit", "B307", "app.py", "1"),
+                                             Record("bandit", "B307", "app.py", 1)))}
+    c, paths = _scan_env(tmp_path, monkeypatch, tools)
+    s = orchestrator.scan(paths, c, 1)
+    kept = db.read_manifest(c, 1)["scan"]["tools"]["bandit"]
+    assert kept["ok"] and kept["records"] == 2 and kept["bad_lines"] == 1
+    assert c.execute("SELECT COUNT(*) FROM occurrences").fetchone()[0] == 2
+    assert any("1 result(s) had a line number that is not a positive integer" in m
+               for m in s.health["bandit"]), s.health["bandit"]
+
+
 class _Tool(Scanner):
     name = binary = "faketool"
 

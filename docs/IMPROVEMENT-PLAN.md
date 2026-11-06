@@ -755,6 +755,38 @@ not counted in `refuter_errors`, so the gate's "N refuter error(s)" can say 0 wh
 every refuter errored; and a pre-fix record that names the other real refuter cannot
 be told from a genuine one.
 
+**Done 2026-11-06, the first two side findings.** A damaged SARIF result now costs that
+result only. `sarif_records` drops a result whose location, physical location, artifact
+location, region, message, properties or `partialFingerprints` is present but not a
+mapping, whose `locations` or `tags` is not a list, or whose `ruleId`, `level` or
+fingerprint is not a string. It counts each drop by reason on `ScanOutcome.dropped`:
+`damaged`, or `no path in the clone` for a result with no location or one `rel_or_none`
+refused, which used to be dropped without a count. The orchestrator stores the counts in
+`manifest.scan.tools.<tool>.dropped` and adds a health warning ("N result(s) dropped
+from the report"). A log whose frame is broken (`runs` not a list of runs) still fails
+the tool, loudly, as before. Checked: 11 damaged shapes, each placed beside five good
+Checkov results, now keep all five and count one drop. On the previous code 10 of the 11
+failed the tool with no records, and the eleventh, a numeric `ruleId`, was kept as a
+finding (in opengrep's parser the same value would have raised, since it normalises the
+id as a string). Re-parsing run 7's own SARIF reports (opengrep, checkov, trivy and
+zizmor, 756 records) dropped nothing, so the warning should not fire on an ordinary run.
+Bandit and Gitleaks write their own JSON formats, where a result that is not a mapping
+still fails the tool; that is unchanged.
+
+For the line number: `taint.line_number` accepts only a positive int as a line, so not a
+bool, string, float, zero or negative value. `_persist` passes each record's start and
+end line through it, stores anything else as no line, and counts the record in the
+tool's `bad_lines`, which becomes a health warning. `extract_evidence` applies the same
+rule itself, since the deep-review path calls it too. The tests came first and failed
+on the previous code: with `"12"`, `[3]` or `{"n": 1}` as the line, `_persist` raised
+TypeError, and `12.5` raised on the slice. Run through `orchestrator.scan` with three
+canned tools, a `"1"` from the second one rolled back its rows and ended the scan, and
+the third tool never ran; with the fix all three stored their rows. `True` was stored
+and anchored on line 1, and `-1000` in a 2,000-line file built a 1,040-line window
+ending at line -960. 11 new tests in `test_scan_bookkeeping.py` and 5 more cases in
+`test_checkov_parse.py`. The other two side findings (refuter errors, pre-fix records)
+are not touched.
+
 ---
 
 ## Order of work
@@ -1560,6 +1592,85 @@ every finding), so VulnLookup is ingested again as a new run, scanned with
 `--timeout 3600`: at 1800 s, the reruns share roughly 1350 s, which the javascript tree
 alone nearly fills.
 
+**Done 2026-11-06, the generic tree's crash.** On run 7 (VulnLookup, rescanned as above)
+the combined run crashed, the per-tree fallback ran, and the `generic` tree failed with
+"opengrep-core exited with unexpected output", so none of its findings were kept.
+
+- **Cause: one file, and a thread stack.** Reproduced with run 7's exact argv under Tier
+  1, on a copy of its tree. The generic tree (257 rules, 1,139 files) crashed at `-j 8`
+  and `-j 16` (opengrep's default here) and scanned all 1,139 files with 123 findings
+  at `-j 1`, `-j 2` and `-j 4`. opengrep-core died on signal 10, and macOS's crash
+  report for it reads "Thread stack size exceeded due to excessive recursion": SIGBUS
+  in the guard page of a worker thread whose stack is 544 KiB. Bisecting the target
+  list at `-j 16` reached one file, `storage/kvrocks.conf` (45 KB, 1,089 lines, 844 of
+  them comments). Alone it crashed the tree at `-j 2`, 4 and 8 (two runs each)
+  and scanned cleanly at `-j 1`. Why the whole tree survives `-j 2` and 4 while the file
+  alone does not was not established. No single rule is to blame: bisecting the
+  generic rules against that file, 16 of them (11 nginx, 5 gitleaks secrets rules)
+  crash it together and neither half of 8 does. opengrep-core imports `pthread_create`
+  and `pthread_attr_init` but not `pthread_attr_setstacksize`, and `opengrep scan
+  --help` has no option for a worker's stack, so Quarry cannot raise it. Two synthetic
+  comment-only files (1,000 and 10,000 lines) did not crash it, so there is no small
+  reproducer and no live test.
+- **The combined run** crashes on the same file, but not every time. It crashed in run
+  7 and in the old-code run below (after 74 s, signal 10 again), and the new-code run
+  below happened not to crash: 575 s, 856 findings, the generic tree's 123 among them.
+  The full pack with `--exclude kvrocks.conf` exited 0 in 737 s with 856 findings over
+  1,138 files. Inside the two isolations measured below, a group holding the file
+  crashed at `-j 16` in 12 of 13 runs, so whether it crashes depends on which thread
+  gets the file. Not fixed in the combined run: the levers are `-j 1` for the whole
+  pack (not measured, and serial for every tree) or excluding the file in advance,
+  which needs to know it and loses it for every tree. The per-tree fallback is where
+  it is recovered.
+- **Fix: `Opengrep._isolate`.** A tree whose run crashed opengrep-core (that message on
+  stderr or in the report's errors; a run that failed any other way is not split) is
+  rerun over explicit paths: the clone's top-level entries in halves, a crashing group
+  halved again, a single crashing directory replaced by its entries, and a single
+  crashing file rerun with `-j 1`. A file that crashes even then is a named skip in the
+  coverage counts ("crashed opengrep-core even alone with -j 1, <tree> rules"), and so
+  is anything the deadline leaves unreached ("out of time isolating an opengrep-core
+  crash"). A group that works keeps its findings and coverage, so a crash that needs
+  two files together costs nothing. The paths are listed from Tier 0, names only,
+  never through a link and never `.git`. A group whose paths would pass 256 KiB on the
+  command line is split before it runs. If three files crash alone before any run has
+  worked, the crash is taken not to depend on the file, and the rest are named as not
+  scanned rather than each run alone. Every split run keeps its own log,
+  `logs/opengrep-<tree>.<n>.stderr`, and the note names the files.
+- **Budget (item 25).** Pass two now serves both kinds of tree: crashed trees first,
+  then the trees killed at their slice, each taking an equal share of what remains
+  when its turn comes. Crashed trees go first because isolation was short in both
+  measurements below (52 s and about 150 s) and what it leaves rolls on to the
+  reruns. A crashed tree whose share is under 10 s is not isolated and is listed as
+  before, now marked "opengrep-core crashed".
+- **Measured, whole opengrep step, old code then new**, one after the other on this
+  Mac, each on its own copy of run 7's tree with `--timeout 3600`. Old code: the
+  combined run crashed, and the per-tree pass took 1,341 s (1,416 s for the step) for
+  736 findings, none from the generic tree. Its merged coverage still read 1,139 of
+  1,139 files scanned, because other trees had read every file; only the note and one
+  `SemgrepError` said a whole tree was lost. New code: the combined run did not crash
+  (above), so the per-tree pass was run directly on the same copy: 1,373 s, 859
+  findings (the same 736 plus the generic tree's 123), no file skipped by the
+  isolation, which took 10 runs and 52 s and that time got the file through inside a
+  two-entry group at `-j 16`. The 123 generic findings are the same, by rule, path and
+  line, as the 123 the uncrashed combined run found. The new per-tree pass took 32 s
+  longer than the old: the isolation's 52 s, offset mostly by a javascript rerun that
+  happened to finish 20 s sooner.
+- **Measured, generic tree alone, new code:** 157.9 s from the first run to the end,
+  16 split runs (8 worked), 123 findings, 1,139 of 1,139 files scanned (all of the
+  tree's files, as at `-j 1`), nothing skipped; `kvrocks.conf` was scanned alone at
+  `-j 1` with no findings. One run of the whole tree at `-j 1` took 21.2 s and also
+  found 123, so for this crash a whole-tree `-j 1` retry would have been about seven
+  times faster. Not done that way: it makes a large tree serial (the javascript tree
+  alone took 473 s at the default `-j` after run 4), and it does nothing for a file
+  that also crashes at `-j 1`. It could be tried before splitting, bounded, if the cost
+  matters.
+- Tests: 7 new in `test_scanner_argv.py`, all failing on the previous code. With a fake
+  opengrep that crashes whenever one file is in a parallel run, they cover recovery at
+  `-j 1`, a file that crashes even alone (a named skip, and the health line that names
+  it), a crash on every file (stops after three), the command-line cap, the deadline
+  (every file is scanned or named), the argv, and that the listing never follows a
+  link or enters `.git`. The existing per-tree tests pass unchanged.
+
 ### 26. Two workers can resume the same deep review [code]
 
 `quarry deep --resume <id>` does not check whether another worker already holds that
@@ -1601,6 +1712,29 @@ different code, both in a `BEGIN IMMEDIATE` transaction.
 
 Also seen: `/private/tmp/quarry` holds 78 leftover `run-9xxxxx` directories, none
 mounted, the oldest from 2026-11-02, apparently left by tests. Harmless, not cleaned.
+
+**Done 2026-11-06, the leftover directories.** The cause was in production code as well
+as the tests: `RunVolume.detach` never removed `MOUNT_BASE/run-<id>` after the image
+was detached, so every volume a test created and released (`test_containment.py`'s
+`900000 + pid` ids, `test_dynamic_validation.py`'s fixed 99998) left its empty mount
+point. `detach` now ends with `rmdir` of its own mount point when it is a real directory,
+empty, and no longer a mount; never recursive, and a link at that path is left alone.
+`create` and `attach_existing` do the same when `hdiutil attach` fails after the
+directory was made. The test fixtures, which already call `release()`, now clean up
+without changes. 5 new tests: four with a faked `hdiutil` (an empty mount point goes;
+one with files in it, one still mounted, and a link all stay; a failed attach in either
+path leaves nothing), and one in `test_containment.py` that creates, attaches and
+releases a real 1 GB image and checks the directory is gone. Without the fix 4 of the 5
+fail; the one that passes either way checks what must not be removed. Then the existing
+leftovers: 89 `run-9*` directories by then (one of them left by running the new
+containment test against the old code), all empty and none mounted. All 89 were removed
+with `rmdir`, one at a time, each checked first to be a real directory, empty,
+unmounted and untouched for 10 minutes, so that a test in another worktree that had just
+made its mount point would be left alone: 86 at once, and in a second pass the 3 that
+had been too new. Meanwhile test runs in other worktrees, which do not have this fix,
+kept adding new ones, about one a minute; those were left alone while they were minutes
+old, and will stop appearing once those branches have the fix. `run-1` to `run-7` were
+not touched, and all seven are still mounted.
 
 ### 27. gpt-oss:20b spends the night failing [measured]
 
