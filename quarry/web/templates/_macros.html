@@ -40,6 +40,45 @@
 {%- else %}<span class="pill unmeasured">no verdict row</span>{% endif %}
 {%- endmacro %}
 
+{#  A human verdict on a deep-review finding (`quarry deep-verdict`). Same roles as a
+    dynamic verdict: `real` holds like confirmed, `intended` says no like rejected,
+    `unclear` is unfinished like needs review. #}
+{% macro deep_verdict_pill(verdict) -%}
+{% if verdict == 'real' %}<span class="pill verified">real</span>
+{%- elif verdict == 'intended' %}<span class="pill killed">intended</span>
+{%- elif verdict == 'unclear' %}<span class="pill incomplete">unclear</span>
+{%- else %}<span class="pill unmeasured">{{ verdict }}</span>{% endif %}
+{%- endmacro %}
+
+{#  What humans have said about one deep-review finding: its own newest verdict, and
+    the earlier one a deep run matched it to. `h` is `research.verdicts.standing`.
+    The notes and actors are human text, the matched title and file model and target
+    text; all of it goes through |visible. #}
+{% macro human_verdict(h, rf_id) -%}
+<div class="mt-2">
+  {% if h.own %}
+  <p class="fs-cell"><b>Human verdict</b> {{ deep_verdict_pill(h.own.verdict) }}
+    <span class="dim">by {{ h.own.actor|visible }}, {{ h.own.created_at|local }}</span></p>
+  <p class="msg">{{ h.own.note|visible }}</p>
+  {% else %}
+  <p class="fs-cell dim"><b>Human verdict</b> none recorded.
+    <code>quarry deep-verdict {{ rf_id }} intended|real|unclear --note "why"</code></p>
+  {% endif %}
+  {% if h.prior %}{% set p = h.prior %}
+  <p class="fs-cell"><b>Matched an earlier finding</b> {{ deep_verdict_pill(p.verdict) }}
+    <span class="dim">#{{ p.rf_id }} in run {{ p.run_id }}, on {{ p.basis|visible }};
+      judged by {{ p.actor|visible }}, {{ p.created_at|local }}</span></p>
+  <p class="msg">{{ p.note|visible }}</p>
+  <p class="dim fs-cell">The finding judged: {{ p.title|visible }} · {{ p.file|visible }}</p>
+  {% if p.now %}
+  <p class="fs-cell"><span class="pill incomplete">changed since the match</span>
+    now {{ deep_verdict_pill(p.now.verdict) }} <span class="dim">by
+    {{ p.now.actor|visible }}, {{ p.now.created_at|local }}</span>: {{ p.now.note|visible }}</p>
+  {% endif %}
+  {% endif %}
+</div>
+{%- endmacro %}
+
 {#  A funnel ledger action. `defer` is NOT `kill`: a rate limiter, not evidence, so it
     never takes the kill colour. `arrived` is the run page's row for occurrences no
     stage has seen, not a ledger action. #}

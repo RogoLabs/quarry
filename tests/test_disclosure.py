@@ -458,6 +458,46 @@ def test_research_digest_neutralizes_markdown_injection(tmp_path):
     assert "```` not a fence" in text or "\n````\n" in text
 
 
+def test_research_digest_shows_each_findings_human_verdicts(tmp_path):
+    """Item 20. A human verdict reached the refuter and `deep-survivors` but not the
+    digest, so a reader met a finding a human had already judged intended as new."""
+    from quarry.research import verdicts
+    con = _research_db(tmp_path, [
+        dict(title="Judged and matched"),
+        dict(title="Nobody has looked"),
+        dict(title="The earlier one", quote_verified=0)])       # not in the digest
+    judged, fresh, earlier = (r[0] for r in con.execute(
+        "SELECT id FROM research_findings ORDER BY id"))
+    matched = verdicts.record(con, earlier, "intended",
+                              "documented as public; see [docs](http://evil.example)",
+                              actor="jerry")
+    con.execute("UPDATE research_findings SET prior_verdict_id=?, prior_match=? WHERE id=?",
+                (matched, "overlapping quote", judged))
+    verdicts.record(con, judged, "unclear", "# need the controller", actor="ops")
+    verdicts.record(con, earlier, "real", "owning_cna leaks", actor="jerry")
+
+    text = draft_research_digest(con, 1, out_dir=tmp_path / "reports").path.read_text()
+    one, two = (s for s in text.split("\n### ")[1:])
+    assert one.startswith("Judged and matched") and two.startswith("Nobody has looked")
+    lines = one.splitlines()
+    assert f"- Research finding: #{judged}" in lines
+    assert any(l.startswith("- Human verdict: unclear, by `ops`, ") and
+               l.endswith(r"UTC. Note: \# need the controller") for l in lines), lines
+    prior = next(l for l in lines if l.startswith("- Matched an earlier finding:"))
+    assert prior.startswith(f"- Matched an earlier finding: #{earlier} (run 1, overlapping "
+                            "quote), The earlier one in `app/api.py`, judged intended, by "
+                            "`jerry`, ")
+    assert "[docs](http://evil.example)" not in prior and r"\[docs\]" in prior
+    assert "That finding's verdict has since changed to real, by `jerry`" in prior
+    assert prior.endswith("Note: owning_cna leaks")
+
+    lines = two.splitlines()
+    assert f"- Human verdict: none recorded. Record one with `quarry deep-verdict {fresh} " \
+           f"intended|real|unclear --note \"...\"`" in lines
+    assert "- Matched an earlier finding: none; new to human review" in lines
+    assert not any(l.startswith("# need") for l in text.splitlines())
+
+
 # ---- conditions, limits and confidence -----------------------------------------------
 # A verdict written before the probes recorded replay/probe/conditions has none of those
 # keys, and one written after has all three. The draft must be honest either way: it

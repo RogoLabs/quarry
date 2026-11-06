@@ -36,6 +36,7 @@ from typing import Any
 
 from .. import db
 from ..cwe import probe_class
+from ..research import verdicts
 from ..research.ensemble import KEPT_SQL
 from ..taint import TaintError, safe_relpath, scrub_text
 
@@ -916,6 +917,35 @@ _VERDICT_WORD = {"survives": "defended", "refuted": "refuted",
                  "uncertain": "uncertain", "error": "error"}
 
 
+def _render_human_verdicts(rf_id: int, h: dict[str, Any]) -> list[str]:
+    """List items for what humans have said about one finding (`verdicts.standing`):
+    its own newest verdict, or how to record one, and the earlier verdict a deep run
+    matched it to. A reader of the digest otherwise met a finding a human had already
+    judged intended as if it were new. Notes are human prose and the matched title and
+    file are model and target text, so all of it is made inert."""
+    def said(v: dict[str, Any]) -> str:
+        note = _text(v.get("note") or "")
+        return (f"{_text(v['verdict'])}, by {_code(v.get('actor'))}, "
+                f"{_text(v.get('created_at'))} UTC" + (f". Note: {note}" if note else ""))
+
+    own, prior = h.get("own"), h.get("prior")
+    out = [f"- Research finding: #{rf_id}"]
+    out.append(f"- Human verdict: {said(own)}" if own else
+               f"- Human verdict: none recorded. Record one with "
+               f"`quarry deep-verdict {rf_id} intended|real|unclear --note \"...\"`")
+    if prior:
+        line = (f"- Matched an earlier finding: #{int(prior['rf_id'])} (run "
+                f"{int(prior['run_id'])}, {_text(prior.get('basis') or 'matched')}), "
+                f"{_text(prior.get('title') or 'untitled')} in {_code(prior.get('file'))}, "
+                f"judged {said(prior)}")
+        if prior.get("now"):
+            line += f". That finding's verdict has since changed to {said(prior['now'])}"
+        out.append(line)
+    else:
+        out.append("- Matched an earlier finding: none; new to human review")
+    return out
+
+
 def _render_research_finding(d: dict[str, Any]) -> str:
     """One deep-review finding as a Markdown section. Every target-derived string is made
     inert: the quote is verbatim source, so it goes in a fence it cannot close; the model's
@@ -935,6 +965,7 @@ def _render_research_finding(d: dict[str, Any]) -> str:
         f"{int(d['n_refuted'])} refuted"
         + (f", {int(d['n_unsupported'])} not rebutted (uncertain, or refuted without "
            f"evidence on the claim's path)" if d.get("n_unsupported") else ""),
+        *_render_human_verdicts(int(d["id"]), d.get("human") or {}),
         "",
         "Claimed code:",
         "",
@@ -1022,7 +1053,9 @@ def draft_research_digest(con: sqlite3.Connection, run_id: int, *,
         "---",
         "",
     ]
-    body.append(("\n\n---\n\n").join(_render_research_finding(dict(r)) for r in rows))
+    body.append(("\n\n---\n\n").join(
+        _render_research_finding({**dict(r), "human": verdicts.standing(con, r["id"])})
+        for r in rows))
     body.append("")
     body.append("---")
     body.append("")

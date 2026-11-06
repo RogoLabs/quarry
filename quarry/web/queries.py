@@ -21,8 +21,9 @@ from pathlib import Path
 from typing import Any
 
 from .. import db, dismissals
+from ..research import verdicts as deep_verdicts
 
-BANDS = ("known-good", "unmeasured", "known-bad")
+BANDS =("known-good", "unmeasured", "known-bad")
 
 
 @dataclass
@@ -208,6 +209,7 @@ def research_finding(con: sqlite3.Connection, oid: int) -> dict[str, Any] | None
         refs = []
     d["refutations"] = [x for x in refs if isinstance(x, dict)] \
         if isinstance(refs, list) else []
+    d["human"] = deep_verdicts.standing(con, d["id"])
     return d
 
 
@@ -1036,7 +1038,26 @@ def research_detail(con: sqlite3.Connection, rid: int) -> dict[str, Any] | None:
             f["refutations"] = json.loads(f.get("refutations") or "[]")
         except ValueError:
             f["refutations"] = []
+        f["human"] = deep_verdicts.standing(con, f["id"])
+    head["survivors"] = research_survivors(con, head["run_id"], rid)
     return head
+
+
+def research_survivors(con: sqlite3.Connection, run_id: int,
+                       rid: int) -> dict[str, Any]:
+    """One research run's Layer 2 survivors with their human verdicts: the list
+    `quarry deep-survivors` prints (`verdicts.survivors`, the digest's bar), narrowed
+    to this research run, each with `verdicts.standing`. Not capped: the candidate
+    cards stop at FINDINGS_SHOWN, and a survivor must not fall off this list."""
+    rows = [s for s in deep_verdicts.survivors(con, run_id) if s["research_id"] == rid]
+    for s in rows:
+        s["human"] = deep_verdicts.standing(con, s["id"])
+    return {"rows": rows,
+            "new": sum(1 for s in rows if not s["prior_verdict"]),
+            "prior_intended": sum(1 for s in rows if s["prior_verdict"] == "intended"),
+            "prior_other": sum(1 for s in rows
+                               if s["prior_verdict"] in ("real", "unclear")),
+            "judged": sum(1 for s in rows if s["verdict"])}
 
 
 def ingested_runs(con: sqlite3.Connection) -> list[dict[str, Any]]:

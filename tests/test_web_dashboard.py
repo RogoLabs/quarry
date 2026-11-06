@@ -176,6 +176,84 @@ def test_a_research_card_whose_occurrence_is_not_in_triage_says_where_it_is(seed
     assert "out of the funnel" in page and f'href="/evidence/{killed}"' in page
 
 
+def _judged_pair(con):
+    """Two deep candidates on run 1, each in its own research run: an earlier one a
+    human judged intended, and a later one a deep run matched to that verdict, which
+    has a verdict of its own. The human changes their mind on the earlier one after
+    the match. Every note carries markup, which must reach the page as text."""
+    from quarry.research import verdicts
+    _, old_rid, old_rf = _deep_candidate(con, path="src/old.py")
+    matched = verdicts.record(con, old_rf, "intended",
+                              "reset <b>returns</b> the new key once", actor="jerry")
+    oid, rid, rf = _deep_candidate(con)
+    con.execute("UPDATE research_findings SET prior_verdict_id=?, prior_match=? WHERE id=?",
+                (matched, "same enclosing symbol `reset_secret`", rf))
+    verdicts.record(con, rf, "unclear", "need the <i>controller</i>", actor="ops")
+    verdicts.record(con, old_rf, "real", "the old key stays valid", actor="jerry")
+    con.commit()
+    return oid, rid, rf, old_rid, old_rf
+
+
+def test_the_triage_detail_shows_a_deep_candidates_human_verdicts(seeded):
+    """Item 20. `quarry deep-verdict` verdicts reached the next run's refuter and
+    `deep-survivors`, and no page: triage showed a candidate a human had judged as if
+    nobody had."""
+    from quarry import funnel
+    from urllib.parse import quote
+    client, con = seeded
+    oid, _, rf, _, old_rf = _judged_pair(con)
+    fresh, _, fresh_rf = _deep_candidate(con, path="src/fresh.py")
+    funnel.run(con, 1)
+
+    page = client.get(f"/runs/1/triage?producer={quote('deep:authz')}&occ={oid}").text
+    sec = page.split('id="deep-review"', 1)[1].split("Open this", 1)[0]
+    assert 'Human verdict</b> <span class="pill incomplete">unclear</span>' in sec
+    assert "by ops" in sec and "need the &lt;i&gt;controller&lt;/i&gt;" in sec
+    assert "<i>controller</i>" not in sec
+    assert 'Matched an earlier finding</b> <span class="pill killed">intended</span>' in sec
+    assert f"#{old_rf} in run 1, on same enclosing symbol `reset_secret`" in sec
+    assert "judged by jerry" in sec and "reset &lt;b&gt;returns&lt;/b&gt;" in sec
+    assert "changed since the match" in sec and 'pill verified">real' in sec
+    assert "the old key stays valid" in sec
+
+    page = client.get(f"/runs/1/triage?producer={quote('deep:authz')}&occ={fresh}").text
+    sec = page.split('id="deep-review"', 1)[1].split("Open this", 1)[0]
+    assert "Human verdict</b> none recorded" in sec
+    assert f"quarry deep-verdict {fresh_rf} intended|real|unclear" in sec
+    assert "Matched an earlier finding" not in sec
+
+
+def test_the_research_run_lists_survivors_with_their_human_verdicts(seeded):
+    client, con = seeded
+    _, rid, rf, old_rid, old_rf = _judged_pair(con)
+
+    page = client.get(f"/research/{rid}").text
+    table = page.split('id="verdicts"', 1)[1].split("</table>", 1)[0]
+    assert ("1 survivor(s): quote verified, and defended by a cross-family model or "
+            "rebutted by none. Matched to an earlier human verdict: 1 intended, 0 real "
+            "or unclear; 0 new. 1 of 1 carry a verdict of their own.") \
+        in " ".join(table.split())
+    assert f'<a href="#cand-{rf}">#{rf}</a>' in table
+    assert '<span class="pill incomplete">unclear</span>' in table and "ops" in table
+    assert f"#{old_rf}, run 1; same enclosing symbol `reset_secret`" in table
+    assert "since changed" in table and '<span class="pill verified">real</span>' in table
+    assert "&lt;i&gt;controller&lt;/i&gt;" in table and "<i>controller" not in table
+    # The candidate card carries the same block as the triage detail.
+    card = page.split(f'id="cand-{rf}"', 1)[1].split('class="finding', 1)[0]
+    assert "Human verdict</b>" in card and "Matched an earlier finding</b>" in card
+
+    # The earlier research run's own survivor: judged, matched to nothing.
+    page = client.get(f"/research/{old_rid}").text
+    table = page.split('id="verdicts"', 1)[1].split("</table>", 1)[0]
+    assert "0 real or unclear; 1 new." in " ".join(table.split())
+    assert '<span class="pill verified">real</span>' in table and ">new<" in table
+
+    # A research run with no survivor says so.
+    _, empty, _ = _deep_candidate(con, path="src/k.py", survived=0, refuted=1)
+    page = client.get(f"/research/{empty}").text
+    assert "No survivor yet" in page.split('id="verdicts"', 1)[1]
+
+
 def test_the_scan_card_does_not_count_deep_review_as_a_scanner(seeded):
     """P3 item 3. The card read "8 tool(s)" for seven scanners plus `deep`."""
     _, con = seeded

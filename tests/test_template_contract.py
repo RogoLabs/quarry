@@ -106,15 +106,18 @@ def test_every_global_a_template_calls_is_registered(env, name):
     """`asset()` and `ACTION_NOUN` are globals and would fail the same way.
 
     Only *called* names and known globals are checked: a bare `{{ run }}` is
-    per-request context this cannot see.
+    per-request context this cannot see. A macro calling another macro defined in the
+    same file is not a global either; Jinja resolves it in that file.
     """
     ast = env.parse((TEMPLATES / name).read_text(), name=name)
     called = {c.node.name for c in ast.find_all(nodes.Call)
               if isinstance(c.node, nodes.Name)}
     called |= {g.node.name for g in ast.find_all(nodes.Getattr)
                if isinstance(g.node, nodes.Name) and g.node.name in env.globals}
+    own_macros = {mc.name for mc in ast.find_all(nodes.Macro)}
     missing = sorted(c for c in called
-                     if c not in env.globals and c not in BUILTIN_GLOBALS)
+                     if c not in env.globals and c not in BUILTIN_GLOBALS
+                     and c not in own_macros)
     assert not missing, f"{name} calls unregistered global(s) {missing}"
 
 

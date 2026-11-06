@@ -7,6 +7,7 @@
   through |visible: a bidi override in a quoted line must show as ‹U+202E›, not
   reorder the line it claims to quote.
 #}
+{% import "_macros.html" as m %}
 <div class="loc">{{ f.file|visible }} · {{ f.subsystem|visible }}</div>
 {% if f.quote %}<pre tabindex="0" role="region"
   aria-label="Quoted source from {{ f.file|visible }}">{{ f.quote|visible }}</pre>{% endif %}
@@ -24,3 +25,4 @@
   {% endfor %}
 </div>
 {% endif %}
+{% if f.human %}{{ m.human_verdict(f.human, f.id) }}{% endif %}

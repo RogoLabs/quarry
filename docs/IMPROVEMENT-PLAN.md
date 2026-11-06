@@ -1027,9 +1027,34 @@ guard. Human verdicts are rows in migration v9's append-only `deep_verdicts` tab
 `quarry deep-survivors <run>` lists survivors as new or previously judged. A later run
 matches on lens and file plus enclosing symbol or overlapping quote; an `intended`
 match reaches the refuter with the note and is never dropped. Run 1's two verdicts
-(#1, #141) were recorded on 2026-11-06 (decision G). Not done: showing verdicts in
-the dashboard and
-digest, and Django URLconf routes, so the block is empty on Django targets.
+(#1, #141) were recorded on 2026-11-06 (decision G). Not done: Django URLconf routes,
+so the block is empty on Django targets. (Showing verdicts in the dashboard and the
+digest, also left undone then, is done below.)
+
+**Done 2026-11-06, verdicts shown.** `verdicts.standing` reads, for one research
+finding, its newest verdict (`latest`) and the verdict a deep run matched it to
+(`detail` of `prior_verdict_id`, with `prior_match` as the basis). A match records the
+verdict current when the finding was stored, so when the judged finding has a newer
+verdict since, that is returned too and shown as "changed since the match". The
+dashboard and the digest read only that, through one macro (`_macros.human_verdict`)
+on the pages: the triage detail pane of a deep candidate, each candidate card on
+`/research/<id>`, and a new "Survivors and human verdicts" table at the top of that
+page, which lists the research run's survivors from `verdicts.survivors` (the
+`deep-survivors` list) with counts of new and previously judged, uncapped because the
+cards stop at 60. The digest's per-finding section now gives the research finding id,
+the human verdict with actor, time and note (or the `quarry deep-verdict` command to
+record one), and the matched earlier finding with its verdict, or "none; new to human
+review". Notes, actors and matched titles go through `|visible` on the pages and the
+digest's inert-text escaping. Four new tests (`standing` in
+`tests/test_deep_verdicts.py`, the triage pane and the research run page in
+`tests/test_web_dashboard.py`, the digest in `tests/test_disclosure.py`) all fail
+without the change; the template contract test now accepts one macro calling another
+in the same file. On a copy of the live database, `/research/1` lists its 2 survivors
+with the two decision G verdicts, the evidence pages of #1 and #141 show them, and the
+run 1 digest (written to a scratch directory, not `reports/`) carries both; pages
+rendered in under 0.1 s. Not done: a judged finding that is not a survivor and falls
+below the 60 cards shown is not on its research run page (its evidence page still
+shows the verdict), and the digest header does not count judged findings.
 
 ### 21. Layer 2 changes are not compared against a fixed set
 

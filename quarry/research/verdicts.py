@@ -128,6 +128,25 @@ def detail(con: sqlite3.Connection, verdict_id: int) -> dict[str, Any] | None:
     return dict(r) if r else None
 
 
+def standing(con: sqlite3.Connection, research_finding_id: int) -> dict[str, Any]:
+    """What humans have said that bears on one finding, for display: `own`, its newest
+    verdict (`latest`), and `prior`, the earlier verdict a deep run matched it to
+    (`detail` of `prior_verdict_id`, plus the match's `basis`). Either may be None.
+
+    A match records the verdict that was current when the finding was stored. When
+    the judged finding has a newer verdict since, `prior["now"]` carries it, so a
+    changed mind is not shown as the view still held."""
+    own = latest(con, research_finding_id)
+    r = con.execute("SELECT prior_verdict_id, prior_match FROM research_findings "
+                    "WHERE id=?", (research_finding_id,)).fetchone()
+    prior = detail(con, int(r["prior_verdict_id"])) if r and r["prior_verdict_id"] else None
+    if prior is not None:
+        prior["basis"] = r["prior_match"] or "matched"
+        now = latest(con, int(prior["rf_id"]))
+        prior["now"] = now if now and now["id"] != prior["verdict_id"] else None
+    return {"own": own, "prior": prior}
+
+
 def prior_context(p: dict[str, Any], basis: str) -> str:
     """The block a refuter sees when the claim matches a prior `intended` verdict.
     Context, not an instruction to kill: the code may have changed, and a matching quote

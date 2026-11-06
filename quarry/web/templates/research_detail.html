@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_macros.html" as m %}
 {% set nav = 'research' %}
 {% set nav_run = r.run_id %}
 {% block title %}Deep review {{ r.id }} · {{ r.target }}{% endblock %}
@@ -36,6 +37,55 @@
     </div>
     {% endif %}
   </div>
+
+  {#  The survivors `quarry deep-survivors` lists and the digest carries, with what a
+      human said about each and any earlier verdict a deep run matched it to. Listed
+      in full: the candidate cards below stop at a cap, and a survivor already judged
+      intended must not read as new because it fell below it. #}
+  {% set sv = r.survivors %}
+  <h2 class="h-sec" id="verdicts">Survivors and human verdicts</h2>
+  {% if sv.rows %}
+  <p class="note">{{ sv.rows|length }} survivor(s): quote verified, and defended by a
+    cross-family model or rebutted by none. Matched to an earlier human verdict:
+    {{ sv.prior_intended }} intended, {{ sv.prior_other }} real or unclear;
+    {{ sv.new }} new. {{ sv.judged }} of {{ sv.rows|length }} carry a verdict of their
+    own.</p>
+  <div class="tbl">
+    <table>
+      <caption class="sr-only">Layer 2 survivors of deep review {{ r.id }} with their human verdicts</caption>
+      <thead><tr><th scope="col">Finding</th><th scope="col">Lens and file</th>
+        <th scope="col">Vote</th><th scope="col">Human verdict</th>
+        <th scope="col">Matched earlier</th></tr></thead>
+      <tbody>
+      {% for s in sv.rows %}{% set h = s.human %}
+        <tr>
+          <th scope="row" class="mono sm"><a href="#cand-{{ s.id }}">#{{ s.id }}</a>
+            <div class="dim wrap-normal">{{ s.title|visible }}</div></th>
+          <td class="mono sm">{{ s.lens|visible }}<div class="dim">{{ s.file|visible }}</div></td>
+          <td class="sm nowrap">{{ s.n_survived }} defended, {{ s.n_refuted }} refuted
+            {%- if s.n_unsupported %}, {{ s.n_unsupported }} not rebutted{% endif %}</td>
+          <td class="sm">{% if h.own %}{{ m.deep_verdict_pill(h.own.verdict) }}
+            <div class="dim">{{ h.own.actor|visible }}, {{ h.own.created_at|local }}</div>
+            <div class="wrap-normal">{{ h.own.note|visible }}</div>
+            {% else %}<span class="dim">none</span>{% endif %}</td>
+          <td class="sm">{% if h.prior %}{{ m.deep_verdict_pill(h.prior.verdict) }}
+            <div class="dim">#{{ h.prior.rf_id }}, run {{ h.prior.run_id }}; {{ h.prior.basis|visible }}</div>
+            {% if h.prior.now %}<div><span class="pill incomplete">since changed</span>
+              to {{ m.deep_verdict_pill(h.prior.now.verdict) }}</div>{% endif %}
+            {% else %}<span class="dim">new</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="note">No survivor yet: no candidate here has a verified quote that a
+    cross-family model defended or that every refuter failed to rebut.</p>
+  {% endif %}
+  <p class="note">Record a verdict on any candidate:
+    <code>quarry deep-verdict &lt;id&gt; intended|real|unclear --note "why"</code>. The next
+    deep run on this target shows an <code>intended</code> verdict's note to the refuter
+    of a matching finding.</p>
 
   <h2 class="h-sec">Candidates: quote-verified first, then survivors of refutation
     {%- if r.n_findings > r.findings|length %}
