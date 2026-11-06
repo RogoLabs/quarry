@@ -9,9 +9,10 @@ It also states the limits of what was verified. Severity is labelled a class def
 kept apart from Confidence, which comes from the verdict and its replays. Conditions lists
 what had to be true for the observation (commit, route, seed recipe, auth role, `--env`
 names) from the verdict's rationale and the run manifest, and says "not recorded" for
-anything missing. Limitations names the single weakest link. Nothing is fetched: the
-prior-advisory check reads the local OSV copy, and current HEAD is not re-checked, which
-the draft says. `--env` values and a seed recipe's keys and password are never stored,
+anything missing. Limitations names the single weakest link. Nothing is fetched by
+default: the prior-advisory check reads the local OSV copy, and current HEAD is
+re-checked only when the reporter asks (`quarry report --check-head`, disclosure.head),
+which the draft says either way. `--env` values and a seed recipe's keys and password are never stored,
 so the draft can only name them; it also redacts credential headers and
 credential-shaped query values in the evidence, in case a probe sent one.
 
@@ -135,6 +136,7 @@ class DisclosureContext:
     # The names the clone's manifests declare (packages.PackageName); () when none
     # declares one, so the repository name stood in; None when they were not read.
     packages: Any = None
+    head: Any = None             # head.HeadCheck; None when no re-check was asked for
 
 
 def guess_ecosystem(primary_language: str) -> str:
@@ -552,6 +554,38 @@ def _render_conditions(ctx: DisclosureContext, f: _Facts) -> str:
     return "\n".join(lines)
 
 
+def _head_reason(head: Any) -> str:
+    from .head import NOT_REQUESTED
+    return _text(getattr(head, "reason", "") or NOT_REQUESTED)
+
+
+def _head_versions(head: Any) -> str:
+    """The Affected versions lines about current HEAD (disclosure.head)."""
+    if head is None or not getattr(head, "checked", False):
+        return (f"Current HEAD was not re-checked: {_head_reason(head)}. Confirm the issue "
+                "reproduces on the latest commit before sending.")
+    when = _text(head.at) or "an unrecorded time"
+    if head.moved:
+        return (f"Current HEAD was re-checked with `git ls-remote` at {when} and is now "
+                f"{_code(head.head)}, not the observed commit. The issue was not "
+                "re-tested there; confirm it reproduces on the latest commit before "
+                "sending.")
+    return (f"Current HEAD was re-checked with `git ls-remote` at {when} and is still the "
+            "observed commit. Only the commit was compared; the issue was not re-tested.")
+
+
+def _head_limit(head: Any) -> str:
+    if head is None or not getattr(head, "checked", False):
+        return (f"It was observed at one commit, and current HEAD was not re-checked "
+                f"({_head_reason(head)}).")
+    if head.moved:
+        return (f"It was observed at one commit. HEAD has since moved to "
+                f"{_code(head.head)}, where it was not re-tested.")
+    return (f"It was observed at one commit, still HEAD when re-checked at "
+            f"{_text(head.at) or 'an unrecorded time'}; the issue itself was not "
+            "re-tested.")
+
+
 _ROUTE_LINK = ("Quarry matched the flagged file to the route it probed and did not trace "
                "whether the flagged code ran for this request. The response could have "
                "come from other code on the same route.")
@@ -582,7 +616,7 @@ def _render_limits(ctx: DisclosureContext, f: _Facts, rp: _Replay) -> str:
     else:
         weakest = _ROUTE_LINK
     others = [] if weakest is _ROUTE_LINK else [_ROUTE_LINK]
-    others.append("It was observed at one commit, and current HEAD was not re-checked.")
+    others.append(_head_limit(ctx.head))
     if f.missing:
         others.append("Not recorded for this verdict: " + ", ".join(f.missing)
                       + ". A maintainer may need these to reproduce it.")
@@ -856,7 +890,7 @@ def render_report(ctx: DisclosureContext) -> str:
 ## Affected versions
 
 Observed at commit {sha}.
-Current HEAD was not re-checked; confirm the issue reproduces on the latest commit before sending.
+{_head_versions(ctx.head)}
 The affected version range is for the maintainer to confirm;
 this report records the single revision the probe ran against, and does not infer a range.
 
@@ -1137,7 +1171,8 @@ def record_digest(con: sqlite3.Connection, run_id: int, digest: ResearchDigest) 
 
 
 def draft_reports(con: sqlite3.Connection, run_id: int, src: Path, *,
-                  out_dir: Path, vulndb_root: Path | None = None) -> list[Draft]:
+                  out_dir: Path, vulndb_root: Path | None = None,
+                  check_head: Any = None) -> list[Draft]:
     """Write a Markdown advisory for every finding whose latest dynamic verdict in the run
     is confirmed. Returns one Draft per file. Reproducible from the DB: the probe evidence was
     stored on the verdict as JSON.
@@ -1153,9 +1188,16 @@ def draft_reports(con: sqlite3.Connection, run_id: int, src: Path, *,
     the probe recorded them) and the run manifest's validate block. The prior-advisory
     lookup reads the local OSV copy under `vulndb_root` (default: `quarry db sync`'s
     directory) only when there is a draft to write, by the package names the manifests
-    nearest the finding's file declare, once per distinct set of names."""
+    nearest the finding's file declare, once per distinct set of names.
+
+    `check_head`, when given, is called once, before the first draft is written, and
+    returns the head.HeadCheck every draft states. It is the only network request this
+    function can cause, and only the CLI's --check-head passes one; without it each
+    draft says HEAD was not re-checked and why."""
     from ..research.profile import profile_repo
     from .packages import declared_packages
+    head: Any = None
+    asked = check_head is None
 
     prof = profile_repo(src)
     ecosystem = guess_ecosystem(prof.primary_language)
@@ -1201,6 +1243,8 @@ def draft_reports(con: sqlite3.Connection, run_id: int, src: Path, *,
             priors[key] = _prior_check(ecosystem, package, d["clone_url"], vulndb_root,
                                        packages=search)
         prior = priors[key]
+        if not asked:
+            head, asked = check_head(), True
 
         def ev_text(key: str, default: str = "") -> str:
             return scrub_text(ev.get(key) or default)
@@ -1215,7 +1259,7 @@ def draft_reports(con: sqlite3.Connection, run_id: int, src: Path, *,
             verdict="confirmed", verdict_reason=scrub_text(d["reason"] or ""),
             replay=ev.get("replay"), probe=ev.get("probe"),
             conditions=ev.get("conditions"), validate=validate, seed_notes=seed_notes,
-            prior=prior, security_policy=policy, packages=declared)
+            prior=prior, security_policy=policy, packages=declared, head=head)
         path = out_dir / f"{run_id}-{_slug(d['cwe'] or 'finding')}-{d['finding_id'][:8]}.md"
         body = render_report(ctx).encode("utf-8")
         path.write_bytes(body)

@@ -789,7 +789,13 @@ def validate(run_id: int = typer.Argument(..., help="a scanned + funnelled run")
 
 @app.command()
 def report(run_id: int = typer.Argument(..., help="a validated run"),
-           out: str = typer.Option("", help="output directory (default: <data>/reports/<run>)")) -> None:
+           out: str = typer.Option("", help="output directory (default: <data>/reports/<run>)"),
+           check_head: bool = typer.Option(
+               False, "--check-head",
+               help="ask the target's git host for its current HEAD (git ls-remote, "
+                    "anonymous, logged on the egress ledger) and say in each draft "
+                    "whether it moved since the run; off, drafting makes no network "
+                    "request")) -> None:
     """Write a Markdown disclosure advisory for every confirmed verdict: send it to the
     project's security contact, or paste it into GitHub's Report a vulnerability (GHSA) form."""
     from pathlib import Path
@@ -799,7 +805,19 @@ def report(run_id: int = typer.Argument(..., help="a validated run"),
     paths, connection = _open()
     vol = RunVolume.attach_existing(run_id, paths.runs)
     out_dir = Path(out) if out else Path(paths.runs).parent / "reports" / str(run_id)
-    drafts = draft_reports(connection, run_id, vol.src, out_dir=out_dir)
+    heads: list = []
+
+    def head_check():
+        from .disclosure.head import check_head as _check
+        heads.append(_check(connection, run_id, vol.mount))
+        return heads[-1]
+    drafts = draft_reports(connection, run_id, vol.src, out_dir=out_dir,
+                           check_head=head_check if check_head else None)
+    for h in heads:
+        con_out.print("HEAD re-check: " + (
+            f"{_e(h.reason)}" if not h.checked else
+            f"moved to {_e(h.head[:12])} since the run's {_e((h.observed or '')[:12])}"
+            if h.moved else f"still {_e(h.head[:12])}"))
     # Layer 2 survivors reach the report too, even when Layer 3 confirmed nothing. They are
     # candidates for triage, clearly separated from the confirmed-dynamic advisories above.
     digest = draft_research_digest(connection, run_id, out_dir=out_dir)

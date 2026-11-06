@@ -8,6 +8,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from quarry import vulndb                                               # noqa: E402
@@ -15,6 +17,12 @@ from quarry.disclosure import draft_reports                             # noqa: 
 from quarry.disclosure.packages import PackageName, declared_packages   # noqa: E402
 from test_disclosure import _confirm, _db                               # noqa: E402
 from test_vulndb_prior import _osv_zip, _rec                            # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_live_vulndb(tmp_path, monkeypatch):
+    """draft_reports reads the local OSV copy; keep it off the operator's synced one."""
+    monkeypatch.setenv("QUARRY_DBS", str(tmp_path / "no-vulndb"))
 
 
 def _names(pkgs):
