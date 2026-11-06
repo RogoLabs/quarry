@@ -46,10 +46,13 @@ names are refused. A model of another family then tries to refute each claim. A
 refutation counts only when it quotes code and names the guard in that quote (the check,
 sanitiser or middleware it says stops the attack), and the guard's line is on the
 claim's own path: its function or route, something that code calls, or a wrapper that
-registers it. A guard quoted from a sibling function does not count. A claim that every
+registers it. A guard quoted from a sibling function does not count. The guard must also
+be the right kind of check for the claim's attacker: on an authorization claim it must
+check who is asking (a login check alone answers only an unauthenticated attacker), and
+on a data claim it must touch the input the attacker controls. A claim that every
 refuter tried and failed to rebut that way goes to a human marked "not rebutted", not
-"defended". This checks that the cited guard exists where it would have to be, not that
-it stops the attack.
+"defended". These checks are lexical: they test where the guard is and what kind of
+check it is, not that it is correct.
 
 **Validation is conservative by design.** A probe result counts as confirmed only when it
 recorded a baseline request and the result differs from it. It counts as rejected only
@@ -125,7 +128,7 @@ keys and a GitHub token.
   a probe addresses a record that exists. A seed step that fails is recorded on the run,
   not fatal, and the probes stay read-only. `vulnlookup` is the first recipe.
 
-The test suite (1045 tests) asserts these against a hostile fixture repo and real
+The test suite (1180 tests) asserts these against a hostile fixture repo and real
 `sandbox-exec`. A profile with no test is a comment.
 
 ## Requirements

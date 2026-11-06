@@ -21,9 +21,14 @@ On 2026-11-05 the rest of the list followed, each recorded under its item: items
 to 22, the open parts of items 2, 3 and 5, P3, P4, and decisions A, B, D and E.
 Decision F (the Layer 2 refuter) is done, K was tried and reverted, and L and item
 25 are done. On 2026-11-06 item 27 replaced gpt-oss:20b with granite4.2:30b in the
-default deep-review models, G and H were done, and item 26 was fixed. Open decisions
-are I and J. The suite collects 1045 and passes 1042, with 3 skipped because setuptools
-is absent.
+default deep-review models, G and H were done, item 26 was fixed, and then every item
+still open was built ahead of a hard reset: decision M (a refuter's guard must answer
+the claim's attacker), item 28 (refutation's share of the night, and one prompt tag per
+subsystem so Ollama reuses its cached prefix), the open parts of items 3, 12, 16, 19,
+20, 22, 24 and 25, the P3 race test and the P4 side findings. Decision I is superseded
+by the reset. `scripts/hard-reset.sh` and `scripts/test-run.sh` are the next steps.
+Open: decision J (its default is taken). The suite collects 1180 and passes 1177, with
+3 skipped because setuptools is absent.
 
 Every item says where its evidence came from:
 
@@ -771,7 +776,10 @@ finding (in opengrep's parser the same value would have raised, since it normali
 id as a string). Re-parsing run 7's own SARIF reports (opengrep, checkov, trivy and
 zizmor, 756 records) dropped nothing, so the warning should not fire on an ordinary run.
 Bandit and Gitleaks write their own JSON formats, where a result that is not a mapping
-still fails the tool; that is unchanged.
+still failed the tool; on 2026-11-06 both were given the same rule (one malformed entry
+is counted as `damaged`, one with no path in the clone as `no path in the clone`, and
+the rest are kept), with two tests in `tests/test_parser_damage_json.py` that fail on
+the previous parsers.
 
 For the line number: `taint.line_number` accepts only a positive int as a line, so not a
 bool, string, float, zero or negative value. `_persist` passes each record's start and
@@ -784,8 +792,12 @@ canned tools, a `"1"` from the second one rolled back its rows and ended the sca
 the third tool never ran; with the fix all three stored their rows. `True` was stored
 and anchored on line 1, and `-1000` in a 2,000-line file built a 1,040-line window
 ending at line -960. 11 new tests in `test_scan_bookkeeping.py` and 5 more cases in
-`test_checkov_parse.py`. The other two side findings (refuter errors, pre-fix records)
-are not touched.
+`test_checkov_parse.py`. The other two side findings: a refuter's `{"verdict": "error"}`
+record already counts as a refuter error (item 5's re-refute fix made
+`valid_refutations` count only `refuted` and `survives`, and `refuter_errors` is every
+other record that is not unsupported; checked on 2026-11-06 with two error records,
+which count as 2). A pre-fix record that names the other real refuter still cannot be
+told from a genuine one; after the hard reset no such record exists.
 
 ---
 

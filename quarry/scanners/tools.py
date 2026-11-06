@@ -8,7 +8,8 @@ from typing import Any, Iterable
 
 from .. import taint
 from ..sandbox.spawn import rules_dir as _sandbox_rules_dir, tier1
-from .base import (Coverage, Record, ScanOutcome, Scanner, rel_or_none, sarif_records,
+from .base import (DAMAGED_RESULT, NO_PATH, Coverage, Record, ScanOutcome, Scanner,
+                   count_drop, rel_or_none, sarif_records,
                    score_band, strip_source, write_tool_config)
 
 RULES_ENV = "QUARRY_RULES"
@@ -459,20 +460,28 @@ class Bandit(Scanner):
                 "-x", f"{src}/.git/*", "--ignore-nosec", "-q"]
 
     def parse(self, out: Path, src: Path) -> Iterable[Record]:
+        # One malformed entry costs that entry, counted, as for SARIF tools: it used to
+        # raise out of the parser and fail the whole tool (IMPROVEMENT-PLAN P4).
         doc = taint.load_json(out)
         for r in (doc or {}).get("results", []):
-            path = rel_or_none(r.get("filename"), src)
-            if path is None:
+            try:
+                path = rel_or_none(r.get("filename"), src)
+                if path is None:
+                    count_drop(self.dropped, NO_PATH)
+                    continue
+                cwe_id = (r.get("issue_cwe") or {}).get("id")
+                rec = Record(
+                    tool=self.name, rule_id=r.get("test_id", "?"), path=path,
+                    start_line=r.get("line_number"),
+                    message=taint.scrub_text(r.get("issue_text")),
+                    severity=str(r.get("issue_severity", "low")).lower(),
+                    cwe=f"CWE-{cwe_id}" if cwe_id else None,
+                    raw=strip_source(r, ("code",)),
+                )
+            except (AttributeError, TypeError, ValueError):
+                count_drop(self.dropped, DAMAGED_RESULT)
                 continue
-            yield Record(
-                tool=self.name, rule_id=r.get("test_id", "?"), path=path,
-                start_line=r.get("line_number"),
-                message=taint.scrub_text(r.get("issue_text")),
-                severity=str(r.get("issue_severity", "low")).lower(),
-                cwe=f"CWE-{(r.get('issue_cwe') or {}).get('id')}"
-                    if (r.get("issue_cwe") or {}).get("id") else None,
-                raw=strip_source(r, ("code",)),
-            )
+            yield rec
 
 
 GITLEAKS_CONFIG_NAME = "gitleaks-config.toml"
@@ -502,22 +511,29 @@ class Gitleaks(Scanner):
                 "--ignore-gitleaks-allow"]
 
     def parse(self, out: Path, src: Path) -> Iterable[Record]:
+        # One malformed entry costs that entry, counted, as for SARIF tools (P4).
         doc = taint.load_json(out)
         for r in (doc or []):
-            path = rel_or_none(r.get("File"), src)
-            if path is None:
+            try:
+                path = rel_or_none(r.get("File"), src)
+                if path is None:
+                    count_drop(self.dropped, NO_PATH)
+                    continue
+                secret = r.get("Secret") or r.get("Match") or ""
+                scrubbed = dict(r)
+                for k in ("Secret", "Match", "Line"):
+                    scrubbed.pop(k, None)          # never persist plaintext in raw_result
+                rec = Record(
+                    tool=self.name, rule_id=r.get("RuleID", "?"), path=path,
+                    start_line=r.get("StartLine"), end_line=r.get("EndLine"),
+                    message=taint.scrub_text(r.get("Description")),
+                    severity="high", cwe="CWE-798", secret=str(secret),
+                    fingerprint=r.get("Fingerprint"), raw=scrubbed,
+                )
+            except (AttributeError, TypeError, ValueError):
+                count_drop(self.dropped, DAMAGED_RESULT)
                 continue
-            secret = r.get("Secret") or r.get("Match") or ""
-            scrubbed = dict(r)
-            for k in ("Secret", "Match", "Line"):
-                scrubbed.pop(k, None)          # never persist plaintext in raw_result
-            yield Record(
-                tool=self.name, rule_id=r.get("RuleID", "?"), path=path,
-                start_line=r.get("StartLine"), end_line=r.get("EndLine"),
-                message=taint.scrub_text(r.get("Description")),
-                severity="high", cwe="CWE-798", secret=secret,
-                fingerprint=r.get("Fingerprint"), raw=scrubbed,
-            )
+            yield rec
 
 
 class Zizmor(Scanner):
