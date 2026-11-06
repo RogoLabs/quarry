@@ -21,7 +21,8 @@ On 2026-11-05 the rest of the list followed, each recorded under its item: items
 to 22, the open parts of items 2, 3 and 5, P3, P4, and decisions A, B, D and E.
 Decision F (the Layer 2 refuter) is done, K was tried and reverted, and L and item
 25 are done. On 2026-11-06 item 27 replaced gpt-oss:20b with granite4.2:30b in the
-default deep-review models. Open decisions are G to J. The suite collects 1025 and
+default deep-review models, and G and H were done. Open decisions are I and J. The
+suite collects 1025 and
 passes 1022, with 3 skipped because setuptools is absent.
 
 Every item says where its evidence came from:
@@ -640,11 +641,24 @@ be told from a genuine one.
   touches findings already live in other existing runs; both apply to later funnel
   passes. A repo dismissal can be withdrawn from any run of the target, the corpus
   switch only from the run that set it. The default taken: leave other runs alone.
-- **G. Run 1's two deep survivors.** Record your reading with
-  `quarry deep-verdict 1 intended --note "..."` and the same for 141, if it is still
-  that both are intended behaviour.
-- **H. Disk.** The unused Grype database (3,358 MB) and the backup above can be
-  deleted when you are done with them.
+- **G. Run 1's two deep survivors. Done 2026-11-06.** Both recorded `intended`, by
+  Claude at Jerry's request (`actor` "claude-opus-5.5 for jgamblin"), after reading
+  the code at efac9d67. #1: `GET /cve-id/:id` is documented as accessible to all, and
+  `getCveId` gives callers outside the owning org and Secretariat only `cve_id`,
+  `cve_year`, `state`, and `owning_cna` plus `dateUpdated` for IDs that are not
+  RESERVED (`owning_cna` is redacted for RESERVED ones). #141: `reset_secret` exists to
+  issue a new key; the repository stores only its argon2 hash and returns the
+  plaintext once, and the route documents the 200 response as the new API key. Each
+  note says what it does not cover (#1: the redaction condition for authenticated
+  users; #141: whether the reset's access checks hold).
+- **H. Disk. Done 2026-11-06.** The Grype database (`vulndb/grype`, 3,358 MB) and
+  `backups/quarry-2026-11-05-before-funnel.db` were moved to the macOS Trash, not
+  deleted; the space comes back when the Trash is emptied. `db status` and `doctor`
+  report Grype as absent and still run. The grype binary is still installed. Kept:
+  `quarry-2026-11-05-before-restart.db` and `quarry-2026-11-06-before-granite.db`, the
+  rollback points for the restart and item 27. Also seen, not fixed: the dashboard's
+  database panel marks a database with no age as stale, so Grype still shows there as
+  stale, as it already did at 9.6 days old, though nothing reads it.
 - **I. Re-refute.** `quarry deep --resume <run>` and a funnel pass would give the
   deferred Layer 2 rows (12, 2 and 302 in runs 1 to 3) their missing verdicts, under
   decision F's rule. It runs the local models for a while; not started. It does not
@@ -998,8 +1012,9 @@ guard. Human verdicts are rows in migration v9's append-only `deep_verdicts` tab
 `quarry deep-verdict <id> intended|real|unclear --note "..."` records one and
 `quarry deep-survivors <run>` lists survivors as new or previously judged. A later run
 matches on lens and file plus enclosing symbol or overlapping quote; an `intended`
-match reaches the refuter with the note and is never dropped. Not done: run 1's two
-verdicts (#1, #141; Jerry's reading to record), showing verdicts in the dashboard and
+match reaches the refuter with the note and is never dropped. Run 1's two verdicts
+(#1, #141) were recorded on 2026-11-06 (decision G). Not done: showing verdicts in
+the dashboard and
 digest, and Django URLconf routes, so the block is empty on Django targets.
 
 ### 21. Layer 2 changes are not compared against a fixed set
