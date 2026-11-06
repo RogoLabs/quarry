@@ -13,6 +13,7 @@ at 999 MB in 0.57 s with host free space unchanged.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,20 @@ DETACH_TIMEOUT = 60
 
 class VolumeError(RuntimeError):
     pass
+
+
+def _remove_mount_point(mount: Path) -> None:
+    """Remove a run's mount-point directory once nothing is mounted on it: rmdir only,
+    so it goes only when empty, and never recursively. A detached volume used to leave
+    its empty `run-<id>` behind; test runs had left 89 under MOUNT_BASE when they were
+    cleared on 2026-11-06. Anything else there (still mounted, not empty, a link,
+    gone) is left as it is."""
+    try:
+        if mount.is_mount() or mount.is_symlink() or not mount.is_dir():
+            return
+        os.rmdir(mount)
+    except OSError:
+        pass
 
 
 def _run(argv: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
@@ -51,8 +66,12 @@ class RunVolume:
               "-fs", "Case-sensitive APFS", "-type", "SPARSE",
               "-volname", f"quarry-{run_id}", "-quiet", str(image)])
         mount.mkdir(parents=True, exist_ok=True)
-        _run(["/usr/bin/hdiutil", "attach", "-nobrowse", "-owners", "off",
-              "-mountpoint", str(mount), str(image)])
+        try:
+            _run(["/usr/bin/hdiutil", "attach", "-nobrowse", "-owners", "off",
+                  "-mountpoint", str(mount), str(image)])
+        except VolumeError:
+            _remove_mount_point(mount)
+            raise
         for d in SUBDIRS:
             (mount / d).mkdir(parents=True, exist_ok=True)
         return cls(run_id, image, mount)
@@ -65,8 +84,12 @@ class RunVolume:
             raise VolumeError(f"no image for run {run_id}")
         if not mount.is_mount():
             mount.mkdir(parents=True, exist_ok=True)
-            _run(["/usr/bin/hdiutil", "attach", "-nobrowse", "-owners", "off",
-                  "-mountpoint", str(mount), str(image)])
+            try:
+                _run(["/usr/bin/hdiutil", "attach", "-nobrowse", "-owners", "off",
+                      "-mountpoint", str(mount), str(image)])
+            except VolumeError:
+                _remove_mount_point(mount)
+                raise
         return cls(run_id, image, mount)
 
     @property
@@ -94,6 +117,7 @@ class RunVolume:
                     continue
                 if p.returncode == 0:
                     break
+        _remove_mount_point(self.mount)
 
     def release(self) -> None:
         """Detach and delete. Evidence lives in blobs, not here (D15)."""

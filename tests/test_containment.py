@@ -75,6 +75,19 @@ def hostile(volume):
     return src
 
 
+def test_release_leaves_no_mount_point_behind(tmp_path):
+    """A released volume used to leave its empty /private/tmp/quarry/run-<id> behind;
+    test runs had left 89 when they were cleared on 2026-11-06. Its own id range, apart
+    from the module volume's, so the two never share a mount point."""
+    vol = RunVolume.create(990_000 + os.getpid() % 10_000, tmp_path, size_gb=1)
+    try:
+        assert vol.mount.is_mount()
+    finally:
+        vol.release()
+    assert not vol.mount.exists()
+    assert not vol.image.exists()
+
+
 def test_symlinks_are_recorded_then_destroyed(volume, hostile):
     found = scrub_symlinks(hostile)
     kinds = {e.original_path: e.detail for e in found if e.kind == "symlink"}

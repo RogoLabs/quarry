@@ -1257,6 +1257,29 @@ on SQLite's `BEGIN IMMEDIATE`; the tests take one claim after the other).
 Also seen: `/private/tmp/quarry` holds 78 leftover `run-9xxxxx` directories, none
 mounted, the oldest from 2026-11-02, apparently left by tests. Harmless, not cleaned.
 
+**Done 2026-11-06, the leftover directories.** The cause was in production code, not
+only the tests: `RunVolume.detach` never removed `MOUNT_BASE/run-<id>` after the image
+was detached, so every volume a test created and released (`test_containment.py`'s
+`900000 + pid` ids, `test_dynamic_validation.py`'s fixed 99998) left its empty mount
+point. `detach` now ends with `rmdir` of its own mount point when it is a real directory,
+empty, and no longer a mount; never recursive, and a link at that path is left alone.
+`create` and `attach_existing` do the same when `hdiutil attach` fails after the
+directory was made. So the test fixtures, which already call `release()`, now clean up
+without changes. 5 new tests: four with a faked `hdiutil` (an empty mount point goes;
+one with files in it, one still mounted, and a link all stay; a failed attach in either
+path leaves nothing), and one in `test_containment.py` that creates, attaches and
+releases a real 1 GB image and checks the directory is gone. Without the fix 4 of the 5
+fail; the one that passes either way checks what must not be removed. Then the existing
+leftovers: 89 `run-9*` directories by then (one of them left by running the new
+containment test against the old code), all empty and none mounted. All 89 were removed
+with `rmdir`, one at a time, each checked first to be a real directory, empty, not a
+mount, and untouched for 10 minutes, so that a test in another worktree that had just
+made its mount point would be left alone: 86 at once, and in a second pass the 3 that
+had been too new. Meanwhile test runs in other worktrees, which do not have this fix,
+kept adding new ones, about one a minute; those were left alone while they were minutes
+old, and will stop appearing once those branches have the fix. `run-1` to `run-7` were
+not touched, and all seven are still mounted.
+
 ### 27. gpt-oss:20b spends the night failing [measured]
 
 Run 7's first deep-review night (research 4, 2026-11-05 20:34 to 06:06) hunted 105 of

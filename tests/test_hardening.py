@@ -237,3 +237,67 @@ def test_detach_is_bounded_and_escalates_to_force(monkeypatch):
     assert all(t is not None and t > 0 for _, t in calls), "an hdiutil call had no timeout"
     assert "-force" not in calls[0][0]
     assert "-force" in calls[1][0]
+
+
+# A detached volume left its empty mount point behind: test runs had left 89 empty
+# /private/tmp/quarry/run-9* directories when they were cleared on 2026-11-06
+# (IMPROVEMENT-PLAN item 26).
+
+def _hdiutil_ok(calls):
+    def run(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    return run
+
+
+def test_detach_removes_its_own_empty_mount_point(tmp_path, monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(V.subprocess, "run", _hdiutil_ok(calls))
+    mount = tmp_path / "run-1"
+    mount.mkdir()
+    V.RunVolume(1, tmp_path / "1.sparseimage", mount).detach()
+    assert not mount.exists()
+    assert calls == []                       # not a mount, so hdiutil was not asked
+
+
+def test_detach_removes_only_an_empty_unmounted_directory(tmp_path, monkeypatch):
+    """rmdir only, never recursive: a mount point with anything in it, one still
+    mounted after hdiutil returned, and a link planted at the path all stay."""
+    monkeypatch.setattr(V.subprocess, "run", _hdiutil_ok([]))
+    full = tmp_path / "run-2"
+    (full / "src").mkdir(parents=True)
+    (full / "src" / "a.py").write_text("x\n")
+    V.RunVolume(2, tmp_path / "2.sparseimage", full).detach()
+    assert (full / "src" / "a.py").is_file()
+
+    held = tmp_path / "run-3"
+    held.mkdir()
+    monkeypatch.setattr(V.Path, "is_mount", lambda self: self == held)
+    V.RunVolume(3, tmp_path / "3.sparseimage", held).detach()
+    assert held.is_dir()
+    monkeypatch.undo()
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    link = tmp_path / "run-4"
+    link.symlink_to(elsewhere)
+    V.RunVolume(4, tmp_path / "4.sparseimage", link).detach()
+    assert link.is_symlink() and elsewhere.is_dir()
+
+
+@pytest.mark.parametrize("how", ["create", "attach_existing"])
+def test_a_failed_attach_leaves_no_mount_point(tmp_path, monkeypatch, how):
+    monkeypatch.setattr(V, "MOUNT_BASE", tmp_path / "mnt")
+
+    def run(argv, **kw):
+        rc = 1 if argv[1] == "attach" else 0
+        return subprocess.CompletedProcess(argv, rc, "", "attach failed" if rc else "")
+
+    monkeypatch.setattr(V.subprocess, "run", run)
+    images = tmp_path / "images"
+    if how == "attach_existing":
+        images.mkdir()
+        (images / "5.sparseimage").write_bytes(b"")
+    with pytest.raises(V.VolumeError, match="attach failed"):
+        getattr(V.RunVolume, how)(5, images)
+    assert not (tmp_path / "mnt" / "run-5").exists()
