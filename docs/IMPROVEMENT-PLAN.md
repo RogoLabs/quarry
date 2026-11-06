@@ -1076,8 +1076,9 @@ run header, each scanner's outcome and coverage counts, health warnings by sourc
 funnel stage with in, kill, defer, merge, boost, restored and out, verdicts by state and
 seat, and advisories. Text from a target or tool is scrubbed of control and bidi
 characters and flattened to one line. Against a read-only backup of the live database,
-run 3 printed 12 stages from 6,297 in to 765 out with drift 0. Not done: status leaves
-out the quarantine and egress tables.
+run 3 printed 12 stages from 6,297 in to 765 out with drift 0. (The two parts left
+undone then, the run page's own outcome logic and the missing quarantine and egress
+tables, were done on 2026-11-06; see below.)
 
 **Done 2026-11-06, one outcome rule.** `run_summary` stores `queries.scan_outcome` on
 each scanner row as `outcome`; the run page's pill (`_macros.scan_pill`) and `quarry
@@ -1091,6 +1092,21 @@ own start time; on a copy of the live database, all 7 run pages are byte-identic
 The old copy was not wrong on any of those rows. Two tests in `tests/test_status.py`:
 the page and `status --json` agree on 10 such rows, and a page rendered with
 `scan_outcome` replaced follows the replacement, which fails without the change.
+
+**Done 2026-11-06, quarantine and egress.** `quarry status` now ends with what ingest
+quarantined (`quarantine.<id>` with its kind, path, detail and hash) and the egress the
+run page shows (`egress.<id>` with scope, stage, bytes out and in, destination, note
+and time), from the page's own `queries.quarantined` and `queries.egress_ledger`:
+this run's rows and the global ones, never another run's. Unlike the page, which shows
+the newest 12, status lists every row. The ledger's totals are printed as
+`egress.all_time` and sit under `all_time` in the JSON, so they cannot be read as this
+run's. Paths, details, destinations and notes go through the same scrub and
+flattening as the rest of the text; the JSON escapes them as before. `quarantined()`
+now also returns each row's id, hash and time, in id order. Two new tests in
+`tests/test_status.py` (the rows, the scoping and the totals; hostile text in a path,
+detail and note), and the JSON test's key list gained the two sections; all three fail
+without the change. Against a copy of the live database, run 3 printed 0 quarantined,
+and 8 egress rows, 1 its own clone and 7 global database syncs, out of 14 all-time.
 
 ### 23. Bandit, Checkov and Gitleaks also skip trees without saying so [measured]
 

@@ -587,9 +587,11 @@ def producer_exists(con: sqlite3.Connection, producer_id: str) -> bool:
 
 
 def quarantined(con: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]:
-    """What ingest moved aside for a run."""
+    """What ingest moved aside for a run, in the order it was moved. The run page and
+    `quarry status` both list it from here."""
     return [dict(r) for r in con.execute(
-        "SELECT kind,original_path,detail FROM quarantined WHERE run_id=?", (run_id,))]
+        "SELECT id,kind,original_path,detail,sha256,created_at FROM quarantined "
+        "WHERE run_id=? ORDER BY id", (run_id,))]
 
 
 def research_row(con: sqlite3.Connection, rid: int) -> dict[str, Any] | None:

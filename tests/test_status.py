@@ -153,7 +153,8 @@ def test_json_is_the_same_document_the_text_is_printed_from(seeded, tmp_path):
     assert code == 0, out
     doc = json.loads(out)
     assert doc == json.loads(json.dumps(cli.run_status(con, 1), default=str))
-    assert set(doc) == {"run", "scanners", "health", "funnel", "verdicts", "advisories"}
+    assert set(doc) == {"run", "scanners", "health", "funnel", "verdicts", "advisories",
+                        "quarantine", "egress"}
     assert [t["outcome"] for t in doc["scanners"]] == \
         ["ok", "nothing to scan", "failed", "skipped"]   # opengrep, osv, trivy, zizmor
     assert doc["verdicts"]["by_seat"]["dynamic"]["confirmed"] == 1
@@ -205,6 +206,94 @@ def test_verdict_counts_by_seat_count_latest_slots_only(seeded, tmp_path):
     assert q.verdict_counts_by_seat(con, 2) == {}
     by_seat = q.verdict_counts_by_seat(con, 1)
     assert sum(s["total"] for s in by_seat.values()) == q.verdict_counts(con, 1)["total"]
+
+
+# ------------------------------------------------------- quarantine and egress
+
+def _seed_containment(con, path="src/link", detail="-> /etc/passwd", note="ok"):
+    con.execute("INSERT INTO runs (id,target,clone_url,status) VALUES (2,'o/other','x',"
+                "'done')")
+    with db.tx(con):
+        for kind, p, d in (("symlink", path, detail),
+                           ("loader-config", ".bandit", "target-supplied scanner config")):
+            con.execute("INSERT INTO quarantined (run_id, original_path, kind, detail, "
+                        "sha256) VALUES (1,?,?,?,?)", (p, kind, d, "cd" * 32))
+        con.execute("INSERT INTO quarantined (run_id, original_path, kind) "
+                    "VALUES (2,'elsewhere','symlink')")
+        db.egress(con, 1, "clone", "github.com", note="anonymous https, no credential")
+        db.egress(con, 1, "validate-provision", "registry.example:5000", bytes_out=120,
+                  bytes_in=4096, note=note)
+        db.egress(con, 2, "clone", "github.com", note="another run's clone")
+        db.egress(con, None, "db-sync", "mirror.gcr.io", bytes_in=9, note="trivy database: ok")
+
+
+def test_status_lists_what_ingest_quarantined_and_where_the_run_reached(seeded):
+    """Item 22: the run page's quarantine and egress tables were left out of status.
+    The same rows the page reads (`queries.quarantined`, `queries.egress_ledger`): this
+    run's, plus the global egress the page also shows, never another run's."""
+    _, con = seeded
+    _seed_containment(con)
+
+    code, text = _status(1)
+
+    assert code == 0, text
+    lines = text.splitlines()
+    qz = q.quarantined(con, 1)
+    assert [r["kind"] for r in qz] == ["symlink", "loader-config"]
+    for want in (
+            "quarantined: 2",
+            f"quarantine.{qz[0]['id']}: kind=symlink",
+            f"quarantine.{qz[0]['id']}.path: src/link",
+            f"quarantine.{qz[0]['id']}.detail: -> /etc/passwd",
+            f"quarantine.{qz[1]['id']}.path: .bandit",
+            f"quarantine.{qz[1]['id']}.sha256: {'cd' * 32}",
+            "egress: listed=3 run=2 global=1",
+            "egress.all_time: events=4 destinations=3 bytes-out=120 bytes-in=4105"):
+        assert want in lines, want
+    led = q.egress_ledger(con, 1)
+    assert len(led["rows"]) == 3
+    for r in led["rows"]:
+        k = f"egress.{r['id']}"
+        assert f"{k}.destination: {r['destination']}" in lines
+        assert any(l.startswith(f"{k}: scope={r['scope'].replace(' ', '-')} "
+                                f"stage={r['stage']} ") for l in lines), k
+    provision = next(r for r in led["rows"] if r["stage"] == "validate-provision")
+    assert f"egress.{provision['id']}: scope=run-1 stage=validate-provision " \
+           "bytes-out=120 bytes-in=4096" in lines
+    assert "another run's clone" not in text and "elsewhere" not in text
+
+    code, out = _status(1, "--json")
+    doc = json.loads(out)
+    assert doc["quarantine"] == json.loads(json.dumps(qz))
+    assert doc["egress"]["rows"] == json.loads(json.dumps(led["rows"]))
+    assert doc["egress"]["all_time"] == {"n_events": 4, "n_destinations": 3,
+                                         "bytes_out": 120, "bytes_in": 4105}
+
+    # A run with neither says so rather than printing nothing.
+    con.execute("DELETE FROM quarantined")
+    con.execute("DELETE FROM egress")
+    _, text = _status(1)
+    assert "quarantined: 0" in text.splitlines()
+    assert "egress: listed=0 run=0 global=0" in text.splitlines()
+
+
+def test_quarantine_and_egress_text_cannot_break_a_line(seeded):
+    """A quarantined path, its detail and an egress note can carry the target's bytes."""
+    _, con = seeded
+    evil = f"line one\nquarantined: 0\x1b[31m {RLO}gpj.py"
+    _seed_containment(con, path=evil, detail=evil, note=evil)
+
+    code, text = _status(1)
+    assert code == 0, text
+    assert "\x1b" not in text and RLO not in text
+    assert text.splitlines().count("quarantined: 0") == 0
+    for line in text.splitlines():
+        assert re.match(r"[^\s:]+: ", line), line
+    assert any(l.endswith(".path: line one quarantined: 0[31m gpj.py")
+               for l in text.splitlines())
+
+    code, out = _status(1, "--json")
+    assert "\x1b" not in out and RLO not in out and "\\u202e" in out
 
 
 # ------------------------------------------- the run page reads the same outcome
