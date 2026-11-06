@@ -295,6 +295,53 @@ def test_ssrf_confirmed_when_the_server_returns_its_own_internal_page():
     assert "internal network" in ev.summary
 
 
+LAYOUT = "<!DOCTYPE html><html lang=\"en\"><head><title>Vulnerability-Lookup</title>" \
+         "<link rel=\"stylesheet\" href=\"/static/css/main.css\"></head><body><nav>Home " \
+         "Recent Search Statistics Login</nav>"
+
+
+def test_ssrf_not_confirmed_by_the_sites_own_404_page():
+    """VulnLookup, 2026-11-06: a feed route answers XML for a known format and the site's
+    HTML 404 page for anything else, the internal URL included. The 404 page shares the
+    root page's layout, which the XML control lacks; that once confirmed sixteen times."""
+    home = LAYOUT + "<main>Latest vulnerabilities: CVE-2026-1111, CVE-2026-2222</main></body>"
+    notfound = LAYOUT + "<main>404: this page does not exist</main></body></html>"
+
+    def handle(req):
+        if req.path == "/":
+            return Reply(200, home)
+        if req.path == "/fetch":
+            url = req.query.get("url", "")
+            if url.startswith("http"):
+                return Reply(404, notfound)
+            return Reply(200, "<?xml version=\"1.0\"?><rss><channel/></rss>",
+                         "application/xml")
+        return Reply(404, notfound)
+    ev = probe_path_traversal_ssrf(RUNNING, _cand("CWE-918"), FETCH, curl(handle))
+    assert ev.reproduced is False and adjudicate(ev) != "confirmed"
+
+
+def test_ssrf_still_confirmed_through_a_shared_layout():
+    """The same site, now fetching the URL: the root page's own content comes back."""
+    home = LAYOUT + "<main>Latest vulnerabilities: CVE-2026-1111, CVE-2026-2222</main></body>"
+    notfound = LAYOUT + "<main>404: this page does not exist</main></body></html>"
+
+    def handle(req):
+        if req.path == "/":
+            return Reply(200, home)
+        if req.path == "/fetch":
+            url = req.query.get("url", "")
+            if url == "http://web:8080/":
+                return Reply(200, home)
+            if url.startswith("http"):
+                return Reply(404, notfound)
+            return Reply(200, "<?xml version=\"1.0\"?><rss><channel/></rss>",
+                         "application/xml")
+        return Reply(404, notfound)
+    ev = probe_path_traversal_ssrf(RUNNING, _cand("CWE-918"), FETCH, curl(handle))
+    assert ev.reproduced is True and adjudicate(ev) == "confirmed"
+
+
 def test_ssrf_confirmed_on_server_side_fetch_error():
     def handle(req):
         if "quarry-ssrf-sentinel.invalid" in req.query.get("url", ""):

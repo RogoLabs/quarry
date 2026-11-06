@@ -26,9 +26,11 @@ still open was built ahead of a hard reset: decision M (a refuter's guard must a
 the claim's attacker), item 28 (refutation's share of the night, and one prompt tag per
 subsystem so Ollama reuses its cached prefix), the open parts of items 3, 12, 16, 19,
 20, 22, 24 and 25, the P3 race test and the P4 side findings. Decision I is superseded
-by the reset. `scripts/hard-reset.sh` and `scripts/test-run.sh` are the next steps.
-Open: decision J (its default is taken). The suite collects 1180 and passes 1177, with
-3 skipped because setuptools is absent.
+by the reset. The hard reset ran at 11:25 (archive `20261106-112542`) and the test run
+after it from 11:26 to 13:43, every step exit 0; item 29 records what it found, the
+four bugs fixed after it, and `REFUTE_SHARE` raised to 0.5. Open: decision J (its default is taken) and decision N under
+item 29. The suite collects 1189 and passes 1186, with 3 skipped because
+setuptools is absent.
 
 Every item says where its evidence came from:
 
@@ -863,8 +865,25 @@ told from a genuine one; after the hard reset no such record exists.
   docs/LEGA-CORPUS.md: on the two replays refutation lost no plant the hunt had found
   (F2 lost T1 with route intent on), at the price F2 paid, two claims on no plant kept
   per run. No refuter answered `survives` in 29 answers, and 23 of the 29 refutations
-  were finally discarded, so most verified claims now reach a human as "not rebutted";
-  the volume that means on a real repository is not measured yet.
+  were finally discarded, so most verified claims now reach a human as "not rebutted".
+  On a real repository (item 29, ML-Gateway, 2 hours, with 279 of the 498 refutations
+  owed answered before the deadline) that meant 106 of 249 findings kept for review,
+  and M was the reason in only 16 of the 123 failed refutations on them; F's checks
+  account for the other 107.
+- **N. Reachability is not a refutation.** Open. On ML-Gateway (item 29) 53 of the 123
+  refutations that failed grounding on kept findings argued, by a keyword match rather
+  than a reading of each, that the claimed code is out of the attacker's reach: a Typer
+  CLI command, a store method no route calls, a dump file from a trusted feed. F asks
+  for a guard expression on the path and reachability has none, so the claim stays "not
+  rebutted"; 41 of the 106 kept findings have at least one such refutation. (The refute
+  pass that run was cut by its deadline, so these counts come from 279 of 498 answers.)
+  Options:
+  (1) leave F alone and order the review list so claims with a `survives` answer and
+  claims in a file that serves a route come first, killing nothing; (2) accept a
+  reachability refutation when Quarry can check it, meaning the claim's file serves no
+  route and no file that serves one imports it, which kills, and would lose a plant
+  reached through an import that the replay corpus does not yet contain. My default:
+  (1) now, and (2) only once the corpus has a plant reached through an import.
 - **L. `uncertain` deferred a claim for good. Done 2026-11-05.** An `uncertain`
   answer counted as a refuter error, and `--resume` re-asks only failed calls, so a
   claim whose refuters were all uncertain stayed deferred at the gate with nothing to
@@ -1814,8 +1833,9 @@ one night's 162 findings, two refuters each, need about 10 hours of refuting.
   subsystem rather than on every unit. The tag still never reaches the target's files,
   which are written before any tag exists.
 - **A refute share.** With a deadline, a night now refutes what earlier nights left
-  unanswered, hunts until `runner.REFUTE_SHARE` (0.3) of the remaining window is left,
-  refutes what it found, and hunts again with any time the refute pass did not use.
+  unanswered, hunts until `runner.REFUTE_SHARE` (0.3; 0.5 since item 29) of the
+  remaining window is left, refutes what it found, and hunts again with any time the
+  refute pass did not use.
   Without a deadline the order is unchanged. A unit is attempted once per night: one
   that fails is retried on the next resume, not again after the refute pass.
 - Tests: `tests/test_refute_share.py` (4) and `tests/test_prompt_prefix_cache.py` (2);
@@ -1827,3 +1847,94 @@ one night's 162 findings, two refuters each, need about 10 hours of refuting.
   time the refute pass does not use goes back to the hunt, so too large a share costs
   nothing.
 
+
+### 29. What the first test run after the reset found [measured]
+
+`scripts/test-run.sh` on 602cf4f, 2026-11-06 11:26 to 13:43, after the hard reset at
+11:25. Every step exited 0. Logs, the replay result and each run's `status --json` are in
+`<data root>/test-run/20261106-112613/`; the earlier data is in `archive/20261106-112542/`.
+
+- **Replay** (350 s): the hunt missed 1 of 7 plants (N2) and refutation lost none of the
+  other 6; all 8 claims that hit a plant were kept, and 2 of the 5 claims on no plant.
+  No refuter answered `survives` in 13 claims, so every claim kept was kept because its
+  refutations were unsupported. The same shape as the M-on replay earlier that day.
+- **Layer 1** on three targets: cve-services 1,799 occurrences, 365 after the funnel;
+  ML-Gateway 331 and 40; VulnLookup 6,232 and 902. Opengrep finished VulnLookup in one
+  combined run this time (411 s, 113 paths only partly analyzed) and recorded no
+  crash. Grype and Syft are recorded as versions only; no scan runs them, so the
+  Grype database moved to the Trash under H costs nothing here.
+- **Layer 2** on ML-Gateway, 2 hours: all 168 units hunted (4,766 s), 249 findings. By
+  model: devstral:24b 188 from 56 units, granite4.2:30b 59 (28 units found nothing),
+  qwen3-coder:30b 2 (54 units found nothing; 46 of the 56 answered in under a second,
+  reading the prompt from Ollama's cache). qwen3-coder hunted as thinly on research 4 (5 findings from 41 units),
+  so two families do nearly all the hunting; it still refutes. The refute pass then ran
+  out of window: 279 of the 498 cross-family answers owed came back (qwen3-coder 247 of
+  247, granite 32 of 190, devstral 0 of 61), in 413 calls, 134 of them retries after a
+  refutation failed grounding, 8.8 s per answer. Of the 249: 140 have a grounded
+  refutation, 106 are kept for review (6 with a `survives` answer, 100 because every
+  refutation they got was unsupported), and 3 neither (two `survives` answers on
+  quotes that did not verify, one finding no refuter reached). Decision N covers why
+  the kept pile is large; `REFUTE_SHARE` is now 0.5 (see `runner.py` for the arithmetic).
+- **Layer 3** on VulnLookup (137 s): built, booted and seeded; the
+  seed captured all three test accounts' API keys. Of 50 probes, 12 sent a request (each
+  reflected markup in a JSON response, so needs-review), 37 found no GET route in the
+  finding's file, and 1 rate-limit probe correctly sent nothing for a CWE-400 finding.
+  No cross-user probe ran.
+
+Four bugs, all fixed. The first two explain the thin Layer 3 result; the re-run after
+them found the other two.
+
+- **The route signal missed Flask blueprints.** The profile's `http_routes` pattern knew
+  route decorators only on objects named app, bp or router. VulnLookup names its
+  blueprints and flask-restx namespaces for what they serve (`@user_bp.route`,
+  `@stats_ns.route`), so the profile counted 1 route where the route readers find 402.
+  `broken-authz-idor` needs 5 in Layer 2 and 3 in Layer 3, so it never ran on
+  VulnLookup: both archived deep reviews of it (research 3 and 4) lack the lens, and
+  Layer 3 skipped the probe the seed's cross-user resources exist for. The pattern now
+  counts a route decorator on any object (`patch` excepted, since `@mock.patch(` is the
+  commonest decorator in Python tests) and `add_url_rule`. VulnLookup now counts 377 and
+  gets the lens in both layers; cve-services (274) and ML-Gateway (11) are unchanged.
+  Tests: `tests/test_profile_routes.py` (2).
+- **Validate spent its budget on findings it cannot address.** With every rule's
+  precision 0 on a fresh database, candidates came in occurrence order, and 38 of the
+  50 went to findings in files with no route, while 65 of the 448 eligible findings sat
+  in files that serve one. Candidates in a routed file now come first, the probe classes
+  take turns inside each group so one plentiful rule cannot fill the budget, and one
+  occurrence per finding and file is probed (two findings were probed twice). The dry
+  run now plans 50 of 50 routed: 25 injection probes and 25 path-traversal and SSRF
+  probes, a lens that got none before. Tests: `tests/test_validate_candidate_order.py`
+  (3).
+- **The SSRF check confirmed the site's own 404 page.** Re-run with the two fixes
+  above, validate reported 16 confirmed, all `path-traversal-ssrf` on CWE-918 findings
+  from opengrep's two `tainted-url-host` rules, on four routes (the bundle, comment and
+  sighting feeds, and a feed under `/user/`). Every one was false. The probe asks the server to
+  fetch its own root page and looks for a 40-character stretch of that page the control
+  response lacks. Each route's control, a random feed format, returned a small XML
+  feed (599 to 603 B), so the first stretch of the root page's HTML layout qualified; the probe's
+  request, a URL as the feed format, returned the site's 404 page (about 38.9 KB,
+  HTTP 404) in the same layout. The replay rule could not catch it: the 404 page came
+  back the same way four times, once after a restart. The stretch must now also be
+  absent from the page the target serves for an unknown path. Tests: two in
+  `tests/test_probes_injection.py`, one a replica of the VulnLookup case that fails
+  without the fix, one showing a real fetch through the same layout still confirms.
+- **A held re-run could not withdraw a confirmation from the precision ledger.**
+  `db.bump_producer_counts` counted any confirmation ever written, so those 16 put the
+  two `tainted-url-host` rules at 10 of 10 and 6 of 6, ranking them first for every
+  later validate run, and no re-run could undo it. The advisory drafts and the dashboard
+  already read only the latest verdict per run, finding, seat and model; the ledger now
+  does too. Tests: `tests/test_precision_ledger_latest.py` (2).
+
+After all four, validate ran on VulnLookup again (same build, seed and flags): 50
+probes, all on routed findings, 0 confirmed, 0 rejected, 50 needs-review. The 25 SSRF
+probes saw no in-band signal and no refusal of the internal address; of the 25
+injection probes, 10 got markup back raw in a JSON response, 8 encoded on the
+reflected parameter but not on every parameter, and 7 had no reflection to read. Every
+one of the 16 false confirmations was probed again and held, so run 3's latest verdicts
+are 88 needs-review and none confirmed, the precision ledger holds no adjudicated rule,
+and no advisory was drafted at any point. The logs are `validate-rerun-routed.log` and
+`validate-rerun-oracle.log` in the test-run directory.
+
+Not covered by this test run: a deep review of VulnLookup with the authorization lens,
+so the cross-user probe has candidates (scanner findings carry no authorization CWE);
+a whole night under the new refute order; and the two `intended` verdicts from G,
+which are in the archive and so do not carry forward to the new cve-services run.

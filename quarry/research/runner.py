@@ -35,8 +35,13 @@ HUNT_NUM_PREDICT = 8192
 REFUTE_NUM_PREDICT = 700
 #: The share of a deadline-bound night held back from the hunt for refuting what the
 #: night found (IMPROVEMENT-PLAN item 28). Time the refute pass does not use goes back
-#: to the hunt.
-REFUTE_SHARE = 0.3
+#: to the hunt. Measured on the 2026-11-06 test run (item 29): 4,766 s of hunting on
+#: ML-Gateway found 249 findings, which owe 498 cross-family answers at 8.8 s each
+#: (413 calls, 134 of them grounding retries, in 2,455 s), about 4,380 s, so keeping
+#: pace takes about 0.48 of the window. In that 2-hour run the hunt finished every unit
+#: with 2,434 s left, more than 0.3 of it, and the refute pass still left 219 of the 498
+#: answers owed when the deadline came.
+REFUTE_SHARE = 0.5
 
 
 def plan(con: sqlite3.Connection, run_id: int, src: Path, *, models: list[str],

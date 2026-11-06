@@ -1389,21 +1389,29 @@ def _traversal(running, cand, pool, own, exec_fn) -> ProbeEvidence:
                 "'no such file' look alike, so this does not reject")
 
 
-def _canary_window(page: str, control: str) -> str:
-    """A 40-character stretch of the target's root page that the control response does not
-    contain. Taken from a page fetched directly, so finding it in the probe's response
-    means the server fetched that page itself. Empty when the page is too short or shares
-    every stretch with the control (a common layout)."""
+def _canary_window(page: str, *others: str) -> str:
+    """A 40-character stretch of the target's root page that none of `others` contains:
+    the control response, and the target's own not-found page. Taken from a page fetched
+    directly, so finding it in the probe's response means the server fetched that page
+    itself. Empty when the page is too short or shares every stretch with them.
+
+    The not-found page is there because of VulnLookup (2026-11-06): a feed route's
+    control returned XML, so the first stretch of the root page's HTML layout passed,
+    and the probe's request, an unknown feed format, returned the site's 404 page in the
+    same layout. Sixteen confirmations on four routes, none a fetch."""
     flat = " ".join(page.split())
+    seen = [" ".join(o.split()) for o in others]
     for i in range(0, max(0, len(flat) - 40) + 1, 40):
         w = flat[i:i + 40]
-        if len(w) == 40 and w not in " ".join(control.split()):
+        if len(w) == 40 and not any(w in o for o in seen):
             return w
     return ""
 
 
 def _ssrf(running, cand, pool, own, exec_fn) -> ProbeEvidence:
     root = _fetch(exec_fn, running.base_url.rstrip("/") + "/")
+    # What the target serves when it fetched nothing: its page for an unknown path.
+    missing = _fetch(exec_fn, running.base_url.rstrip("/") + "/" + _marker())
     internal = running.base_url.rstrip("/") + "/"
     sentinel = f"http://{_SENTINEL}/"
     refusals = []
@@ -1416,7 +1424,7 @@ def _ssrf(running, cand, pool, own, exec_fn) -> ProbeEvidence:
             iu, su = _url(running, r, s, internal), _url(running, r, s, sentinel)
             i, x = _fetch(exec_fn, iu, max_time=8), _fetch(exec_fn, su, max_time=8)
             control = f"control GET {cu} -> {c.describe()}"
-            canary = _canary_window(root.body, c.body) if root.ok else ""
+            canary = _canary_window(root.body, c.body, missing.body) if root.ok else ""
             if canary and canary in " ".join(i.body.split()):
                 return _ev(own, r, cand, reproduced=True, determinism="deterministic",
                            request=f"GET {iu}", baseline=control, differs_from_baseline=True,

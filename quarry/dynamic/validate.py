@@ -201,8 +201,22 @@ def _cwe_of(row: dict[str, Any]) -> str | None:
     return normalise_cwe(row.get("cwe"))
 
 
-def select_candidates(con: sqlite3.Connection, run_id: int, *,
-                      limit: int = 50) -> list[Candidate]:
+def _interleave(cands: list[Candidate]) -> list[Candidate]:
+    """Probe classes take turns, each keeping its own order, so one plentiful class
+    cannot fill the budget before another class gets a probe."""
+    queues: dict[str, list[Candidate]] = {}
+    for c in cands:
+        queues.setdefault(probe_class(c.cwe) or "", []).append(c)
+    out: list[Candidate] = []
+    while any(queues.values()):
+        for q in queues.values():
+            if q:
+                out.append(q.pop(0))
+    return out
+
+
+def select_candidates(con: sqlite3.Connection, run_id: int, *, limit: int = 50,
+                      routed: Callable[[str], Any] | None = None) -> list[Candidate]:
     """Live findings worth probing, best first.
 
     Only occurrences that survive the funnel (live_occurrences) are eligible, and only
@@ -211,7 +225,15 @@ def select_candidates(con: sqlite3.Connection, run_id: int, *,
     route, and both verdicts in the operator's DB were probes against poetry.lock that
     could not run. Ordered by the producer's
     cross-repo precision (n_confirmed / n_adjudicated), so the probe budget goes to the
-    rules that have earned it, then by occurrence id for stability."""
+    rules that have earned it, then by occurrence id for stability. One occurrence per
+    (finding, file) is kept: routes are looked up per file, so a second one in the same
+    file would repeat the same probe.
+
+    `routed` (the static route map's for_finding) puts findings in a file that serves a
+    route ahead of the rest, since a probe needs a route to address, and lets the probe
+    classes take turns inside each group. On the 2026-11-06 test run 38 of VulnLookup's
+    50 slots went to findings in files with no route (selection by occurrence id, every
+    rule's precision still 0), while 65 of its 448 eligible findings had one."""
     rows = con.execute(
         """SELECT o.id AS occurrence_id, o.finding_id, o.path, o.start_line,
                   o.message, o.producer_id, f.target, p.cwe, p.tool, p.rule_id,
@@ -225,6 +247,7 @@ def select_candidates(con: sqlite3.Connection, run_id: int, *,
         (run_id,)).fetchall()
     from ..funnel import independence_class
     out: list[Candidate] = []
+    seen: set[tuple[str, str]] = set()
     for r in rows:
         row = dict(r)
         if independence_class(row["tool"], row["rule_id"]) == "sca-db":
@@ -232,13 +255,21 @@ def select_candidates(con: sqlite3.Connection, run_id: int, *,
         cwe = _cwe_of(row)
         if probe_class(cwe) not in DYNAMICALLY_TESTABLE:
             continue
+        if (row["finding_id"], row["path"]) in seen:
+            continue
+        seen.add((row["finding_id"], row["path"]))
         out.append(Candidate(
             finding_id=row["finding_id"], occurrence_id=row["occurrence_id"],
             target=row["target"], path=row["path"], start_line=row["start_line"],
             producer_id=row["producer_id"], cwe=cwe, message=row["message"] or ""))
-        if len(out) >= limit:
+        if routed is None and len(out) >= limit:
             break
-    return out
+    if routed is None:
+        return out
+    has = [bool(routed(c.path)) for c in out]
+    first = _interleave([c for c, h in zip(out, has) if h])
+    rest = _interleave([c for c, h in zip(out, has) if not h])
+    return (first + rest)[:limit]
 
 
 def final_verdict(evidence: ProbeEvidence, replay: dict | None = None) -> tuple[str, str]:
@@ -384,10 +415,10 @@ def plan_validation(con: sqlite3.Connection, run_id: int, src: Path, *,
     from .lenses import select_probe_lenses
     from .routes import build_route_map
 
-    cands = select_candidates(con, run_id, limit=limit)
+    rmap = build_route_map(src)
+    cands = select_candidates(con, run_id, limit=limit, routed=rmap.for_finding)
     prof = profile_repo(src)
     selected_raw, skipped = select_probe_lenses(prof, cands)
-    rmap = build_route_map(src)
     routed = sum(1 for c in cands if rmap.for_finding(c.path))
 
     spec = None
@@ -502,7 +533,8 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
     rundir = Path(rundir)
     src = rundir / "src"
     res = ValidationResult(run_id)
-    cands = select_candidates(con, run_id, limit=limit)
+    rmap = build_route_map(src)
+    cands = select_candidates(con, run_id, limit=limit, routed=rmap.for_finding)
     prof = profile_repo(src)
     selected, _ = select_probe_lenses(prof, cands)
     if not selected:
@@ -511,7 +543,6 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
     if spec is None:
         return res
 
-    rmap = build_route_map(src)
     spec = dataclasses.replace(spec, ready_paths=readiness_paths(rmap))
     try:
         running = runtime.start(spec, rundir)

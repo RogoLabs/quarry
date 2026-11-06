@@ -31,9 +31,15 @@ LANG_BY_EXT = {
 
 # (capability, regex, which extensions to search). Capabilities are the vocabulary
 # lens selection speaks in.
+# http_routes counts a route decorator on any object, not only one named app, bp or
+# router: Flask blueprints and flask-restx namespaces are named for what they serve
+# (`@user_bp.route`, `@stats_ns.route`), and VulnLookup's ~400 routes once counted as 1,
+# which kept the authorization lens off it in both layers. `patch` is left out of the
+# any-object form because `@mock.patch(` is the commonest decorator in Python tests.
 CAPABILITY_PATTERNS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("http_routes", r"router\.(get|post|put|patch|delete)\b|app\.(get|post|put|use)\b"
-                    r"|@(app|bp|router)[a-z_]*\.(route|get|post)|urlpatterns"
+                    r"|@(app|bp|router)[a-z_]*\.(route|get|post)"
+                    r"|@\w+\.(route|get|post|put|delete)\(|\.add_url_rule\(|urlpatterns"
                     r"|APIRouter\(|as_view\(|resources\s+:|@(Get|Post|Controller)\("
                     r"|Rails\.application\.routes", (".js", ".ts", ".py", ".rb", ".go", ".java")),
     ("orm_models", r"models\.Model|db\.Model|declarative_base|DeclarativeBase|SQLModel"

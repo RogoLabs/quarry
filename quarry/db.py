@@ -142,16 +142,25 @@ def bump_producer_counts(con: sqlite3.Connection) -> None:
 
     Only confirmed and rejected count as adjudicated. A needs-review verdict means the
     probe got no signal; counting it made a producer probed five times with no answer
-    read as 0 of 5 confirmed, which ranks it down and bands it known-bad."""
-    con.execute("""
+    read as 0 of 5 confirmed, which ranks it down and bands it known-bad.
+
+    Only the latest verdict per run, finding, seat and model counts, the rule the
+    dashboard (queries.LATEST_VERDICTS) and the advisory drafts already use, so a
+    re-run of validate that holds or rejects a finding withdraws its confirmation here
+    too. It once counted any confirmation ever written: sixteen from a faulty SSRF check
+    on 2026-11-06 put two rules at 10 of 10 and 6 of 6, and no re-run could undo that."""
+    latest = """(SELECT v.finding_id, v.verdict FROM verdicts v
+                   JOIN (SELECT MAX(id) AS id FROM verdicts
+                          GROUP BY run_id, finding_id, seat, model) l ON l.id = v.id)"""
+    con.execute(f"""
         UPDATE producers SET
           n_occurrences = COALESCE((SELECT COUNT(*) FROM occurrences o
                                     WHERE o.producer_id = producers.id), 0),
-          n_adjudicated = COALESCE((SELECT COUNT(DISTINCT v.finding_id) FROM verdicts v
+          n_adjudicated = COALESCE((SELECT COUNT(DISTINCT v.finding_id) FROM {latest} v
                                     JOIN findings f ON f.id = v.finding_id
                                     WHERE f.producer_id = producers.id
                                       AND v.verdict IN ('confirmed', 'rejected')), 0),
-          n_confirmed   = COALESCE((SELECT COUNT(DISTINCT v.finding_id) FROM verdicts v
+          n_confirmed   = COALESCE((SELECT COUNT(DISTINCT v.finding_id) FROM {latest} v
                                     JOIN findings f ON f.id = v.finding_id
                                     WHERE f.producer_id = producers.id
                                       AND v.verdict = 'confirmed'), 0)
