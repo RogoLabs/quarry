@@ -1051,8 +1051,8 @@ digest's inert-text escaping. Four new tests (`standing` in
 without the change; the template contract test now accepts one macro calling another
 in the same file. On a copy of the live database, `/research/1` lists its 2 survivors
 with the two decision G verdicts, the evidence pages of #1 and #141 show them, and the
-run 1 digest (written to a scratch directory, not `reports/`) carries both; pages
-rendered in under 0.1 s. Not done: a judged finding that is not a survivor and falls
+run 1 digest (written to a scratch directory, not `reports/`) carries both; each of
+the 4 research run pages and its progress fragment rendered in under 0.1 s. Not done: a judged finding that is not a survivor and falls
 below the 60 cards shown is not on its research run page (its evidence page still
 shows the verdict), and the digest header does not count judged findings.
 
@@ -1113,7 +1113,8 @@ still says "ran" where status says `ok`. Checked by rendering `/runs/<id>` befor
 after: on a fixture run with 11 scanner rows covering every branch (a skip that also
 says ok, a failure that also says nothing to scan, no `ok` key, `ok` of None, a legacy
 note), the pages differ only in whitespace inside the pill cell and in the fixture's
-own start time; on a copy of the live database, all 7 run pages are byte-identical.
+own start time; on a copy of the live database, all 7 run pages are byte-identical
+once the per-process form token is masked.
 The old copy was not wrong on any of those rows. Two tests in `tests/test_status.py`:
 the page and `status --json` agree on 10 such rows, and a page rendered with
 `scan_outcome` replaced follows the replacement, which fails without the change.
