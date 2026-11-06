@@ -14,9 +14,17 @@ it came from:
 Static is required under any configuration, because the finding-to-route link is itself
 static. The others are merged into it by (method, path), which only works when the static
 path is the one the server actually answers on, so static extraction resolves mount
-prefixes: FastAPI `APIRouter(prefix=)` and `include_router`, Flask `url_prefix` and
-`register_blueprint`, Flask-RESTX `Namespace`, `Api(prefix=)` and `add_namespace`, Express
-`app.use` with `require` or `import`.
+prefixes: FastAPI `APIRouter(prefix=)`, `include_router` and `app.mount`, Flask
+`url_prefix` and `register_blueprint`, Flask-RESTX `Namespace`, `Api(prefix=)` and
+`add_namespace`, Express `app.use` with `require` or `import`. A prefix may be a literal
+or a module-level string constant of the same file (an f-string, template literal or
+concatenation of them); one that is neither adds nothing and leaves the route marked
+`prefix_resolved=False`, never guessed.
+
+Frameworks whose route table sits apart from the handler have their own readers: Django
+URLconf and DRF routers, and Starlette `Route`/`Mount` (routes_py), and NestJS controllers
+(routes_js). Those routes also carry the handler's name and what it declares about access,
+since only the reader that resolved the handler knows where to look.
 """
 from __future__ import annotations
 
@@ -25,8 +33,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
+from . import routes_js as JS
+from .routes_py import Django, PyIndex, Starlette, Unresolved, eval_text_prefix
+
 METHODS = ("get", "post", "put", "patch", "delete")
 
+# app.use(PREFIX, router) and the like: a first argument that is not a plain literal.
+_JS_USE_ANY = re.compile(r"\b(\w+)\.use\s*\(")
+_JS_PLAIN = re.compile(r"(['\"])[^'\"\n]*\1|`[^`]*`")
+_JS_REQUIRE_ARG = re.compile(r"require\(\s*[\"'](\.[^\"']+)[\"']\s*\)")
 # Express / JS: app.get('/x', ...), router.post("/x", ...). The object is captured so a
 # route on a mounted router picks up its mount prefix.
 _JS_ROUTE = re.compile(
@@ -65,6 +80,9 @@ _PY_ROUTER = re.compile(r"(\w+)\s*=\s*(APIRouter|Blueprint)\s*\(([^)]*)\)")
 _PY_MOUNT = re.compile(
     r"\b(\w+)\.(include_router|register_blueprint|add_namespace)\s*\(\s*([\w.]+)\s*"
     r"(?:,([^)]*))?\)")
+# app.mount("/v1", v1_app): a FastAPI or Starlette sub-application; v1 = FastAPI()
+_PY_APP_MOUNT = re.compile(r"\b(\w+)\.mount\s*\(")
+_PY_APP = re.compile(r"(\w+)\s*=\s*(?:FastAPI|Starlette)\s*\(")
 _PY_FROM = re.compile(r"^\s*from\s+([\w.]+)\s+import\s+\(?([^)\n]+)\)?", re.M)
 _PY_IMPORT = re.compile(r"^\s*import\s+([\w.]+)(?:\s+as\s+(\w+))?", re.M)
 
@@ -97,6 +115,41 @@ def _call_args(text: str, open_paren: int) -> str:
                 return text[open_paren + 1:i]
         i += 1
     return text[open_paren + 1:]
+
+
+def _split_top(args: str) -> list[str]:
+    """A call's argument text split on its top-level commas (strings and brackets kept
+    whole)."""
+    out, depth, last, i, q = [], 0, 0, 0, ""
+    while i < len(args):
+        c = args[i]
+        if q:
+            if c == "\\":
+                i += 2
+                continue
+            if c == q:
+                q = ""
+        elif c in "\"'":
+            q = c
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "," and depth == 0:
+            out.append(args[last:i])
+            last = i + 1
+        i += 1
+    out.append(args[last:])
+    return [p for p in out if p.strip()]
+
+
+def _kwarg_expr(args: str | None, name: str) -> str | None:
+    """The source text of keyword argument `name` at the call's top level, or None."""
+    for piece in _split_top(args or ""):
+        m = re.match(rf"\s*{name}\s*=(?!=)\s*(.*)$", piece, re.S)
+        if m:
+            return m[1].strip()
+    return None
 
 
 def _str_args(args: str) -> list[str]:
@@ -205,9 +258,10 @@ def _class_verb_spans(text: str, start: int, indent: str) -> dict[str, tuple[int
 
 
 # Query parameters a handler body reads. Flask `request.args.get("x")`, `request.args["x"]`,
-# `request.values.get("x")`; Express `req.query.x` and `req.query["x"]`.
+# `request.values.get("x")`; Django `request.GET.get("x")`; DRF
+# `request.query_params.get("x")`; Express `req.query.x` and `req.query["x"]`.
 _PY_QUERY = re.compile(
-    r"request\.(?:args|values)(?:\.get(?:list)?\(\s*|\[\s*)[\"'](\w+)[\"']")
+    r"request\.(?:args|values|GET|query_params)(?:\.get(?:list)?\(\s*|\[\s*)[\"'](\w+)[\"']")
 _JS_QUERY = re.compile(r"\breq\.query(?:\.(\w+)|\[\s*[\"'](\w+)[\"']\s*\])")
 
 
@@ -267,6 +321,18 @@ class Route:
     # route that serves it, rather than to every route in the same file.
     line: int = 0
     end_line: int = 0
+    # Declared access, for the frameworks whose route table sits apart from the handler
+    # (Django URLconf, Starlette Route/Mount, NestJS controllers): the handler's name, and
+    # the wrappers, decorators, mixins, permission classes and guards on it, names as
+    # written. app_guards are the app- or project-wide ones (a login-required MIDDLEWARE,
+    # DRF's default permission classes, a NestJS global guard, Mount middleware). Empty for
+    # the decorator frameworks, whose declarations research.intent reads itself.
+    handler: str = ""
+    guards: tuple[str, ...] = ()
+    app_guards: tuple[str, ...] = ()
+    # False when a prefix on the way to this route could not be resolved (a variable, a
+    # call, an ambiguous mount target): the path then lacks that piece. Never guessed.
+    prefix_resolved: bool = True
 
     @property
     def key(self) -> tuple[str, str]:
@@ -292,10 +358,17 @@ class RouteSource(Protocol):
 
 @dataclass
 class StaticRouteSource:
-    """Parse route definitions from source. Framework-agnostic by pattern, covering the
-    Express, FastAPI and Flask shapes first; more frameworks are additive."""
+    """Parse route definitions from source. Framework-agnostic by pattern for Express,
+    FastAPI and Flask; Django, Starlette and NestJS have their own readers.
+
+    After `discover`, `unresolved` lists each prefix or pattern that could not be
+    computed (file:line: expression), `errors` names a framework reader that failed
+    (the others still ran), and `unparsed` lists Python files `ast` could not read."""
     name: str = "static"
     max_file_bytes: int = 400_000
+    unresolved: list[str] = field(default_factory=list, repr=False)
+    errors: list[str] = field(default_factory=list, repr=False)
+    unparsed: list[str] = field(default_factory=list, repr=False)
 
     def discover(self, src: Path) -> list[Route]:
         """Two passes. First every file is read for its routes, its router objects and
@@ -311,16 +384,38 @@ class StaticRouteSource:
                 texts[str(p.relative_to(src))] = p.read_text(errors="replace")
             except OSError:
                 continue
-        mounts = _Mounts(texts)
+        unres = Unresolved()
+        index = PyIndex(texts)
+        mounts = _Mounts(texts, index, unres)
         out: list[Route] = []
         for rel, text in texts.items():
             for obj, method, path, span in self._routes_in(text, rel):
                 query = _query_params(text, span, rel)
-                for prefix in mounts.prefixes(rel, obj):
+                for prefix, ok in mounts.prefixes_ok(rel, obj):
                     full = _join(prefix, path) if prefix else path
                     out.append(Route(method, full, rel, "static",
                                      params=_path_params(full), query=query,
-                                     line=span[0], end_line=span[1]))
+                                     line=span[0], end_line=span[1], prefix_resolved=ok))
+        self.errors = []
+        readers = (("django", lambda: Django(index, unres).run()),
+                   ("starlette", lambda: Starlette(index, unres).run()),
+                   ("nestjs", lambda: JS.Nest(texts, unres).run()))
+        for name, run in readers:
+            try:
+                found = run()
+            except Exception as e:                       # noqa: BLE001 (one reader)
+                self.errors.append(f"{name}: {type(e).__name__}: {str(e)[:200]}")
+                continue
+            for f in found:
+                query = f.query or _query_params(texts.get(f.file, ""),
+                                                 (f.line, f.end_line), f.file)
+                out.append(Route(f.method, f.path, f.file, "static",
+                                 params=_path_params(f.path), query=query,
+                                 line=f.line, end_line=f.end_line, handler=f.handler,
+                                 guards=f.guards, app_guards=f.app_guards,
+                                 prefix_resolved=f.prefix_resolved))
+        self.unresolved = list(unres)
+        self.unparsed = list(index.unparsed)
         # stable, de-duplicated
         seen: dict[tuple, Route] = {}
         for r in out:
@@ -379,54 +474,123 @@ class StaticRouteSource:
 class _Mounts:
     """Where each router object is mounted, resolved across files. A mount whose target
     cannot be pinned to exactly one file is ignored rather than guessed, so a route is
-    never given a prefix that belongs to a different router."""
+    never given a prefix that belongs to a different router; the candidates' routes are
+    marked unresolved. A prefix that is not a literal is read as a module-level string
+    constant of the same file; when it is not one either, it adds nothing, and the
+    routes under it are marked unresolved (IMPROVEMENT-PLAN item 12)."""
 
-    def __init__(self, texts: dict[str, str]):
+    def __init__(self, texts: dict[str, str], index: PyIndex | None = None,
+                 unresolved: Unresolved | None = None):
         self.texts = texts
+        self.index = index if index is not None else PyIndex(texts)
+        self.unres = unresolved if unresolved is not None else Unresolved()
         # (file, obj) -> its own prefix: APIRouter(prefix=) or Blueprint(url_prefix=)
         self.local: dict[tuple[str, str], str] = {}
+        self.local_unresolved: set[tuple[str, str]] = set()
+        # candidates of a mount whose target matched more than one file
+        self.ambiguous: set[tuple[str, str]] = set()
         # (target file, target obj or None) -> [(mounting file, mounting obj, prefix,
-        #                                         replaces the target's own prefix)]
-        self.into: dict[tuple[str, str | None], list[tuple[str, str, str, bool]]] = {}
+        #                                         replaces the target's own prefix,
+        #                                         prefix resolved)]
+        self.into: dict[tuple[str, str | None],
+                        list[tuple[str, str, str, bool, bool]]] = {}
         for rel, text in texts.items():
             if rel.endswith(".py"):
                 self._python(rel, text)
             else:
                 self._js(rel, text)
 
+    # -- prefixes that are not literals ------------------------------------------
+    def _py_value(self, rel: str, expr: str, line: int, what: str) -> tuple[str, bool]:
+        """A Python prefix expression's value, from literals, the file's module-level
+        constants, or a constant it imports from one other file. When a piece cannot be
+        computed it is left out (only a leading one keeps the rest) and the entry is
+        recorded: ("", False) or (known rest, False)."""
+        val, complete = eval_text_prefix(expr, {})
+        if not complete:
+            val, complete = eval_text_prefix(expr, self.index.env(rel))
+        if not complete:
+            self.unres.add(rel, line, f"{what}={expr}")
+            return val or "", False
+        return val, True
+
+    def _py_kw(self, rel: str, args: str | None, kw: str, line: int) -> tuple[str | None, bool]:
+        """A prefix keyword argument: (None, True) when absent."""
+        raw = _kwarg_expr(args, kw)
+        if raw is None:
+            return None, True
+        return self._py_value(rel, raw, line, kw)
+
     # -- parsing -----------------------------------------------------------
     def _python(self, rel: str, text: str) -> None:
-        for m in _PY_ROUTER.finditer(text):
+        for m in (_PY_ROUTER.finditer(text) if "APIRouter" in text or "Blueprint" in text
+                  else ()):
             kw = "prefix" if m[2] == "APIRouter" else "url_prefix"
-            self.local[(rel, m[1])] = _kwarg(m[3], kw) or ""
-        for m in _PY_NAMESPACE.finditer(text):
+            val, ok = self._py_kw(rel, _call_args(text, m.start(3) - 1), kw,
+                                  _line_of(text, m.start()))
+            self.local[(rel, m[1])] = val or ""
+            if not ok:
+                self.local_unresolved.add((rel, m[1]))
+        for m in (_PY_APP.finditer(text) if "FastAPI" in text or "Starlette" in text
+                  else ()):                       # a sub-application app.mount() targets
+            self.local.setdefault((rel, m[1]), "")
+        for m in (_PY_NAMESPACE.finditer(text) if "Namespace" in text else ()):
             # A RESTX namespace is served under path=, or /<name> when none is given.
             args = _call_args(text, m.end() - 1)
-            name = (_str_args(args) or [""])[0]
-            path = _kwarg(args, "path")
-            self.local[(rel, m[1])] = path if path is not None else _join(name)
+            line = _line_of(text, m.start())
+            path, ok = self._py_kw(rel, args, "path", line)
+            if path is None:
+                lits = _str_args(args)
+                first = (_split_top(args) or [""])[0]
+                if lits:
+                    path = _join(lits[0])
+                elif first.strip() and not re.match(r"\s*\w+\s*=(?!=)", first):
+                    name, ok = self._py_value(rel, first, line, "Namespace name")
+                    path = _join(name) if ok else ""
+                else:
+                    path = _join("")
+            self.local[(rel, m[1])] = path
+            if not ok:
+                self.local_unresolved.add((rel, m[1]))
         names = self._py_imports(rel, text)
-        for m in _PY_API.finditer(text):
+        for m in (_PY_API.finditer(text) if "Api" in text else ()):
             # Api(app_or_blueprint, prefix=): the Api is mounted on its first argument.
             args = _call_args(text, m.end() - 1)
             host = re.match(r"\s*([A-Za-z_][\w.]*)\s*(?:,|$)", args)
             if host is None:
                 continue
-            frm = self._py_target(rel, host[1], names) or (rel, host[1])
+            line = _line_of(text, m.start())
+            frm = self._py_target(rel, host[1], names, line) or (rel, host[1])
+            prefix, ok = self._py_kw(rel, args, "prefix", line)
             self.into.setdefault((rel, m[1]), []).append(
-                (frm[0], frm[1], _kwarg(args, "prefix") or "", False))
+                (frm[0], frm[1], prefix or "", False, ok))
         for m in _PY_MOUNT.finditer(text):
-            target = self._py_target(rel, m[3], names)
+            line = _line_of(text, m.start())
+            target = self._py_target(rel, m[3], names, line)
             if target is None:
                 continue
+            rest = ",".join(_split_top(_call_args(text, text.index("(", m.end(2))))[1:])
             if m[2] == "include_router":       # FastAPI prepends to the router's prefix
-                prefix, replaces = _kwarg(m[4], "prefix") or "", False
+                prefix, ok = self._py_kw(rel, rest, "prefix", line)
+                prefix, replaces = prefix or "", False
             else:                              # Flask url_prefix= and RESTX path= replace
                 kw = "url_prefix" if m[2] == "register_blueprint" else "path"
-                prefix = _kwarg(m[4], kw)
+                prefix, ok = self._py_kw(rel, rest, kw, line)
                 replaces = prefix is not None
                 prefix = prefix or ""
-            self.into.setdefault(target, []).append((rel, m[1], prefix, replaces))
+            self.into.setdefault(target, []).append((rel, m[1], prefix, replaces, ok))
+        for m in (_PY_APP_MOUNT.finditer(text) if ".mount" in text else ()):
+            # app.mount("/v1", v1): a sub-application; StaticFiles(...) and the like are
+            # calls, not names, and are not route containers.
+            args = _split_top(_call_args(text, m.end() - 1))
+            if len(args) < 2 or not re.fullmatch(r"\s*[A-Za-z_][\w.]*\s*", args[1]):
+                continue
+            line = _line_of(text, m.start())
+            target = self._py_target(rel, args[1].strip(), names, line)
+            if target is None:
+                continue
+            prefix, ok = self._py_value(rel, args[0], line, "mount path")
+            self.into.setdefault(target, []).append((rel, m[1], prefix, False, ok))
 
     def _py_imports(self, rel: str, text: str) -> dict[str, tuple[str, str | None]]:
         """Local name -> (module, attribute or None) for what a file imports."""
@@ -442,7 +606,7 @@ class _Mounts:
                 names[alias] = (m[1], bits[0])
         return names
 
-    def _py_target(self, rel: str, expr: str, names) -> tuple[str, str] | None:
+    def _py_target(self, rel: str, expr: str, names, line: int = 0) -> tuple[str, str] | None:
         head, _, attr = expr.partition(".")
         if not attr:
             if (rel, head) in self.local:
@@ -450,15 +614,28 @@ class _Mounts:
             if head not in names:
                 return None
             mod, name = names[head]
-            f = self._py_module(rel, mod)      # from .users import router [as x]
-            return (f, name) if f and name else None
+            if not name:
+                return None
+            return self._pick(rel, mod, name, line, expr)  # from .users import router [as x]
         if head not in names:
             return None
         mod, name = names[head]                # from .routers import users; users.router
-        f = self._py_module(rel, f"{mod}.{name}" if name else mod)
-        return (f, attr) if f else None
+        return self._pick(rel, f"{mod}.{name}" if name else mod, attr, line, expr)
+
+    def _pick(self, rel: str, mod: str, obj: str, line: int, expr: str):
+        hits = self._py_module_hits(rel, mod)
+        if len(hits) == 1:
+            return hits[0], obj
+        if len(hits) > 1:
+            self.unres.add(rel, line, f"mount target {expr} matches {len(hits)} files")
+            self.ambiguous.update((h, obj) for h in hits)
+        return None
 
     def _py_module(self, rel: str, mod: str) -> str | None:
+        hits = self._py_module_hits(rel, mod)
+        return hits[0] if len(hits) == 1 else None
+
+    def _py_module_hits(self, rel: str, mod: str) -> list[str]:
         dots = len(mod) - len(mod.lstrip("."))
         parts = [p for p in mod.lstrip(".").split(".") if p]
         if dots:
@@ -467,14 +644,12 @@ class _Mounts:
                 base = base.parent
             stem = (base / Path(*parts)) if parts else base
             cands = [f"{stem}.py", f"{stem}/__init__.py"]
-            hits = [c.removeprefix("./") for c in cands
+            return [c.removeprefix("./") for c in cands
                     if c.removeprefix("./") in self.texts]
-        else:
-            tail = "/".join(parts)
-            hits = [f for f in self.texts
-                    if f == f"{tail}.py" or f.endswith(f"/{tail}.py")
-                    or f == f"{tail}/__init__.py" or f.endswith(f"/{tail}/__init__.py")]
-        return hits[0] if len(hits) == 1 else None
+        tail = "/".join(parts)
+        return [f for f in self.texts
+                if f == f"{tail}.py" or f.endswith(f"/{tail}.py")
+                or f == f"{tail}/__init__.py" or f.endswith(f"/{tail}/__init__.py")]
 
     def _js(self, rel: str, text: str) -> None:
         req = {}
@@ -483,16 +658,43 @@ class _Mounts:
             req[var] = spec
         local = set(_JS_ROUTER_VAR.findall(text))
         for m in _JS_USE.finditer(text):
-            var, spec = m[3], m[4]
-            if var and var in local:
-                target = (rel, var)
-            else:
-                spec = spec or req.get(var or "")
-                f = self._js_module(rel, spec) if spec else None
-                if f is None:
+            if "${" in m[2]:
+                continue                       # a template literal: read below
+            target = self._js_target(rel, m[3], m[4], req, local)
+            if target is not None:
+                self.into.setdefault(target, []).append((rel, m[1], m[2], False, True))
+        if ".use" not in text:
+            return
+        # A first argument that is not a plain literal: a constant, a template literal or
+        # a concatenation. A camelCase name is middleware (`app.use(auth, router)`), which
+        # mounts at "/" and is left alone, as before.
+        code = JS.blank_code(text)
+        consts: dict[str, str] | None = None
+        for m in _JS_USE_ANY.finditer(code):
+            close = JS._match_forward(code, m.end() - 1)
+            args = JS._split_top(code, text, m.end(), close)
+            if len(args) < 2 or (_JS_PLAIN.fullmatch(args[0]) and "${" not in args[0]):
+                continue
+            var = args[1] if re.fullmatch(r"\w+", args[1]) else None
+            req_spec = _JS_REQUIRE_ARG.fullmatch(args[1])
+            target = self._js_target(rel, var, req_spec[1] if req_spec else None, req, local)
+            if target is None:
+                continue
+            if consts is None:
+                consts = JS.js_consts(text)
+            val, ok = JS.js_eval_prefix(args[0], consts)
+            if not ok:
+                if val is None and not JS.looks_like_path_expr(args[0]):
                     continue
-                target = (f, None)
-            self.into.setdefault(target, []).append((rel, m[1], m[2], False))
+                self.unres.add(rel, _line_of(text, m.start()), f"{m[1]}.use({args[0]})")
+            self.into.setdefault(target, []).append((rel, m[1], val or "", False, ok))
+
+    def _js_target(self, rel, var, spec, req, local):
+        if var and var in local:
+            return rel, var
+        spec = spec or req.get(var or "")
+        f = self._js_module(rel, spec) if spec else None
+        return (f, None) if f is not None else None
 
     def _js_module(self, rel: str, spec: str) -> str | None:
         import posixpath
@@ -503,22 +705,29 @@ class _Mounts:
         return None
 
     # -- resolution ----------------------------------------------------------
-    def prefixes(self, rel: str, obj: str, _seen: frozenset = frozenset()) -> list[str]:
+    def prefixes(self, rel: str, obj: str) -> list[str]:
         """Every full prefix a route on `obj` in `rel` is served under. [""] when it is
         not mounted anywhere, which is the old behaviour."""
+        return [p for p, _ in self.prefixes_ok(rel, obj)]
+
+    def prefixes_ok(self, rel: str, obj: str,
+                    _seen: frozenset = frozenset()) -> list[tuple[str, bool]]:
+        """prefixes(), each with whether every piece of it was resolved."""
         key = (rel, obj)
         if key in _seen:
-            return [""]
+            return [("", True)]
         own = self.local.get(key, "")
+        own_ok = key not in self.local_unresolved
         mounts = self.into.get(key, []) + (
             self.into.get((rel, None), []) if obj not in ("app",) else [])
         if not mounts:
-            return [own]
-        out = []
-        for frm, frm_obj, prefix, replaces in mounts:
-            for outer in self.prefixes(frm, frm_obj, _seen | {key}):
-                out.append(_join(outer, prefix) if replaces else _join(outer, prefix, own))
-        return sorted(set(out))
+            return [(own, own_ok and key not in self.ambiguous)]
+        out: dict[str, bool] = {}
+        for frm, frm_obj, prefix, replaces, ok in mounts:
+            for outer, outer_ok in self.prefixes_ok(frm, frm_obj, _seen | {key}):
+                p = _join(outer, prefix) if replaces else _join(outer, prefix, own)
+                out[p] = out.get(p, False) or (ok and outer_ok and (replaces or own_ok))
+        return sorted(out.items())
 
 
 def _path_params(path: str) -> tuple[str, ...]:
@@ -572,6 +781,8 @@ def _merge(a: Route, b: Route) -> Route:
         auth_header=a.auth_header or b.auth_header,
         query=a.query + tuple(q for q in b.query if q not in a.query),
         line=lines_from.line, end_line=lines_from.end_line,
+        handler=lines_from.handler, guards=lines_from.guards,
+        app_guards=lines_from.app_guards, prefix_resolved=lines_from.prefix_resolved,
     )
 
 

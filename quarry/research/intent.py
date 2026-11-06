@@ -8,7 +8,11 @@ call it. This module says it, from two sources:
 
   * the source: the middleware an Express route lists before its handler, the decorators
     on a Flask, FastAPI or Flask-RESTX view (and a Resource's `method_decorators`), and
-    FastAPI `Depends(...)` in the signature. Names as written, never executed.
+    FastAPI `Depends(...)` in the signature. For Django, Starlette and NestJS, whose route
+    table sits apart from the handler, the route map's own reader supplies them with the
+    route: URLconf wrappers, view decorators, access mixins, permission classes, guards,
+    and app- or project-wide ones (settings MIDDLEWARE, DRF defaults, global guards).
+    Names as written, never executed.
   * a committed OpenAPI document: the operation's own `security`, or the spec-wide one it
     inherits.
 
@@ -509,14 +513,15 @@ class DeclaredAccess:
     router_level: tuple[str, ...] = ()
     spec: SpecSecurity | None = None
     prefix_resolved: bool = True
+    wide_label: str = "router-wide middleware before it"
 
     def render(self) -> str:
         where = _one_line(self.file, 100) + ("" if self.prefix_resolved
                                              else ", mount prefix not resolved")
         lines = [f"- {self.method} {_one_line(self.path, 120)}  ({where})"]
         if self.router_level:
-            lines.append("    router-wide middleware before it: "
-                         + ", ".join(self.router_level[:8]))
+            lines.append(f"    {self.wide_label}: "
+                         + ", ".join(_one_line(x, 160) for x in self.router_level[:8]))
         if self.guards:
             g = ", ".join(self.guards[:10]) + (" ..." if len(self.guards) > 10 else "")
             lines.append(f"    on the route, in order: {g}")
@@ -546,6 +551,10 @@ class IntentMap:
     specs: list[str] = field(default_factory=list)
     spec_notes: dict[str, str] = field(default_factory=dict)
     error: str = ""
+    # Prefix expressions the route map could not compute (file:line: expression), and
+    # framework readers that failed while the others ran.
+    unresolved: list[str] = field(default_factory=list)
+    reader_errors: list[str] = field(default_factory=list)
 
     def summary(self) -> dict:
         """What the run recorded about intent, for the manifest."""
@@ -555,7 +564,11 @@ class IntentMap:
             levels[k] = levels.get(k, 0) + 1
         return {"routes": len(self.routes), "specs": self.specs,
                 "with_guards": sum(1 for r in self.routes if r.guards or r.router_level),
-                "spec_levels": levels, "error": self.error}
+                "spec_levels": levels, "error": self.error,
+                "prefix_unresolved_routes": sum(1 for r in self.routes
+                                                if not r.prefix_resolved),
+                "unresolved_prefixes": len(self.unresolved),
+                "reader_errors": self.reader_errors}
 
     def _render(self, chosen: list[DeclaredAccess], limit: int, budget_chars: int,
                 lead: str) -> str:
@@ -613,7 +626,10 @@ def build(src: Path) -> IntentMap:
     src = Path(src).resolve()
     imap = IntentMap()
     try:
-        static = R.StaticRouteSource().discover(src)
+        reader = R.StaticRouteSource()
+        static = reader.discover(src)
+        imap.unresolved = list(getattr(reader, "unresolved", []) or [])
+        imap.reader_errors = list(getattr(reader, "errors", []) or [])
         ops: dict[tuple[str, str], SpecSecurity] = {}
         for rel in _find_specs(src):
             doc = _load_spec(src, rel)
@@ -624,7 +640,7 @@ def build(src: Path) -> IntentMap:
             for k, v in spec_operations(doc, rel).items():
                 ops.setdefault(k, v)
         by_file: dict[str, list[_Decl]] = {}
-        for rel in sorted({r.handler_file for r in static}):
+        for rel in sorted({r.handler_file for r in static if not r.handler}):
             try:
                 by_file[rel] = declarations((src / rel).read_text(errors="replace"), rel)
             except OSError:
@@ -632,6 +648,21 @@ def build(src: Path) -> IntentMap:
         claimed: set[int] = set()
         seen: set[tuple[str, str, str]] = set()
         for r in static:
+            if r.handler:
+                # Django, Starlette, NestJS: the reader that resolved the handler read
+                # what it declares; the handler's file has no route declarations to match.
+                key = (r.method, _norm(r.path), r.handler_file)
+                if key in seen:
+                    continue
+                seen.add(key)
+                imap.routes.append(DeclaredAccess(
+                    r.method, r.path, r.handler_file,
+                    tuple(_one_line(g, 160) for g in r.guards), r.handler,
+                    tuple(_one_line(g, 160) for g in r.app_guards),
+                    ops.get((r.method, _norm(r.path))),
+                    prefix_resolved=r.prefix_resolved,
+                    wide_label="app- or project-wide, before it"))
+                continue
             decls = by_file.get(r.handler_file, [])
             full = _segments(r.path)
             best, best_len = None, -1
@@ -650,7 +681,7 @@ def build(src: Path) -> IntentMap:
                 r.method, r.path, r.handler_file,
                 tuple(best.guards) if best else (), best.handler if best else "",
                 tuple(best.router_level) if best else (),
-                ops.get((r.method, _norm(r.path)))))
+                ops.get((r.method, _norm(r.path))), prefix_resolved=r.prefix_resolved))
         # A declaration the route map did not place (an unrecognised router object)
         # still says something; it is listed with its path as written.
         for rel, decls in by_file.items():
