@@ -2,7 +2,7 @@
 
 Plan: [`PLAN.md`](PLAN.md) · Research: [`RESEARCH.md`](RESEARCH.md) · Panel: [`panel/`](panel/)
 
-**1021 tests collected; 1018 pass, 3 skip.** `quarry doctor · db sync · targets score · ingest · scan · funnel · killed · validate · report · serve`
+**1025 tests collected; 1022 pass, 3 skip.** `quarry doctor · db sync · targets score · ingest · scan · funnel · killed · validate · report · serve`
 
 ---
 

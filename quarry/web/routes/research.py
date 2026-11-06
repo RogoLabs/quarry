@@ -20,9 +20,11 @@ from ..security import row_id
 
 router = RouteTable()
 
-#: Offered in the UI. Ordered so the default selection spans families.
-DEEP_MODELS = ["qwen3-coder:30b", "gpt-oss:20b", "devstral:24b",
-               "qwen3.6:27b", "deepseek-coder-v2:16b", "codestral:22b"]
+#: Offered in the UI. The default selection is the CLI's (see cli.DEFAULT_DEEP_MODELS
+#: for why gpt-oss:20b is no longer in it), so the two can't drift apart.
+DEEP_DEFAULT = ["qwen3-coder:30b", "granite4.2:30b", "devstral:24b"]
+DEEP_MODELS = [*DEEP_DEFAULT, "gpt-oss:20b", "qwen3.6:27b", "deepseek-coder-v2:16b",
+               "codestral:22b"]
 
 
 @router.get("/research", response_class=HTMLResponse)
@@ -31,7 +33,8 @@ def research_index(request: Request):
     with w.opened() as c:
         return w.render(request, "research.html", {
             "runs": q.research_runs(c), "ingested": q.ingested_runs(c),
-            "models": DEEP_MODELS, "family_of": {m: _family(m) for m in DEEP_MODELS},
+            "models": DEEP_MODELS, "default_models": DEEP_DEFAULT,
+            "family_of": {m: _family(m) for m in DEEP_MODELS},
         }, c)
 
 

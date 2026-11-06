@@ -20,8 +20,9 @@ febc240), the opengrep per-tree fallback (ef62ff2), and items 15, 23 and 24 (b70
 On 2026-11-05 the rest of the list followed, each recorded under its item: items 16
 to 22, the open parts of items 2, 3 and 5, P3, P4, and decisions A, B, D and E.
 Decision F (the Layer 2 refuter) is done, K was tried and reverted, and L and item
-25 are done. Open decisions are G to J. The suite collects 1021 and passes 1018, with
-3 skipped because setuptools is absent.
+25 are done. On 2026-11-06 item 27 replaced gpt-oss:20b with granite4.2:30b in the
+default deep-review models. Open decisions are G to J. The suite collects 1025 and
+passes 1022, with 3 skipped because setuptools is absent.
 
 Every item says where its evidence came from:
 
@@ -1194,3 +1195,46 @@ Not fixed: refuse a resume when `live_status` says running, starting or unverifi
 
 Also seen: `/private/tmp/quarry` holds 78 leftover `run-9xxxxx` directories, none
 mounted, the oldest from 2026-11-02, apparently left by tests. Harmless, not cleaned.
+
+### 27. gpt-oss:20b spends the night failing [measured]
+
+Run 7's first deep-review night (research 4, 2026-11-05 20:34 to 06:06) hunted 105 of
+its 1,551 units. gpt-oss:20b failed 20 of its 42 with `done_reason=length`. Each failure
+took roughly 890 to 960 s, 18,590 s in all, out of the night's 34,306 s of hunting, and produced
+nothing. Its 22 finished units produced 9 findings, all quote-verified, from 2 units.
+The failed units sit at positions 0 to 19 of the resume order, so the next night would
+have started by spending about five hours on them again.
+
+Cause: gpt-oss lists `thinking levels low, medium, high` (default medium) in `ollama
+show` and ignores `think: false`. Re-sending one failed unit's prompt with `false`
+returned 19,346 characters of reasoning before a 20-character answer.
+
+Measured 2026-11-06, paired (one prompt per unit, sent at both settings, single call,
+`num_predict` 8,192, no length retry), on 10 of the failed units and the 2 that found
+something:
+
+| `think` | ran out of budget | other error | finished | findings | seconds |
+|---|---|---|---|---|---|
+| `false` (current) | 10 of 12 | 1 (empty reply) | 1 | 0 | 2,530 |
+| `"low"` | 2 of 12 | 0 | 10 | 0 | 1,246 |
+
+`low` stops the stall but finds nothing, including on the two units where gpt-oss
+found 9 quote-verified findings the night before (those took about 490 s each, which
+fits the 32,768-token retry finishing). So `low` was not shipped: it trades the stall
+for a model that hunts nothing. Scratch scripts and raw results were not kept in the
+repo.
+
+**Done 2026-11-06.** granite4.2:30b replaced gpt-oss:20b in the default deep-review
+models (`cli.DEFAULT_DEEP_MODELS`, and the dashboard's default selection, which now
+reads the same list). On run 3, granite hunted 104 units with 1 error and 38 of its 60
+findings quoted real code. gpt-oss stays selectable. Research 4's 495 unfinished
+gpt-oss units (475 pending, 20 failed) were moved to granite in the database, with the
+change and the earlier provenance recorded in `research_runs.note`; the 42 gpt-oss
+units already hunted and their 9 findings stay as they are.
+
+Also seen, not fixed: the refute pass runs after the hunt loop, and the hunt loop runs
+to the deadline while units remain, so a large review shows no verdicts until its last
+night.
+Research 4 had 1,446 units left after night one; at that night's 125 units, that is
+about 12 more nights. Moving off gpt-oss should shorten it; by how much is not yet
+measured.

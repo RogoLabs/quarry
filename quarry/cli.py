@@ -172,7 +172,15 @@ def targets_list(limit: int = typer.Option(25), stratum: str = typer.Option(""))
     con_out.print(t)
 
 
-DEFAULT_DEEP_MODELS = "qwen3-coder:30b,gpt-oss:20b,devstral:24b"
+# granite4.2:30b, not gpt-oss:20b. MEASURED on run 7's first night (2026-11-05):
+# gpt-oss:20b failed 20 of its 42 hunt units with done_reason=length, 18,590 s of the
+# night's 34,306 s, because it ignores `think: false` and reasons at its default level
+# (medium) past both the 8,192-token budget and the 32,768-token retry. Re-sent at
+# `think: "low"`, 10 of 12 of its units finished but none found anything, including
+# the two where it had found 9 quote-verified findings the night before. granite
+# hunted 104 units on run 3 with 1 error, and 38 of its 60 findings quoted real code.
+# Details: docs/IMPROVEMENT-PLAN.md, item 27.
+DEFAULT_DEEP_MODELS = "qwen3-coder:30b,granite4.2:30b,devstral:24b"
 
 
 @app.command()
