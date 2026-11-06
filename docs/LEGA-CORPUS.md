@@ -129,3 +129,74 @@ replay's scoring; all three are scored with the 0639110 scorer (`--rescore`).
   claim, with the same plants found. Temperature 0 and a fixed seed do not make a replay
   repeat exactly, so a one-plant or one-claim move here needs a repeat before it means
   anything.
+
+### Decision F: a refutation has to show its guard, 2026-11-05
+
+All 46 refutations above were `refuted`, and none carried a `counter_quote`. Every guard
+they cited exists in a sibling of the planted code: `remove` calls `secure_filename`,
+the other admin routes carry `auth.requireAdmin`, the other ticket controllers call
+`visibleTicket`. Decision F makes a refutation carry evidence, checked in code
+(`quarry/research/grounding.py`); a refutation that fails the check is asked once more
+with the reason, and if it still fails it is not a vote. A claim that every refuter
+tried and failed to rebut this way is kept for a human as "not rebutted", not as
+"defended" (`ensemble.KEPT_SQL`, shared by the funnel gate, the digest and the run page).
+
+Two versions were measured, two replays each, with the models, digests, Ollama version,
+budget, sampling, lenses and corpus held fixed (`deep-replay-compare` found no fixed
+difference against A, A2 or B). Both ran on 1e56c79 plus uncommitted changes, which the
+results record.
+
+- **F1, quote placement:** `counter_file` and `counter_quote`, with the quote on the
+  claim's path (its definition, one it names, one that names it, or module level; never
+  an import).
+- **F2, guard:** F1 plus `guard`, the expression inside the quote the refuter says stops
+  the attack, and the path rule applied to the guard's own line.
+
+| replay | refuter | route intent | missed at the hunt | missed after refutation | unsupported claims | kept claims, on a plant / not | refutations retried | refute / wall |
+|---|---|---|---|---|---|---|---|---|
+| A | as before | off | 2/7 | 7/7 | 3/15 | 0 / 0 | n/a | 164 / 378 s |
+| A2 | as before | off | 2/7 | 7/7 | 2/15 | 0 / 0 | n/a | 156 / 373 s |
+| B | as before | on | 1/7 | 7/7 | 3/16 | 0 / 0 | n/a | 174 / 427 s |
+| F1 off | quote placement | off | 2/7 | 5/7 | 3/15 | 2 / 0 | 3 of 15 | 151 / 346 s |
+| F1 on | quote placement | on | 1/7 | 6/7 | 2/15 | 1 / 0 | 2 of 15 | 165 / 367 s |
+| F2 off | guard | off | 2/7 | 2/7 (N1, N2) | 4/16 | 6 / 1 | 8 of 16 | 184 / 372 s |
+| F2 on | guard | on | 1/7 | 2/7 (N2, T1) | 1/16 | 5 / 2 | 9 of 16 | 235 / 441 s |
+
+- **F1 changed little, and not for the reason intended.** The path rule rejected none of
+  the 30 refutations. Asked for a quote, the refuters stopped citing siblings and quoted
+  the claimed definition itself, which is always real and always on the path, beside the
+  same invented reason: the head of `download` beside "sanitized by `secure_filename()`",
+  the planted role route beside "requires both `auth.requireUser` and
+  `auth.requireAdmin`". 12 and 13 of 15 refutations grounded, 8 and 10 of them on a quote
+  from inside the claimed definition. The 2 and 1 plants F1 kept were kept because a
+  refuter gave no quote or miscopied one.
+- **F2 kept every plant the hunt found in the intent-off run, and all but T1 with intent
+  on.** Why each kept plant claim's refutation failed: in F2 off, 3 of 6 named a guard
+  that is not in their own quote (`auth.requireAdmin` beside the planted route), 1 named
+  a guard found only on sibling routes, and 2 miscopied the quote; in F2 on, 4 of 5 named
+  a guard not in their quote and 1 miscopied it. A miscopied quote keeps a claim for a
+  sloppy refuter, not a principled reason.
+- **What still kills a plant claim in F2** (1 claim in F2 off, 5 in F2 on), in two kinds,
+  neither of which a location check can see:
+  - a real guard on the path that does not address the claim: `@login_required` cited
+    against path traversal and against a cross-user read;
+  - a guard that guards nothing: the handler name `tickets.history`, a not-found check,
+    `os.path.isfile(path)`. In three of these the refuter's own reason concedes the
+    claim ("does not perform any authorization checks").
+  T1 died in F2 on that way, twice; N3 was kept there only because one of its three
+  claims was not rebutted.
+- **The price:** of the verified claims on no plant, 1 of 5 (F2 off) and 2 of 5 (F2 on)
+  were kept for a human; before F, none were. All three are the shared-note route,
+  where the refuter's real argument (the token is an intended capability) named a guard
+  outside its quote or in `share_note`. The kills of claims on no plant cite guards that
+  are there and do apply (`remove` does call `secure_filename`).
+- **No refuter answered `survives` in any of the 62 refutations across the four runs.**
+  Every kept claim is "not rebutted". The prompt still says "Default to `refuted`. Most
+  findings are wrong."; F changed what a refutation must show, not that mandate.
+- **Cost:** the retry ran on 8 and 9 of 16 refutations in F2, and the refute pass took
+  184 and 235 s against 156 to 174 s before. Measured once each, with the test suite
+  running alongside F1 off and F2 off.
+
+Seven plants and two replays per version: the move from 7/7 to 2/7 is five plants on each
+side, outside the one-plant noise the A/A2 repeat measured, but it is still two runs on a
+synthetic set and says nothing yet about the ten repositories above.

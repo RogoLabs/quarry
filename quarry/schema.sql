@@ -227,4 +227,5 @@ WHERE NOT EXISTS (
 --   v9  deep_verdicts (human verdicts on Layer 2 findings: intended | real | unclear,
 --       append-only, newest row per finding is current), and research_findings.symbol,
 --       .prior_verdict_id, .prior_match (the earlier verdict a later run matched)
+--   v10 research_findings.n_unsupported (refutations whose quoted evidence did not hold)
 -- v4 also redefines live_occurrences above to treat defer and merge like kill.

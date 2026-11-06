@@ -52,6 +52,7 @@
       <span class="pill inert">lens {{ rf.lens|visible }}</span>
       {% if rf.n_survived %}<span class="pill verified">survived ×{{ rf.n_survived }}</span>{% endif %}
       {% if rf.n_refuted %}<span class="pill killed">refuted ×{{ rf.n_refuted }}</span>{% endif %}
+      {% if rf.n_unsupported %}<span class="pill incomplete" title="refuted without evidence on the claim's path">not rebutted ×{{ rf.n_unsupported }}</span>{% endif %}
       {% if rf.refuter_errors %}<span class="pill alarm">{{ rf.refuter_errors }} refuter error</span>{% endif %}
     </div>
     {% if rf.refutations %}
@@ -59,6 +60,8 @@
       {% for x in rf.refutations %}
       <li><span class="mono">{{ (x.model or '?')|visible }}</span>: <b>{{ (x.verdict or '?')|visible }}</b>{% if x.discarded %}
         <span class="pill incomplete">discarded: {{ x.discarded|visible }}</span>{% endif %}
+        {%- if x.grounding is mapping and x.grounding.ok == false %}
+        <span class="pill incomplete">evidence did not hold: {{ (x.grounding.why or '')|visible }}</span>{% endif %}
         {% if x.reason %}{{ x.reason|visible }}{% endif %}</li>
       {% endfor %}
     </ul>

@@ -18,9 +18,9 @@ items 1, 4 and 8 (1f72355), item 2's interim gate and item 3 (97f7175), items 5 
 item 14's Grype entry (decision A), Layer 3 against VulnLookup (e9b8e94, 141a1e0,
 febc240), the opengrep per-tree fallback (ef62ff2), and items 15, 23 and 24 (b707e82).
 On 2026-11-05 the rest of the list followed, each recorded under its item: items 16
-to 22, the open parts of items 2, 3 and 5, P3, P4, and decisions A, B, D and E. Open
-decisions are F to J. The suite collects 972 and passes 969, with 3 skipped because
-setuptools is absent.
+to 22, the open parts of items 2, 3 and 5, P3, P4, and decisions A, B, D and E.
+Decision F (the Layer 2 refuter) is done. Open decisions are G to K. The suite
+collects 1017 and passes 1014, with 3 skipped because setuptools is absent.
 
 Every item says where its evidence came from:
 
@@ -598,12 +598,31 @@ be told from a genuine one.
   path-class's generated-path rule (f926f25). Opengrep versions other than 1.27.1 get a
   health warning (d41e805). The cross-user probe (D) and funnelling the live runs 1
   and 2 (E) were approved; their results are recorded where they are done.
-- **F. The Layer 2 refuter (new, 2026-11-05).** Item 21's replay measured 0 of 7
-  plants surviving refutation, every kill resting on a check the code does not have.
-  Options: make a refutation that names a guard quote that guard (a `counter_quote`
-  that must verify against the source, as claims already must); or let one surviving
-  family keep a finding alive instead of requiring a defence. My default: require a
-  verified counter-quote for any "it is guarded" refutation, then rerun the replay.
+- **F. The Layer 2 refuter. Done 2026-11-05.** Item 21's replay measured
+  0 of 7 plants surviving refutation, every kill resting on a check the code does not
+  have. A `refuted` verdict now has to carry `counter_file`, `counter_quote` and
+  `guard`, and `research/grounding.py` checks that the quote is in the file and the
+  guard's own line is on the claim's path (its definition, one it names, one that names
+  it, or module level; never an import). An ungrounded refutation is asked once more
+  with the reason; a second failure is counted in `n_unsupported` (migration v10), not
+  as a vote or an error. A verified claim every refuter tried and failed to rebut is
+  kept as "not rebutted" by one bar, `ensemble.KEPT_SQL`, which the funnel gate (a
+  `pass` event that says so), the digest, `deep-survivors` and the dashboard share.
+  Measured in docs/LEGA-CORPUS.md: quote placement alone (F1) left 5 and 6 of 7 plants
+  missed, because the refuters quoted the claimed code back with the same invented
+  reason; with the guard (F2), 2 of 7 in both runs (the hunt's misses, plus T1 with
+  intent on), at the price of 1 and 2 of 5 verified claims on no plant kept for a
+  human. Not addressed: a real guard that does not apply (`@login_required` against
+  path traversal) and a "guard" that guards nothing still kill, and no refuter
+  answered `survives` in 62 refutations; the prompt's "Default to `refuted`" mandate is
+  unchanged (decision K). Records written before F carry no grounding and count as
+  they did.
+- **K. The refuter's kill mandate (new, 2026-11-05).** After F, every remaining plant
+  kill on the replay rests on a guard that exists but does not answer the claim, and in
+  three of them the refuter's own reason concedes the claim. Options: drop "Default to
+  `refuted`. Most findings are wrong." and measure again on the replay; or require the
+  `reason` to say how the guard defeats the specific attack, which no check here can
+  verify. My default: drop the mandate line, rerun the same two replays, and compare.
 - **J. Dismissal reach.** Neither "dismiss for this repo" nor "dismiss everywhere"
   touches findings already live in other existing runs; both apply to later funnel
   passes. A repo dismissal can be withdrawn from any run of the target, the corpus
@@ -614,8 +633,14 @@ be told from a genuine one.
 - **H. Disk.** The unused Grype database (3,358 MB) and the backup above can be
   deleted when you are done with them.
 - **I. Re-refute.** `quarry deep --resume <run>` and a funnel pass would give the
-  deferred Layer 2 rows (12, 2 and 302 in runs 1 to 3) their missing verdicts. It runs
-  the local models for a while; not started.
+  deferred Layer 2 rows (12, 2 and 302 in runs 1 to 3) their missing verdicts, under
+  decision F's rule. It runs the local models for a while; not started. It does not
+  revisit kills already made: in the live DB, 620 verified claims in run 1 and 122 in
+  run 2 stand refuted with no defence, and in 515 and 95 of them no refutation carried
+  a counter_quote (read-only query, 2026-11-05). `--resume` does not re-ask a model that
+  answered, and the funnel does not revive a killed row, so applying F to those needs
+  new code (re-ask records that have no `grounding`, and resurrect a gate kill whose
+  vote changed).
 - **B. Gate `quarry validate` now.** Settled: the gate shipped in 97f7175 and is
   removed again now that item 2's rebuild is in.
 
@@ -748,8 +773,8 @@ go-ahead.
 
 Source: Graham Helton and Ryan Basden, *Harness Engineering* workshop book
 (grahamhelton.github.io/harness-engineering-workshop-book). These are the places where
-the book names a failure Quarry still has. Items 15, 23 and 24 are done in the
-working tree and uncommitted; the rest are not started.
+the book names a failure Quarry still had. Items 15 to 24 are all done; each says
+where under its own heading.
 
 ### 15. Opengrep silently skips test, vendor, build and dist trees [measured, DB]
 
@@ -778,7 +803,7 @@ never sees these files and the run page cannot show the gap.
 - Per-file `--timeout 20` and `--max-target-bytes` also drop files. Check whether
   Opengrep reports those in SARIF before trusting a clean coverage number.
 
-**Done 2026-11-05, in the working tree and uncommitted.**
+**Done 2026-11-05 (b707e82).**
 
 - `tools.Opengrep` passes `--x-ignore-semgrepignore-files`. The same invocation now
   also writes `out/opengrep.targets.json` (`--json-output`) and runs `--verbose`
@@ -991,7 +1016,8 @@ does not have (a `secure_filename` call, an `auth.requireAdmin` guard, a
 `reset_password` carries `admin_required`. On this set the refuter as prompted has no
 recall: item 3's asymmetry inside Layer 2. Route intent found one plant the two
 intent-off runs missed, within the noise the repeat measured (3 of 15 claims differed
-between identical runs). The refuter was not changed; see decision F.
+between identical runs). Decision F then changed the refuter: 2 of 7 plants missed after
+refutation in both post-F runs; see decision F and docs/LEGA-CORPUS.md.
 
 ### 22. No text view of a run for an agent [code]
 
@@ -1046,7 +1072,7 @@ results from all 12. Three did not:
   Opengrep-only; the fixture run above is the cheap general form of it and could run
   in `quarry doctor` against each installed tool version.
 
-**Done 2026-11-05, in the working tree and uncommitted.** Rerunning the 12-directory
+**Done 2026-11-05 (b707e82).** Rerunning the 12-directory
 fixture through all five adapters now returns results from all 12 for each tool, and
 Gitleaks also reports a token in a root `package-lock.json` `resolved` URL.
 
@@ -1110,7 +1136,7 @@ Gitleaks also reports a token in a root `package-lock.json` `resolved` URL.
 - Item 15's coverage summary reaches the run page only as health warnings; the
   counts are in the manifest only.
 
-**Done 2026-11-05, in the working tree and uncommitted.** Per-tree runs log to
+**Done 2026-11-05 (b707e82).** Per-tree runs log to
 `logs/opengrep-<tree>.stderr`, and the combined run keeps `logs/opengrep.stderr`.
 `ScanOutcome.nothing_to_scan` is set only by a tool's `nothing_to_scan` check and is
 stored per tool; the run page shows the pill from it. Older manifests without the

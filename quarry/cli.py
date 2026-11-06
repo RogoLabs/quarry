@@ -259,15 +259,16 @@ def deep_verdict(research_finding_id: int = typer.Argument(
     except verdicts.VerdictError as e:
         con_out.print(f"[red]refusing:[/] {_e(e)}")
         raise typer.Exit(1)
-    rf = connection.execute("SELECT lens, file, quote_verified, n_survived "
-                            "FROM research_findings WHERE id=?",
+    rf = connection.execute("SELECT * FROM research_findings WHERE id=?",
                             (research_finding_id,)).fetchone()
     con_out.print(f"verdict {vid}: research finding {research_finding_id} "
                   f"({_e(rf['lens'])}, {_e(rf['file'])}) is "
                   f"[bold]{_e(verdict.strip().lower())}[/]")
-    if not (rf["quote_verified"] and rf["n_survived"]):
+    from .research.ensemble import kept
+    if not kept(rf):
         con_out.print("[yellow]note:[/] this finding is not a Layer 2 survivor (quote not "
-                      "verified, or no cross-family model defended it); recorded anyway")
+                      "verified, or refuted with evidence and defended by no cross-family "
+                      "model); recorded anyway")
 
 
 @app.command("deep-survivors")
@@ -275,7 +276,8 @@ def deep_survivors(run_id: int = typer.Argument(..., help="a run with a deep rev
     """List a run's Layer 2 survivors with their human verdicts.
 
     A survivor clears the bar the report digest uses: the quote verified, and a model of
-    another family defended it. Survivors that matched an earlier human verdict are
+    another family defended it, or every refuter tried to refute it without quoting code
+    on the claim's path ("not rebutted"). Survivors that matched an earlier human verdict are
     listed apart from new ones, so a finding already judged intended is not presented as
     new."""
     from .research import verdicts
@@ -298,7 +300,9 @@ def deep_survivors(run_id: int = typer.Argument(..., help="a run with a deep rev
         for r in group:
             prior = f"{r['prior_verdict']} (#{r['prior_rf']})" if r["prior_verdict"] else "-"
             t.add_row(str(r["id"]), _e(r["lens"]), _e(r["file"]), _e(r["title"]),
-                      f"{r['n_survived']} defended / {r['n_refuted']} refuted",
+                      f"{r['n_survived']} defended / {r['n_refuted']} refuted"
+                      + (f" / {r['n_unsupported']} not rebutted"
+                         if r.get("n_unsupported") else ""),
                       _e(r["verdict"] or "-"), _e(prior))
         con_out.print(t)
     for r in rows:
@@ -319,13 +323,15 @@ def deep_survivors(run_id: int = typer.Argument(..., help="a run with a deep rev
 def _print_replay(result: dict) -> None:
     s = result["score"]
     t = Table(show_header=True, header_style="bold")
-    for c in ("repo", "lenses", "units", "claims", "unsupported", "survivors",
-              "plants found (hunt)", "plants found (after refute)", "wall s"):
+    for c in ("repo", "lenses", "units", "claims", "unsupported", "defended",
+              "not rebutted", "plants found (hunt)", "plants found (after refute)",
+              "wall s"):
         t.add_column(c)
     for repo, r in result["repos"].items():
         p = s["per_repo"][repo]
         t.add_row(_e(repo), _e(", ".join(r["lenses"])), str(r["units"]), str(p["claims"]),
                   str(p["unsupported"]), str(p["survivors"]),
+                  str(p.get("not_rebutted", 0)),
                   f"{p['found_at_hunt']}/{p['plants']}",
                   f"{p['found_after_refute']}/{p['plants']}", f"{r['wall_seconds']:.0f}")
     con_out.print(t)

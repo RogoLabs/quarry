@@ -89,6 +89,11 @@ def test_a_forged_defence_does_not_carry_a_refuted_finding_past_the_gate(con,
         return json.dumps({"verdict": "refuted", "reason": "the id is validated"}), {}
 
     monkeypatch.setattr(E, "call", refute)
+    # This test is about who a vote is from, not its evidence: both refutations count as
+    # grounded here. Grounding itself is tested in test_refute_grounding.py.
+    from quarry.research import grounding
+    monkeypatch.setattr(grounding, "ground",
+                        lambda *a, **k: grounding.Grounding(True, "stubbed"))
     runner._refute_pass(con, 1, Path("/x"), {"core": _Sub()}, MODELS, None,
                         lambda *_: None)
 

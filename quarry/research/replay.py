@@ -30,6 +30,13 @@ runs) and 6 of 7 with it on (one run); the refute pass killed every one of the 4
 across the three, plants included, so 7 of 7 were missed after refutation each time.
 Two identical intent-off runs differed in 3 of 15 claims and in one unsupported claim
 (3/15 against 2/15), so a one-claim or one-plant move on this set is within noise.
+
+MEASURED 2026-11-05 after decision F (a refutation must quote code and name a guard whose
+line is on the claim's path, `research.grounding`), same models, digests and budget: 2 of
+7 plants missed after refutation with route intent off (N1 and N2, both missed at the
+hunt) and 2 of 7 with it on (N2, missed at the hunt, and T1, killed). The price: of the
+verified claims on no plant, 1 of 5 and 2 of 5 were kept for a human as well. Every kept
+claim was "not rebutted"; no refuter answered `survives` in any of the four post-F runs.
 """
 from __future__ import annotations
 
@@ -243,7 +250,10 @@ def score(c: Corpus, findings: list[dict[str, Any]],
 
     `findings` are research_findings rows with `repo` added. A plant is found at the
     hunt when any verified finding matches it, and after refutation when a matching
-    finding also survived (a cross-family model defended it), the bar the digest uses."""
+    finding is kept on the bar the funnel gate and digest use (`ensemble.kept`): a
+    cross-family model defended it, or every refuter tried to refute it without evidence
+    on the claim's path (decision F, "not rebutted"). Each hit says which. A result saved
+    before decision F has no `n_unsupported` and scores as it did."""
     per_plant: dict[str, dict] = {}
     on_plant: set[int] = set()
     for p in c.plants:
@@ -254,13 +264,17 @@ def score(c: Corpus, findings: list[dict[str, Any]],
                 on_plant.add(i)
                 hits.append({"finding": f.get("id"), "model": f.get("model"),
                              "lens": f.get("lens"), "via": how,
-                             "survived": bool(f.get("n_survived"))})
+                             "survived": bool(f.get("n_survived")),
+                             "kept": E.kept(f),
+                             "not_rebutted": E.kept(f) and not f.get("n_survived")})
         per_plant[p.id] = {"repo": p.repo, "lens": p.lens, "kind": p.kind,
                            "found_at_hunt": bool(hits),
-                           "found_after_refute": any(h["survived"] for h in hits),
+                           "found_after_refute": any(h["kept"] for h in hits),
                            "hits": hits}
     verified = [i for i, f in enumerate(findings) if f.get("quote_verified")]
     survivors = [i for i in verified if findings[i].get("n_survived")]
+    not_rebutted = [i for i in verified if E.kept(findings[i])
+                    and not findings[i].get("n_survived")]
     missed_hunt = sorted(k for k, v in per_plant.items() if not v["found_at_hunt"])
     missed_ref = sorted(k for k, v in per_plant.items() if not v["found_after_refute"])
     n = len(c.plants)
@@ -273,6 +287,7 @@ def score(c: Corpus, findings: list[dict[str, Any]],
             "unsupported": sum(1 for f in fr if not f.get("quote_verified")),
             "survivors": sum(1 for f in fr if f.get("quote_verified")
                              and f.get("n_survived")),
+            "not_rebutted": sum(1 for f in fr if E.kept(f) and not f.get("n_survived")),
             "plants": len(plants),
             "found_at_hunt": sum(1 for x in plants if per_plant[x]["found_at_hunt"]),
             "found_after_refute": sum(1 for x in plants
@@ -285,6 +300,7 @@ def score(c: Corpus, findings: list[dict[str, Any]],
         "claims": len(findings),
         "unsupported_claims": _frac(len(findings) - len(verified), len(findings)),
         "survivors": _frac(len(survivors), len(findings)),
+        "not_rebutted": _frac(len(not_rebutted), len(findings)),
         "verified_claims_on_no_plant": _frac(
             sum(1 for i in verified if i not in on_plant), len(verified)),
         "per_repo": per_repo,
@@ -436,7 +452,8 @@ def run(c: Corpus, models: list[str], *, workdir: Path, route_intent: bool = Tru
                              "repo": repo})
     wall = round(time.time() - t0, 1)
     unrefuted = sum(1 for f in findings if f.get("quote_verified")
-                    and not (f.get("n_survived") or f.get("n_refuted")))
+                    and not (f.get("n_survived") or f.get("n_refuted")
+                             or f.get("n_unsupported")))
     complete = not any(r["stats"].get("skipped_deadline") for r in repos.values())
     return {"config": cfg, "repos": repos, "wall_seconds": wall,
             "complete": complete and not (deadline and unrefuted),

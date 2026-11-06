@@ -36,6 +36,7 @@ from typing import Any
 
 from .. import db
 from ..cwe import probe_class
+from ..research.ensemble import KEPT_SQL
 from ..taint import TaintError, safe_relpath, scrub_text
 
 CWE_TITLE = {
@@ -931,7 +932,9 @@ def _render_research_finding(d: dict[str, Any]) -> str:
         f"- Found by: {_code(d['model'])} (family {_code(d['family'])})",
         f"- Severity (model-claimed, not computed): {_text(d['severity'] or 'unstated')}",
         f"- Cross-family vote: {int(d['n_survived'])} defended, "
-        f"{int(d['n_refuted'])} refuted",
+        f"{int(d['n_refuted'])} refuted"
+        + (f", {int(d['n_unsupported'])} refuted without evidence on the claim's path "
+           f"(not rebutted)" if d.get("n_unsupported") else ""),
         "",
         "Claimed code:",
         "",
@@ -960,6 +963,11 @@ def _render_research_finding(d: dict[str, Any]) -> str:
                 continue
             word = _VERDICT_WORD.get(r.get("verdict", ""), _text(r.get("verdict", "?")))
             reason = _text(r.get("reason") or r.get("rationale") or "")
+            g = r.get("grounding") if isinstance(r.get("grounding"), dict) else None
+            if g and g.get("ok") is False:
+                # The why names files and symbols from the target, so it is escaped too.
+                word = (f"refuted, discarded because its evidence did not hold "
+                        f"({_text(str(g.get('why', '')))})")
             lines.append(f"- {_code(r.get('model', '?'))}: {word}."
                          + (f" {reason}" if reason else ""))
     return "\n".join(lines)
@@ -970,23 +978,24 @@ def draft_research_digest(con: sqlite3.Connection, run_id: int, *,
     """Write one Markdown digest of this run's Layer 2 deep-review survivors.
 
     A survivor is a finding whose quote verified against the source and that at least one
-    cross-family model still defended after being told to kill it (`n_survived > 0`). This
-    is the same order the dashboard ranks by, with a conservative bar, so the digest and the
-    dashboard agree.
+    cross-family model still defended after being told to kill it (`n_survived > 0`), or
+    that every refuter tried to kill without quoting code on the claim's path that defeats
+    it (decision F: "not rebutted"). The bar is `ensemble.KEPT_SQL`, shared with the funnel
+    gate and the dashboard, and the order is the dashboard's, defended first.
 
     These are model-found candidates for human triage. They were NOT confirmed dynamically:
     no probe stood the target up and reproduced them, which is what the advisory drafts in
     the same directory record. The digest says so in its own words, because a human may read
     it next to those advisories. Returns None when the run has no such survivor."""
     rows = con.execute(
-        """SELECT rf.id, rf.subsystem, rf.lens, rf.model, rf.family, rf.title,
+        f"""SELECT rf.id, rf.subsystem, rf.lens, rf.model, rf.family, rf.title,
                   rf.file, rf.quote, rf.severity, rf.reasoning,
                   rf.attacker_control, rf.self_critique, rf.refutations,
-                  rf.n_refuted, rf.n_survived, r.target
+                  rf.n_refuted, rf.n_survived, rf.n_unsupported, r.target
              FROM research_findings rf
              JOIN research_runs rr ON rr.id = rf.research_id
              JOIN runs r          ON r.id = rr.run_id
-            WHERE rr.run_id = ? AND rf.quote_verified = 1 AND rf.n_survived > 0
+            WHERE rr.run_id = ? AND {KEPT_SQL}
             ORDER BY rf.quote_verified DESC, rf.n_survived DESC, rf.n_refuted ASC,
                      rf.subsystem, rf.id""", (run_id,)).fetchall()
     if not rows:

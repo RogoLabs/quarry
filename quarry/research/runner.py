@@ -18,6 +18,7 @@ from typing import Callable, Iterable
 
 from .. import db, taint
 from . import ensemble as E
+from . import grounding
 from . import intent as intent_mod
 from . import verdicts
 from .pack import Subsystem, pack_subsystems
@@ -214,8 +215,8 @@ def execute(con: sqlite3.Connection, rid: int, src: Path, *,
     # and funnelled like any other; counted here so the run says how many of its
     # survivors are not new.
     prior = con.execute(
-        """SELECT COUNT(*) AS n,
-                  COALESCE(SUM(rf.quote_verified = 1 AND rf.n_survived > 0), 0) AS kept
+        f"""SELECT COUNT(*) AS n,
+                  COALESCE(SUM({E.KEPT_SQL}), 0) AS kept
              FROM research_findings rf JOIN deep_verdicts dv ON dv.id = rf.prior_verdict_id
             WHERE rf.research_id = ? AND dv.verdict = 'intended'""", (rid,)).fetchone()
     stats["prior_intended"] = prior["n"]
@@ -320,6 +321,31 @@ def _persist(con, rid: int, run_id: int, unit, found: list[E.Finding], src: Path
                  prior["basis"] if prior else None))
 
 
+def _refute_once(m: str, text: str, f: E.Finding, tag: str, declared: str, prior: str,
+                 secrets, src: Path, rejected: dict | None = None) -> dict:
+    """One refuter call, its record, and for a `refuted` the grounding of its evidence.
+    A failed call is a record with verdict "error", as before."""
+    try:
+        raw, _ = E.call(m, E.refute_prompt(text, f, tag, intent=declared, prior=prior,
+                                           rejected=rejected),
+                        E.REFUTE_SCHEMA, num_ctx=NUM_CTX, num_predict=REFUTE_NUM_PREDICT)
+        rec = E.refutation_record(m, raw)
+    except Exception as e:                              # noqa: BLE001
+        return {"model": m, "verdict": "error", "reason": str(e)[:200]}
+    if rec.get("verdict") == "refuted":
+        # Grounded against the clone before redaction, on the model's own text: a
+        # counter_quote naming a committed secret is still a quote of real code.
+        rec["grounding"] = grounding.ground(
+            src, claim_file=f.file, claim_quote=f.quote, claim_line=f.line,
+            counter_quote=str(rec.get("counter_quote") or ""),
+            counter_file=str(rec.get("counter_file") or ""),
+            guard=str(rec.get("guard") or "")).as_record()
+    for k in ("reason", "counter_quote", "guard"):
+        if k in rec:
+            rec[k] = taint.redact_in(str(rec[k]), secrets)
+    return rec
+
+
 def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
                  deadline, progress: Progress, *,
                  intent: intent_mod.IntentMap | None = None) -> dict:
@@ -406,28 +432,29 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
             tag = E.new_tag()
             text = sub.render(tag)
             declared = intent.for_file(f.file) if intent is not None else ""
-            try:
-                raw, _ = E.call(m, E.refute_prompt(text, f, tag, intent=declared,
-                                                   prior=prior_text(r)),
-                                E.REFUTE_SCHEMA, num_ctx=NUM_CTX,
-                                num_predict=REFUTE_NUM_PREDICT)
-                rec = E.refutation_record(m, raw)
-                for k in ("reason", "counter_quote"):
-                    if k in rec:
-                        rec[k] = taint.redact_in(str(rec[k]), secrets)
-            except Exception as e:                      # noqa: BLE001
-                rec = {"model": m, "verdict": "error", "reason": str(e)[:200]}
+            rec = _refute_once(m, text, f, tag, declared, prior_text(r), secrets, src)
+            if E.ungrounded(rec) and f.quote_verified:
+                # One more ask, told why the evidence did not hold (decision F). The model
+                # is already loaded, so this is one call, not a reload. Whatever comes back
+                # is final: a second ungrounded refutation counts as unsupported.
+                retry = _refute_once(m, text, f, tag, declared, prior_text(r), secrets,
+                                     src, rejected=rec)
+                retry["earlier_ungrounded"] = [{k: rec.get(k) for k in (
+                    "reason", "counter_file", "counter_quote", "guard", "grounding")}]
+                rec = retry
             if earlier:
                 rec["earlier_errors"] = earlier[-5:]
             f.refutations.append(rec)
             con.execute(
                 """UPDATE research_findings SET refutations=?, n_refuted=?, n_survived=?,
-                   refuter_errors=? WHERE id=?""",
+                   refuter_errors=?, n_unsupported=? WHERE id=?""",
                 (json.dumps(f.refutations, default=str), f.refuted, f.survived,
-                 f.refuter_errors, r["id"]))
+                 f.refuter_errors, f.unsupported, r["id"]))
     totals = con.execute(
         """SELECT COALESCE(SUM(n_refuted), 0) AS refuted,
-                  COALESCE(SUM(n_survived), 0) AS survived
+                  COALESCE(SUM(n_survived), 0) AS survived,
+                  COALESCE(SUM(n_unsupported), 0) AS unsupported
            FROM research_findings WHERE research_id=?""", (rid,)).fetchone()
     out["refuted"], out["survived"] = totals["refuted"], totals["survived"]
+    out["unsupported"] = totals["unsupported"]
     return out

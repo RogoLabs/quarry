@@ -135,9 +135,26 @@ def test_score_states_every_denominator():
     assert s["survivors"] == {"n": 3, "of": 5}
     assert s["verified_claims_on_no_plant"] == {"n": 1, "of": 4}
     assert s["per_repo"]["notes_app"] == {"claims": 4, "unsupported": 1, "survivors": 2,
-                                          "plants": 4, "found_at_hunt": 2,
-                                          "found_after_refute": 1}
+                                          "not_rebutted": 0, "plants": 4,
+                                          "found_at_hunt": 2, "found_after_refute": 1}
     assert s["per_plant"]["N1"]["hits"][0]["via"] == "symbol"
+
+
+def test_a_plant_no_refuter_could_rebut_is_found_after_refutation():
+    """Decision F: a claim whose only refutation gave no evidence on its path is kept
+    by the funnel gate and the digest, so the replay counts its plant as found, and
+    says it was not rebutted rather than defended. A grounded refutation still kills."""
+    findings = [
+        _f(id=1, symbol="view_note", n_refuted=0, n_unsupported=1),          # N2, kept
+        _f(id=2, file="notes/admin.py", symbol="reset_password", n_refuted=1,
+           n_unsupported=1),                                                # N1, killed
+    ]
+    s = replay.score(CORPUS, findings, FILES)
+    assert s["per_plant"]["N2"]["found_after_refute"] is True
+    assert s["per_plant"]["N2"]["hits"][0]["not_rebutted"] is True
+    assert s["per_plant"]["N1"]["found_after_refute"] is False
+    assert s["survivors"] == {"n": 0, "of": 2}
+    assert s["not_rebutted"] == {"n": 1, "of": 2}
 
 
 def _result(missed_hunt=2, missed_ref=4, unsupported=(3, 20), wall=600.0, **cfg):

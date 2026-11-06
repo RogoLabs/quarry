@@ -39,7 +39,14 @@ Opengrep runs all its rule trees at once, but if the engine crashes on one tree 
 and writes nothing, the scan falls back to one invocation per tree so a single bad
 ruleset cannot zero the others' findings; a crashing tree is recorded, not hidden.
 `quarry deep` adds an optional review pass by local models through Ollama; cloud model
-names are refused.
+names are refused. A model of another family then tries to refute each claim. A
+refutation counts only when it quotes code and names the guard in that quote (the check,
+sanitiser or middleware it says stops the attack), and the guard's line is on the
+claim's own path: its function or route, something that code calls, or a wrapper that
+registers it. A guard quoted from a sibling function does not count. A claim that every
+refuter tried and failed to rebut that way goes to a human marked "not rebutted", not
+"defended". This checks that the cited guard exists where it would have to be, not that
+it stops the attack.
 
 **Validation is conservative by design.** A probe result counts as confirmed only when it
 recorded a baseline request and the result differs from it. It counts as rejected only
@@ -111,7 +118,7 @@ keys and a GitHub token.
   a probe addresses a record that exists. A seed step that fails is recorded on the run,
   not fatal, and the probes stay read-only. `vulnlookup` is the first recipe.
 
-The test suite (972 tests) asserts these against a hostile fixture repo and real
+The test suite (1017 tests) asserts these against a hostile fixture repo and real
 `sandbox-exec`. A profile with no test is a comment.
 
 ## Requirements

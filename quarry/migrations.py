@@ -270,9 +270,23 @@ def _v9_deep_verdicts(con: sqlite3.Connection) -> None:
                 "ON research_findings(lens, file)")
 
 
+def _v10_unsupported_refutations(con: sqlite3.Connection) -> None:
+    """How many cross-family refutations of a finding gave evidence that did not hold.
+
+    Decision F: a `refuted` verdict now has to quote the code that defeats the claim, on
+    the claim's own path (`research.grounding`). One that does not is neither a vote nor
+    a refuter error, and the Layer 2 keep bar (`ensemble.KEPT_SQL`) keeps a verified
+    claim whose every answering refuter tried and failed to ground a refutation. Rows
+    from before v10 read 0, which is what they were: nothing checked their evidence."""
+    cols = {r[1] for r in con.execute("PRAGMA table_info(research_findings)")}
+    if "n_unsupported" not in cols:
+        con.execute("ALTER TABLE research_findings ADD COLUMN "
+                    "n_unsupported INTEGER NOT NULL DEFAULT 0")
+
+
 MIGRATIONS = (_v1_funnel_actions, _v2_rank_view, _v3_issue_membership,
               _v4_repair_views, _v5_targets, _v6_research, _v7_research_liveness,
-              _v8_advisories, _v9_deep_verdicts)
+              _v8_advisories, _v9_deep_verdicts, _v10_unsupported_refutations)
 
 
 def migrate(con: sqlite3.Connection) -> int:

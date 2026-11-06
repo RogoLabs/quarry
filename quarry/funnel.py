@@ -245,7 +245,7 @@ def _load(con: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]:
                   p.tool, p.rule_id, p.n_occurrences, p.n_adjudicated, p.n_confirmed,
                   p.enabled, b.start_line AS blob_start, b.end_line AS blob_end,
                   rf.id AS rf_id, rf.research_id, rf.quote_verified, rf.n_survived,
-                  rf.n_refuted, rf.refutations, rf.refuter_errors,
+                  rf.n_refuted, rf.refutations, rf.refuter_errors, rf.n_unsupported,
                   EXISTS (SELECT 1 FROM live_occurrences l WHERE l.id = o.id) AS live,
                   NOT EXISTS (SELECT 1 FROM funnel_events f WHERE f.occurrence_id = o.id
                                 AND f.stage != 'operator') AS unseen
@@ -265,7 +265,8 @@ def _load(con: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]:
 
 
 def _layer2_decided(r: dict[str, Any]) -> bool:
-    return not r["quote_verified"] or bool(r["n_survived"]) or bool(r["n_refuted"])
+    return (not r["quote_verified"] or bool(r["n_survived"]) or bool(r["n_refuted"])
+            or bool(r.get("n_unsupported")))
 
 
 def _revive_layer2(con, run_id: int, rows: list[dict[str, Any]]) -> None:
@@ -335,7 +336,10 @@ def _layer2_gate(con, run_id, rows, src, prior=()) -> StageResult:
 
     A quote that is not in the source is a deterministic kill. Refutation by every
     cross-family model that answered is a model's judgement, so it is flagged as
-    recall risk. No answer yet is a defer, not evidence, and is revived later."""
+    recall risk; since decision F only a refutation whose quoted evidence is on the
+    claim's path counts. A claim every refuter tried to refute without such evidence
+    passes as "not rebutted" (`ensemble.KEPT_SQL`). No answer yet is a defer, not
+    evidence, and is revived later."""
     sr = StageResult("layer2-gate", heuristic=True)
     for r in rows:
         if r["tool"] != "deep" or r["rf_id"] is None:
@@ -351,6 +355,17 @@ def _layer2_gate(con, run_id, rows, src, prior=()) -> StageResult:
                   f"refuted by all {r['n_refuted']} cross-family model(s) that answered",
                   deterministic=False)
             sr.killed += 1
+        elif r.get("n_unsupported"):
+            # Decision F: every answering refuter said `refuted` and none could quote
+            # code on the claim's path that defeats it, even when asked again. That is
+            # not a rejection, so the claim goes to a human, as a Layer 3 probe that
+            # could not decide does. The event says why, since a plain pass would look
+            # like a defence.
+            db.funnel(con, run_id, occurrence_id=r["id"], stage=sr.stage, action="pass",
+                      reason=f"not rebutted: {r['n_unsupported']} cross-family "
+                             f"refutation(s) gave no evidence on the claim's path",
+                      deterministic=False)
+            sr.passed += 1
         elif (r["refutations"] or "[]") == "[]":
             _defer(con, run_id, r, sr.stage,
                    "awaiting cross-family refutation: no refuter has answered yet")

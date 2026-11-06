@@ -305,15 +305,28 @@ def refutation_record(model: str, raw: str) -> dict:
     return rec
 
 
+#: `counter_file`, `counter_quote` and `guard` are optional in the grammar (a `survives`
+#: has nothing to quote) and required of a `refuted` in code: `grounding.ground` checks them, and a
+#: refutation they do not ground is not a vote (decision F).
 REFUTE_SCHEMA = {
     "type": "object",
     "properties": {
         "verdict": {"type": "string", "enum": ["refuted", "survives", "uncertain"]},
         "reason": {"type": "string", "maxLength": 600},
+        "counter_file": {"type": "string", "maxLength": 200},
         "counter_quote": {"type": "string", "maxLength": 300},
+        "guard": {"type": "string", "maxLength": 200},
     },
     "required": ["verdict", "reason"],
 }
+
+
+def ungrounded(r: dict[str, Any]) -> bool:
+    """A `refuted` record whose counter_quote the refute pass checked and found not to
+    ground it. Records written before grounding existed carry no `grounding` and count
+    as they did when they were written."""
+    g = r.get("grounding")
+    return r.get("verdict") == "refuted" and isinstance(g, dict) and g.get("ok") is False
 
 
 # ---------------------------------------------------------------- runtime
@@ -363,33 +376,69 @@ class Finding:
         no model name at all, carries a `model` key the answer forged (rows written
         before refutation_record let it), and counting it let a same-family `survives`
         defend a finding the real refuters refuted. It is a refuter error too.
+
+        A `refuted` whose counter_quote did not ground it (decision F, `grounding`) is
+        not a vote either, and not an error: it is counted in `unsupported`, because a
+        refuter that tried to kill the claim and could not point at the code that
+        defeats it is a different fact from a refuter that failed to answer.
         """
         out = []
-        for r in self.refutations:
-            m = r.get("model") if isinstance(r, dict) else None
-            if not isinstance(m, str) or family(m) == family(self.model):
-                continue
+        for r in self._cross_family():
             # Only an answer is a vote. A call that failed is stored as verdict "error";
             # left in here it counted as neither refuted nor survived and also not as a
             # refuter error, so the gate could say "0 refuter error(s)" for a finding
             # every refuter had failed on (IMPROVEMENT-PLAN item 5).
             if r.get("verdict") not in ("refuted", "survives"):
                 continue
+            if self.quote_verified and ungrounded(r):
+                continue
             reason = (r.get("reason") or "").lower()
             denies_existence = any(k in reason for k in (
                 "not found in", "does not exist", "no such code", "cannot find",
                 "is not present", "not in the provided"))
             if self.quote_verified and denies_existence:
-                r = {**r, "discarded": "quote verified against source; refuter denied "
-                                       "its existence"}
-                out.append(r) if False else None
                 continue
             out.append(r)
         return out
 
+    def _cross_family(self) -> list[dict[str, Any]]:
+        return [r for r in self.refutations
+                if isinstance(r, dict) and isinstance(r.get("model"), str)
+                and family(r["model"]) != family(self.model)]
+
+    @property
+    def unsupported(self) -> int:
+        """Cross-family refutations of a verified claim whose evidence did not ground
+        them: no counter_quote, one not in the code, or one found only off the claim's
+        path. A claim every answering refuter tried and failed to rebut this way is
+        kept for a human (`KEPT_SQL`), as Layer 3 keeps a probe it could not decide."""
+        if not self.quote_verified:
+            return 0
+        return sum(1 for r in self._cross_family() if ungrounded(r))
+
     @property
     def refuter_errors(self) -> int:
-        return len(self.refutations) - len(self.valid_refutations)
+        return len(self.refutations) - len(self.valid_refutations) - self.unsupported
+
+
+#: The Layer 2 keep bar, in SQL over `research_findings rf`, so the funnel gate, the
+#: digest, the survivors list and the run page agree. A finding is kept when its quote
+#: verified and either a cross-family model defended it, or no grounded refutation exists
+#: and at least one refuter tried to refute it without grounds (decision F).
+KEPT_SQL = ("(rf.quote_verified = 1 AND (rf.n_survived > 0 OR "
+            "(rf.n_refuted = 0 AND COALESCE(rf.n_unsupported, 0) > 0)))")
+
+
+def kept(r: Any) -> bool:
+    """KEPT_SQL for one row (a mapping with the research_findings columns). A row from
+    before v10 has no n_unsupported and is read as 0, which is what it was."""
+    def get(k: str) -> int:
+        try:
+            return int(r[k] or 0)
+        except (KeyError, IndexError):
+            return 0
+    return bool(get("quote_verified")) and (
+        get("n_survived") > 0 or (get("n_refuted") == 0 and get("n_unsupported") > 0))
 
 
 def _recover(d: dict) -> str:
@@ -643,6 +692,20 @@ construct is real but confers no attacker benefit; or the claim is about test/fi
 Return `survives` ONLY if you tried to kill it and could not. Return `uncertain` only when a \
 specific named fact would settle it and it is genuinely not in the source.
 
+A `refuted` answer MUST carry evidence, checked automatically against the source:
+- `counter_file`: the file the evidence is in.
+- `counter_quote`: a span copied character-for-character from that file (at least one full \
+line) containing the code that defeats the claim.
+- `guard`: the exact expression inside `counter_quote` that stops the attack: the check, the \
+sanitiser call, the decorator or middleware name, the ownership condition, or the place the \
+input really comes from.
+The guard's line must be on the claim's own code path: inside the function or route the \
+claim quotes, in a function that code calls, in a route line or wrapper that registers it, \
+or at module level. A check in a sibling function or on another route does not protect this \
+one, and an import line is not a check. Quoting the claimed code back without the guard in \
+it is not evidence. A refutation without such evidence is discarded. If you cannot quote \
+the guard, the claim was not refuted.
+
 Default to `refuted`. Most findings are wrong."""
 
 
@@ -688,13 +751,29 @@ def hunt_prompt(pack_text: str, lens: Lens, manifest: str, tag: str = "",
 
 
 def refute_prompt(pack_text: str, f: Finding, tag: str = "", intent: str = "",
-                  prior: str = "") -> str:
+                  prior: str = "", rejected: dict[str, Any] | None = None) -> str:
     """`intent` is the declared access of the routes in the claim's file (or beside
     it); `prior` is a matching human verdict of `intended`. Either empty leaves that
-    section out, and both empty is the prompt as it was before item 20."""
+    section out, and both empty is the prompt as it was before item 20.
+
+    `rejected` is this refuter's previous answer when its evidence did not ground it,
+    with the grounding check's reason under `grounding.why`; the refuter is asked once
+    more, told why (decision F)."""
     tag = tag or new_tag()
     prior_section = (f"===== {tag} PRIOR HUMAN VERDICT =====\n{prior}\n\n"
                      if prior else "")
+    retry_section = ""
+    if rejected:
+        why = (rejected.get("grounding") or {}).get("why", "")
+        retry_section = (
+            f"===== {tag} YOUR PREVIOUS ANSWER WAS NOT ACCEPTED =====\n"
+            f"You answered `refuted` with this reason: {rejected.get('reason', '')}\n"
+            f"Evidence you gave: counter_file={rejected.get('counter_file', '')!r} "
+            f"counter_quote={rejected.get('counter_quote', '')!r} "
+            f"guard={rejected.get('guard', '')!r}\n"
+            f"It was discarded because: {why}\n"
+            f"Answer again. Quote the code on this claim's path that defeats it and name "
+            f"the guard in it, or, if there is none, return `survives` or `uncertain`.\n\n")
     return (f"{REFUTE_SYSTEM}\n\n{_tag_rule(tag)}\n\n"
             f"===== {tag} REPOSITORY =====\n{pack_text}\n\n"
             f"{_intent_section(intent, tag)}"
@@ -703,4 +782,5 @@ def refute_prompt(pack_text: str, f: Finding, tag: str = "", intent: str = "",
             f"Quoted code: {f.quote}\n"
             f"Attacker control claimed: {f.attacker_control}\n\n"
             f"{prior_section}"
+            f"{retry_section}"
             f"Is this true as stated? Return JSON.")

@@ -22,6 +22,7 @@ import sqlite3
 from typing import Any, Iterable
 
 from .. import taint
+from . import ensemble as E
 from .ensemble import MIN_QUOTE_CHARS
 
 VERDICTS = ("intended", "real", "unclear")
@@ -149,12 +150,13 @@ def prior_context(p: dict[str, Any], basis: str) -> str:
 
 
 def survivors(con: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]:
-    """A run's Layer 2 survivors on the digest's bar (quote verified, defended by at
-    least one cross-family model), each with its own newest human verdict and the prior
-    verdict it was matched to, if any."""
+    """A run's Layer 2 survivors on the digest's bar (`ensemble.KEPT_SQL`: quote
+    verified, and defended by at least one cross-family model or not rebutted by any),
+    each with its own newest human verdict and the prior verdict it was matched to, if
+    any. Defended findings sort before ones that were only not rebutted."""
     rows = con.execute(
-        """SELECT rf.id, rf.research_id, rf.lens, rf.file, rf.title, rf.model, rf.family,
-                  rf.n_survived, rf.n_refuted, rf.symbol, rf.prior_match,
+        f"""SELECT rf.id, rf.research_id, rf.lens, rf.file, rf.title, rf.model, rf.family,
+                  rf.n_survived, rf.n_refuted, rf.n_unsupported, rf.symbol, rf.prior_match,
                   own.verdict AS verdict, own.note AS note, own.created_at AS verdict_at,
                   own.actor AS verdict_by,
                   pv.verdict AS prior_verdict, pv.note AS prior_note,
@@ -164,7 +166,7 @@ def survivors(con: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]:
              LEFT JOIN deep_verdicts own ON own.id = (
                   SELECT MAX(d.id) FROM deep_verdicts d WHERE d.research_finding_id = rf.id)
              LEFT JOIN deep_verdicts pv ON pv.id = rf.prior_verdict_id
-            WHERE rr.run_id = ? AND rf.quote_verified = 1 AND rf.n_survived > 0
+            WHERE rr.run_id = ? AND {E.KEPT_SQL}
             ORDER BY rf.n_survived DESC, rf.n_refuted ASC, rf.subsystem, rf.id""",
         (run_id,)).fetchall()
     return [dict(r) for r in rows]

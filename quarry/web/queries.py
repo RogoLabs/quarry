@@ -196,7 +196,7 @@ def research_finding(con: sqlite3.Connection, oid: int) -> dict[str, Any] | None
     r = con.execute(
         """SELECT rf.id, rf.research_id, rf.lens, rf.model, rf.family, rf.title,
                   rf.quote_verified, rf.n_refuted, rf.n_survived, rf.refuter_errors,
-                  rf.refutations, rr.run_id
+                  rf.n_unsupported, rf.refutations, rr.run_id
            FROM research_findings rf JOIN research_runs rr ON rr.id = rf.research_id
            WHERE rf.occurrence_id = ? ORDER BY rf.id LIMIT 1""", (oid,)).fetchone()
     if r is None:
