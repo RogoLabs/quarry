@@ -28,8 +28,11 @@ subsystem so Ollama reuses its cached prefix), the open parts of items 3, 12, 16
 20, 22, 24 and 25, the P3 race test and the P4 side findings. Decision I is superseded
 by the reset. The hard reset ran at 11:25 (archive `20261106-112542`) and the test run
 after it from 11:26 to 13:43, every step exit 0; item 29 records what it found, the
-four bugs fixed after it, and `REFUTE_SHARE` raised to 0.5. Open: decision J (its default is taken) and decision N under
-item 29. The suite collects 1189 and passes 1186, with 3 skipped because
+four bugs fixed after it, and `REFUTE_SHARE` raised to 0.5. At 15:44 a second reset
+archived the test run's data (archive `20261106-154449`) so the real work starts from an
+empty database on e6239cf; Layer 1 ran on the three targets, and at 16:06 the launchd
+job started the deep review of VulnLookup (run 3), recorded at the end of item 29.
+Open: decision J (its default is taken) and decision N under item 29. The suite collects 1189 and passes 1186, with 3 skipped because
 setuptools is absent.
 
 Every item says where its evidence came from:
@@ -1852,7 +1855,9 @@ one night's 162 findings, two refuters each, need about 10 hours of refuting.
 
 `scripts/test-run.sh` on 602cf4f, 2026-11-06 11:26 to 13:43, after the hard reset at
 11:25. Every step exited 0. Logs, the replay result and each run's `status --json` are in
-`<data root>/test-run/20261106-112613/`; the earlier data is in `archive/20261106-112542/`.
+`<data root>/archive/20261106-154449/test-run/20261106-112613/`, with the test run's
+database, since the clean start below archived them; the data from before the test run
+is in `archive/20261106-112542/`.
 
 - **Replay** (350 s): the hunt missed 1 of 7 plants (N2) and refutation lost none of the
   other 6; all 8 claims that hit a plant were kept, and 2 of the 5 claims on no plant.
@@ -1938,3 +1943,30 @@ Not covered by this test run: a deep review of VulnLookup with the authorization
 so the cross-user probe has candidates (scanner findings carry no authorization CWE);
 a whole night under the new refute order; and the two `intended` verdicts from G,
 which are in the archive and so do not carry forward to the new cve-services run.
+
+**Clean start, 2026-11-06 15:44.** The test run's database was built on 602cf4f, before
+the four fixes, and held the 16 false confirmations (held, but still rows), so
+`scripts/hard-reset.sh` ran again (archive `20261106-154449`) and Layer 1 ran on
+e6239cf into an empty database, in the same order, so VulnLookup is run 3 again. Logs are
+in `<data root>/logs/clean-start-20261106-154511/`; every step exited 0.
+
+- cve-services 1,799 occurrences, 365 after the funnel; ML-Gateway 331, then 40; both as
+  in the test run. VulnLookup 6,235, then 902: three more occurrences than the test run
+  and the same 902, not looked into.
+- VulnLookup's scan took 1,153 s against 427 s in the test run. The combined opengrep run
+  was killed this time (its engine's message names memory, with 88% of 64 GiB free when
+  checked afterwards), where four hours earlier it finished in one run. The per-tree
+  fallback recovered it: the generic tree crashed `opengrep-core` and was split into 16
+  runs, with `storage/kvrocks.conf` scanned alone at `-j 1`, and the javascript and
+  typescript trees outran their slice and were rerun. Both runs cloned VulnLookup at
+  7d77b9b and nothing in Layer 1 changed between 602cf4f and e6239cf, so the combined
+  run's crash is not deterministic; the fallback is what makes it cost time rather than
+  findings. Whether the per-tree path explains the three extra occurrences is not checked.
+- The nightly job was enabled again (it had also been marked disabled in launchd), its
+  `RUN=` set to 3, its runtime synced to e6239cf, and a preflight through launchd passed.
+  Started at 16:06 rather than 21:00 for the extra hours: research 1, 46 subsystems × 12
+  lenses × 3 models = 1,656 units, `broken-authz-idor` among the lenses, deadline 06:00.
+  At ML-Gateway's rate (4,766 s of hunting for 168 units, about 28 s a unit) the hunt
+  alone needs about 13 hours, so the review will take more than one night; the 21:00 job
+  resumes it. Validate on VulnLookup waits for the review, so the cross-user probe has
+  authorization findings to test.
