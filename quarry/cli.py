@@ -874,7 +874,9 @@ def run_status(con, run_id: int) -> dict | None:
         stages.append(row)
     return {
         "run": header,
-        "scanners": [{**t, "outcome": q.scan_outcome(t)} for t in run["scan_tools"]],
+        # Each row's `outcome` is queries.scan_outcome, set by run_summary, the same
+        # field the run page's pill reads.
+        "scanners": run["scan_tools"],
         "health": run["health"],
         "funnel": stages,
         "verdicts": {"by_verdict": q.verdict_counts(con, run_id),

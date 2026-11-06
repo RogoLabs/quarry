@@ -80,6 +80,18 @@
 {%- else %}<span class="pill unmeasured">{{ status }}</span>{% endif %}
 {%- endmacro %}
 
+{#  A Layer 1 scanner's outcome, as `queries.scan_outcome` decides it: the word
+    `quarry status` prints, so the run page and the terminal cannot disagree. The page
+    used to decide it again in its own if/elif chain. `ok` reads "ran" here, as it
+    always has on this page. #}
+{% macro scan_pill(outcome) -%}
+{% if outcome == 'skipped' %}<span class="pill incomplete">skipped</span>
+{%- elif outcome == 'failed' %}<span class="pill alarm">failed</span>
+{%- elif outcome == 'nothing to scan' %}<span class="pill inert">nothing to scan</span>
+{%- elif outcome == 'ok' %}<span class="pill inert">ran</span>
+{%- else %}<span class="pill unmeasured">{{ outcome }}</span>{% endif %}
+{%- endmacro %}
+
 {#  A stage's state, for the terminal-stage tables. Same roles as everywhere else:
     done is verified, behind is incomplete, failed is an alarm, not run is unmeasured. #}
 {% macro stage_pill(status) -%}

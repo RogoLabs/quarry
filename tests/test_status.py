@@ -205,3 +205,65 @@ def test_verdict_counts_by_seat_count_latest_slots_only(seeded, tmp_path):
     assert q.verdict_counts_by_seat(con, 2) == {}
     by_seat = q.verdict_counts_by_seat(con, 1)
     assert sum(s["total"] for s in by_seat.values()) == q.verdict_counts(con, 1)["total"]
+
+
+# ------------------------------------------- the run page reads the same outcome
+
+#: Scanner rows covering every branch of the outcome order, including the shapes an
+#: older manifest or a partial write leaves: no `ok` key, `ok` of None, a skip that
+#: also says ok, and a failure that also says nothing to scan.
+OUTCOME_CASES = {
+    "skip-and-ok": {"ok": True, "skipped": "odd: skipped and ok", "records": 0},
+    "skip-not-ok": {"ok": False, "skipped": "x not installed", "records": 0},
+    "failed": {"ok": False, "skipped": "", "error": "timed out", "records": 0},
+    "failed-empty": {"ok": False, "skipped": "", "nothing_to_scan": True, "records": 0},
+    "no-ok-key": {"skipped": "", "records": 3},
+    "ok-none": {"ok": None, "skipped": None, "records": 0},
+    "nothing": {"ok": True, "skipped": "", "nothing_to_scan": True, "records": 0,
+                "note": "no manifests"},
+    "legacy-note": {"ok": True, "skipped": "", "records": 0, "note": "no manifests"},
+    "note-and-records": {"ok": True, "skipped": "", "records": 5, "note": "recovered"},
+    "ran": {"ok": True, "skipped": "", "records": 3},
+}
+
+#: What the run page's pill says for each `scan_outcome` word.
+PILL_WORD = {"skipped": "skipped", "failed": "failed", "nothing to scan": "nothing to scan",
+             "ok": "ran"}
+
+
+def _pills(page: str) -> dict[str, str]:
+    table = page.split("Outcome of each Layer 1 scanner", 1)[1].split("</table>", 1)[0]
+    return {t: re.search(r'<span class="pill [a-z]+">([^<]+)</span>',
+                         table.split(f'<td class="mono sm">{t}</td>', 1)[1]).group(1)
+            for t in OUTCOME_CASES}
+
+
+def test_the_run_page_and_status_give_every_scanner_the_same_outcome(seeded):
+    """Item 22: run.html kept its own if/elif copy of the outcome order, so a change
+    to `queries.scan_outcome` would have changed `quarry status` and not the page."""
+    client, con = seeded
+    db.update_manifest(con, 1, lambda m: m.setdefault("scan", {}).setdefault("tools", {})
+                       .update(OUTCOME_CASES))
+    _, out = _status(1, "--json")
+    status = {t["tool"]: t["outcome"] for t in json.loads(out)["scanners"]}
+    assert status == {"skip-and-ok": "skipped", "skip-not-ok": "skipped",
+                      "failed": "failed", "failed-empty": "failed", "no-ok-key": "failed",
+                      "ok-none": "failed", "nothing": "nothing to scan",
+                      "legacy-note": "nothing to scan", "note-and-records": "ok",
+                      "ran": "ok"}
+    assert _pills(client.get("/runs/1").text) == {t: PILL_WORD[o] for t, o in status.items()}
+
+
+def test_the_run_page_has_no_outcome_order_of_its_own(seeded, monkeypatch):
+    """Whatever `scan_outcome` decides is what the page shows; the template does not
+    decide it again."""
+    client, con = seeded
+    db.update_manifest(con, 1, lambda m: m.setdefault("scan", {}).setdefault("tools", {})
+                       .update(OUTCOME_CASES))
+    monkeypatch.setattr(q, "scan_outcome", lambda t: "nothing to scan" if t.get("ok")
+                        else "skipped")
+    pills = _pills(client.get("/runs/1").text)
+    assert pills["ran"] == "nothing to scan" and pills["failed"] == "skipped"
+    assert next(s for s in q.run_stages(con, q.run_summary(con, 1))
+                if s["stage"] == "Scan")["detail"].startswith(
+        f"{len(OUTCOME_CASES)} scanner(s) recorded, 0 failed, 5 skipped")

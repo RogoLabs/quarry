@@ -112,10 +112,7 @@
       {% for t in run.scan_tools %}
         <tr>
           <td class="mono sm">{{ t.tool }}</td>
-          <td>{% if t.skipped %}<span class="pill incomplete">skipped</span>
-            {% elif not t.ok %}<span class="pill alarm">failed</span>
-            {% elif t.nothing_to_scan %}<span class="pill inert">nothing to scan</span>
-            {% else %}<span class="pill inert">ran</span>{% endif %}</td>
+          <td>{{ m.scan_pill(t.outcome) }}</td>
           <td class="n">{{ t.records }}</td>
           <td class="n">{% if t.lined %}{{ t.captured }}/{{ t.lined }}{% else %}·{% endif %}</td>
           <td class="n">{{ t.seconds }}</td>

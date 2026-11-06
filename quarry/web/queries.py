@@ -644,7 +644,9 @@ def run_summary(con: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
         # "nothing to scan", which mislabelled opengrep's per-tree recovery. A note
         # with zero records is the closest reading of those older rows.
         t.setdefault("nothing_to_scan", bool(t.get("note")) and not t.get("records"))
-    d["health"] = [{"source": src, "tool": tool, "message": msg}
+        # Decided once, here, for the run page and `quarry status` alike.
+        t["outcome"] = scan_outcome(t)
+    d["health"] =[{"source": src, "tool": tool, "message": msg}
                    for src, by_tool in sorted((m.get("health") or {}).items())
                    if isinstance(by_tool, dict)
                    for tool, msgs in sorted(by_tool.items()) for msg in (msgs or [])]
@@ -665,8 +667,10 @@ def run_summary(con: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
 
 
 def scan_outcome(t: dict[str, Any]) -> str:
-    """One word for a `run_summary()["scan_tools"]` row, in run.html's pill order:
-    a skip wins over a failure, and a failure over nothing-to-scan."""
+    """One word for a `run_summary()["scan_tools"]` row, which `run_summary` stores as
+    the row's `outcome`: a skip wins over a failure, and a failure over
+    nothing-to-scan. The run page's pill (`_macros.scan_pill`) and `quarry status`
+    both read that, so neither keeps a copy of this order."""
     if t.get("skipped"):
         return "skipped"
     if not t.get("ok"):
@@ -1386,8 +1390,8 @@ def run_stages(con: sqlite3.Connection, run: dict[str, Any],
         "SELECT COUNT(*) c FROM occurrences o JOIN producers p ON p.id = o.producer_id "
         "WHERE o.run_id=? AND p.tool != 'deep'", (rid,)).fetchone()["c"]
     if tools:
-        failed = sum(1 for t in tools if not t.get("ok") and not t.get("skipped"))
-        skipped = sum(1 for t in tools if t.get("skipped"))
+        outcomes = [scan_outcome(t) for t in tools]
+        failed, skipped = outcomes.count("failed"), outcomes.count("skipped")
         status = "failed" if failed else "done"
         detail = (f"{len(tools)} scanner(s) recorded, {failed} failed, {skipped} skipped; "
                   f"{n_scan} occurrence(s)")

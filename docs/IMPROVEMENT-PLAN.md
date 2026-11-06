@@ -1076,9 +1076,21 @@ run header, each scanner's outcome and coverage counts, health warnings by sourc
 funnel stage with in, kill, defer, merge, boost, restored and out, verdicts by state and
 seat, and advisories. Text from a target or tool is scrubbed of control and bidi
 characters and flattened to one line. Against a read-only backup of the live database,
-run 3 printed 12 stages from 6,297 in to 765 out with drift 0. Not done: `run.html`
-keeps its own copy of the outcome logic, and status leaves out the quarantine and egress
-tables.
+run 3 printed 12 stages from 6,297 in to 765 out with drift 0. Not done: status leaves
+out the quarantine and egress tables.
+
+**Done 2026-11-06, one outcome rule.** `run_summary` stores `queries.scan_outcome` on
+each scanner row as `outcome`; the run page's pill (`_macros.scan_pill`) and `quarry
+status` both read that field, and the page's own if/elif copy is gone, as is a third
+copy in the terminal-stage table's failed and skipped counts (`run_stages`). The page
+still says "ran" where status says `ok`. Checked by rendering `/runs/<id>` before and
+after: on a fixture run with 11 scanner rows covering every branch (a skip that also
+says ok, a failure that also says nothing to scan, no `ok` key, `ok` of None, a legacy
+note), the pages differ only in whitespace inside the pill cell and in the fixture's
+own start time; on a copy of the live database, all 7 run pages are byte-identical.
+The old copy was not wrong on any of those rows. Two tests in `tests/test_status.py`:
+the page and `status --json` agree on 10 such rows, and a page rendered with
+`scan_outcome` replaced follows the replacement, which fails without the change.
 
 ### 23. Bandit, Checkov and Gitleaks also skip trees without saying so [measured]
 
