@@ -532,9 +532,9 @@ records the deep-review digest in the run manifest and the advisories pages list
 Resume claims the research run in the database before it spawns. A Setup page and a
 per-run terminal table give each CLI-only stage a state and a command to copy, with no
 buttons that run anything. Item 9's four defects are fixed. After all six branches were
-merged, 15 pages rendered 200 against a copy of the post-funnel live DB. Not done: a
-parallel race test for the resume claim. (`quarry deep --resume` from a terminal takes
-the claim since item 26.) Open: decision J below.
+merged, 15 pages rendered 200 against a copy of the post-funnel live DB. (`quarry deep
+--resume` from a terminal takes the claim since item 26, and the parallel race test for
+the claim was added on 2026-11-06; see item 26.) Open: decision J below.
 
 ---
 
@@ -1219,8 +1219,23 @@ refused: `--resume` of a research run that belongs to a different ingest run tha
 one named, which would check its units against the wrong source tree and which
 `live_status` could not see, since it matches the worker's command line on the ingest
 run. 20 tests in `tests/test_resume_guard.py`; with the refusal disabled, 9 of them
-fail. Not done: a test with two real worker processes racing (the serialisation rests
-on SQLite's `BEGIN IMMEDIATE`; the tests take one claim after the other).
+fail. Those tests take one claim after the other; the race test below runs two at once.
+
+**Done 2026-11-06, the race test.** `test_two_processes_resuming_at_once_get_one_claim`
+in `tests/test_resume_guard.py` starts two Python processes whose command lines end
+`quarry.cli deep 1`, so `ps` shows each as run 1's worker. Each opens its own connection
+to one SQLite file and, in each of 30 rounds, waits on that round's barrier file and
+calls `runner.hold` the moment it appears; the test resets the research run to
+`stopped` between rounds, and both processes stay alive throughout, since a claimant
+that exited would rightly read as `died`. Every round must end with exactly one claim,
+the database naming the claimant's pid, and the other process refused because that pid
+holds the run. In 5 runs of the test, 29 or 30 of the 30 rounds had both processes
+inside `hold` at once (the loser entered before the winner left); the test requires at
+least half. One run at 500 rounds also passed. A run took under 2.5 seconds. With
+`hold`'s transaction replaced by no transaction, both processes claimed in round 0, so
+the test sees the race it guards against. It found no race, and `hold` is unchanged.
+Not covered: the dashboard's Resume racing a terminal resume. They claim through
+different code, both in a `BEGIN IMMEDIATE` transaction.
 
 Also seen: `/private/tmp/quarry` holds 78 leftover `run-9xxxxx` directories, none
 mounted, the oldest from 2026-11-02, apparently left by tests. Harmless, not cleaned.
