@@ -800,6 +800,15 @@ def _deep_argv(argv: list[str], pid: Any, run_id: Any) -> tuple[bool, str]:
 #: overwrites it with `running` when it claims the run itself (runner._claim).
 RESUMING = "resuming"
 
+#: Live statuses that mean a worker holds the run or is about to: neither Resume (the
+#: dashboard) nor `quarry deep --resume` (runner.hold) may start another one.
+LIVE_STATUSES = ("running", "unverified", "starting")
+
+#: Set by the dashboard on the worker it spawns for a resume it has claimed, to the
+#: research id. It is how runner.hold tells that worker, which may fill the claim,
+#: from any other process, which must wait for it.
+RESUME_CLAIM_ENV = "QUARRY_RESUME_CLAIM"
+
 #: How long a claimed resume may go without a worker pid before the claim counts as
 #: failed and the run can be resumed again. The pid is recorded right after the
 #: spawn returns, so this only matters when the spawn itself went wrong.

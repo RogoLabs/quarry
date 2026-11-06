@@ -220,7 +220,15 @@ def deep(run_id: int = typer.Argument(..., help="an ingested run"),
         deadline = d + timedelta(days=1) if d <= datetime.now() else d
 
     if resume:
+        import os
+        from .web.queries import RESUME_CLAIM_ENV
         rid = resume
+        try:
+            runner.hold(connection, rid, run_id,
+                        dashboard_claim=os.environ.get(RESUME_CLAIM_ENV) == str(rid))
+        except runner.ResumeRefused as e:
+            con_out.print(f"[red]refusing to resume:[/] {_e(e)}")
+            raise typer.Exit(1)
         con_out.print(f"resuming research run {rid}")
     else:
         rid, subs, lenses = runner.plan(connection, run_id, src, models=mods)

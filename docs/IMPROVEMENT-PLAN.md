@@ -21,9 +21,9 @@ On 2026-11-05 the rest of the list followed, each recorded under its item: items
 to 22, the open parts of items 2, 3 and 5, P3, P4, and decisions A, B, D and E.
 Decision F (the Layer 2 refuter) is done, K was tried and reverted, and L and item
 25 are done. On 2026-11-06 item 27 replaced gpt-oss:20b with granite4.2:30b in the
-default deep-review models, and G and H were done. Open decisions are I and J. The
-suite collects 1025 and
-passes 1022, with 3 skipped because setuptools is absent.
+default deep-review models, G and H were done, and item 26 was fixed. Open decisions
+are I and J. The suite collects 1045 and passes 1042, with 3 skipped because setuptools
+is absent.
 
 Every item says where its evidence came from:
 
@@ -533,8 +533,8 @@ Resume claims the research run in the database before it spawns. A Setup page an
 per-run terminal table give each CLI-only stage a state and a command to copy, with no
 buttons that run anything. Item 9's four defects are fixed. After all six branches were
 merged, 15 pages rendered 200 against a copy of the post-funnel live DB. Not done: a
-parallel race test for the resume claim; `quarry deep --resume` from a terminal does
-not take the claim. Open: decision J below.
+parallel race test for the resume claim. (`quarry deep --resume` from a terminal takes
+the claim since item 26.) Open: decision J below.
 
 ---
 
@@ -1206,7 +1206,21 @@ heartbeat), but the CLI path does not ask. The 21:00 launchd job resumes the new
 research run with unfinished units, so enabling it while a manual review of the same
 run is going starts a second worker on the same units. Found 2026-11-05 while starting
 the run 7 review by hand; the job was left disabled for that night for this reason.
-Not fixed: refuse a resume when `live_status` says running, starting or unverified.
+
+**Done 2026-11-06.** `runner.hold` runs before `quarry deep --resume` does any work. In
+one `BEGIN IMMEDIATE` transaction it reads the run with the dashboard's own
+`live_status` and either claims it for this process or refuses (exit 1, "refusing to
+resume") when it is `running`, `unverified` or `starting`. Two resumes started
+together are serialised, so the second reads the first as `running`. The dashboard's
+Resume and the CLI share one list of those statuses (`queries.LIVE_STATUSES`). The
+worker the dashboard spawns for its own claim carries `QUARRY_RESUME_CLAIM=<research
+id>` in its environment and may fill that claim; any other process waits for it. Also
+refused: `--resume` of a research run that belongs to a different ingest run than the
+one named, which would check its units against the wrong source tree and which
+`live_status` could not see, since it matches the worker's command line on the ingest
+run. 20 tests in `tests/test_resume_guard.py`; with the refusal disabled, 9 of them
+fail. Not done: a test with two real worker processes racing (the serialisation rests
+on SQLite's `BEGIN IMMEDIATE`; the tests take one claim after the other).
 
 Also seen: `/private/tmp/quarry` holds 78 leftover `run-9xxxxx` directories, none
 mounted, the oldest from 2026-11-02, apparently left by tests. Harmless, not cleaned.

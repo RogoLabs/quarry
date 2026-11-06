@@ -96,7 +96,7 @@ def research_resume(request: Request, rid: int, hours: float = Form(8.0)):
             if not rows:
                 raise HTTPException(404, "No such research run.")
             row = rows[0]
-            if row["status"] in ("running", "unverified", "starting"):
+            if row["status"] in q.LIVE_STATUSES:
                 raise HTTPException(409, f"Research run {rid} still has a live or "
                                          "starting worker; stop it before resuming.")
             if not row["resumable"]:
@@ -110,7 +110,8 @@ def research_resume(request: Request, rid: int, hours: float = Form(8.0)):
         if hours and 0 < hours < float("inf"):
             argv += ["--hours", str(hours)]
         try:
-            proc = w.spawn(argv, f"deep-run{row['run_id']}.log")
+            proc = w.spawn(argv, f"deep-run{row['run_id']}.log",
+                           env={q.RESUME_CLAIM_ENV: str(rid)})
         except OSError as e:
             writes.release_research_claim(c, rid, prior)
             raise HTTPException(500, f"The worker could not be started ({e}). The "

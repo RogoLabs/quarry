@@ -92,6 +92,51 @@ def _claim(con, rid: int) -> None:
                 (os.getpid(), socket.gethostname(), rid))
 
 
+class ResumeRefused(RuntimeError):
+    """`hold` will not let this process resume the research run."""
+
+
+def hold(con: sqlite3.Connection, rid: int, run_id: int, *,
+         dashboard_claim: bool = False) -> None:
+    """Take research run `rid` for this process before resuming it, or refuse.
+
+    IMPROVEMENT-PLAN item 26. `quarry deep --resume` used to start on a research run
+    without asking whether another worker held it, so the 21:00 launchd job and a
+    review resumed by hand could work the same units side by side. The check is the
+    dashboard's (`web.queries.live_status`: the pid, the process behind it, the
+    heartbeat), and the check and the claim are one `BEGIN IMMEDIATE` transaction, so
+    two resumes started together are serialised and the second reads the first as
+    `running`.
+
+    Refused while the run is `running`, `unverified` (a live pid that cannot be shown
+    not to be the worker) or `starting` (the dashboard has claimed it and is starting a
+    worker). The one exception is that dashboard worker, which the dashboard marks with
+    `RESUME_CLAIM_ENV`; it fills its own claim. Every other status is taken: a worker
+    that ended or died leaves `stopped`, `done`, `failed`, `died` or `stalled`.
+
+    Also refused: a research run of a different ingest run than the one named. Its
+    units would be checked against the wrong source tree, and `live_status`, which
+    matches the worker's command line on the ingest run, could not see that worker.
+    """
+    import os
+    from ..web import queries as q
+    with db.tx(con):
+        row = con.execute("SELECT * FROM research_runs WHERE id=?", (rid,)).fetchone()
+        if row is None:
+            raise ResumeRefused(f"there is no research run {rid}")
+        d = dict(row)
+        if d["run_id"] != run_id:
+            raise ResumeRefused(f"research run {rid} belongs to run {d['run_id']}, "
+                                f"not run {run_id}")
+        status, why = q.live_status(d)
+        own_claim = (dashboard_claim and d["status"] == q.RESUMING
+                     and d["pid"] in (None, os.getpid()))
+        if status in q.LIVE_STATUSES and not own_claim:
+            raise ResumeRefused(f"research run {rid} is {status} ({why}); stop that "
+                                f"worker or let it finish before resuming")
+        _claim(con, rid)
+
+
 def _beat(con, rid: int) -> None:
     con.execute("UPDATE research_runs SET heartbeat=datetime('now') WHERE id=?", (rid,))
 

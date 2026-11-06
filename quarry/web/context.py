@@ -73,13 +73,15 @@ class Web:
                 c.close()
         return self.templates.TemplateResponse(request, name, ctx)
 
-    def spawn(self, args: list[str], log_name: str):
+    def spawn(self, args: list[str], log_name: str, env: dict[str, str] | None = None):
         """Start `python <args>` detached, logging to <root>/logs/<log_name>, and
-        return the process so a caller can record its pid.
+        return the process so a caller can record its pid. `env` is added to this
+        process's environment for the child.
 
         The child gets its own copy of the log descriptor, so the parent closes its
         handle as soon as Popen returns; it used to leak one per click.
         """
+        import os
         import subprocess
         import sys as _sys
         log = self.paths.root / "logs"
@@ -88,7 +90,8 @@ class Web:
             return subprocess.Popen([_sys.executable, *args],
                                     cwd=str(Path(__file__).resolve().parents[2]),
                                     stdout=fh, stderr=fh, stdin=subprocess.DEVNULL,
-                                    start_new_session=True)
+                                    start_new_session=True,
+                                    env={**os.environ, **env} if env else None)
 
     def read_report_file(self, path_text: str) -> dict[str, Any]:
         """A report file's text, or why it is not shown.
