@@ -1967,6 +1967,10 @@ in `<data root>/logs/clean-start-20261106-154511/`; every step exited 0.
   Started at 16:06 rather than 21:00 for the extra hours: research 1, 46 subsystems × 12
   lenses × 3 models = 1,656 units, `broken-authz-idor` among the lenses, deadline 06:00.
   At ML-Gateway's rate (4,766 s of hunting for 168 units, about 28 s a unit) the hunt
-  alone needs about 13 hours, so the review will take more than one night; the 21:00 job
-  resumes it. Validate on VulnLookup waits for the review, so the cross-user probe has
+  alone needs about 13 hours. Measured at 17:47, the first 114 units had taken 6,032 s,
+  about 53 s each, which puts the hunt nearer 24 hours, so the review will take several
+  nights; the 21:00 job resumes it. Those 114 units produced 180 findings, 164 of them
+  from devstral (42 units, none empty), against 11 from granite and 5 from qwen3-coder in
+  36 units each; the same shape as ML-Gateway, where devstral wrote 188 of 249 and
+  refutation took down 113 of its 188. Validate on VulnLookup waits for the review, so the cross-user probe has
   authorization findings to test.
