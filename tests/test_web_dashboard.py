@@ -680,13 +680,75 @@ def test_the_setup_page_shows_each_pre_run_stage_with_its_command(seeded):
     for cmd in ("quarry doctor", "quarry db sync", "quarry db status",
                 "quarry targets score owner/repo", "quarry targets list"):
         assert f"<code>{cmd}</code>" in page, cmd
-    # QUARRY_DBS is an empty directory here: every database reads as unknown and stale
+    # QUARRY_DBS is an empty directory here: the two databases a scanner reads are
+    # missing, and Grype's, which none reads, is absent and not used (decision H).
     table = page.split('id="databases"', 1)[1].split("</table>", 1)[0]
     for name in ("trivy", "grype", "osv"):
         assert f'<td class="mono sm">{name}</td>' in table
-    assert table.count("stale") == 3 and "never, per the egress ledger" in table
+    assert table.count('<span class="pill alarm">missing</span>') == 2
+    assert "stale" not in table and "never, per the egress ledger" in table
+    assert '<span class="pill inert">absent, not used</span>' in table
     assert "no scanner" in table, "grype has a database and no adapter (decision A)"
     assert "No target has been scored" in page
+
+
+def _db_cells(client) -> dict[str, str]:
+    table = client.get("/setup").text.split('id="databases"', 1)[1].split("</table>", 1)[0]
+    return {n: table.split(f'<td class="mono sm">{n}</td>', 1)[1].split("</tr>", 1)[0]
+            for n in ("trivy", "grype", "osv")}
+
+
+def test_only_a_database_a_scanner_reads_can_be_stale_or_missing(seeded, tmp_path):
+    """Decision H's side note. The panel marked any database with no age as stale, so
+    Grype's, which no scanner reads (decision A) and which was removed on purpose,
+    still showed as stale, as it had at 9.6 days old. A database a scanner reads keeps
+    both warnings."""
+    import json
+    import os
+    from datetime import datetime, timedelta, timezone
+    client, con = seeded
+    root = tmp_path / "vulndb"                  # the seeded QUARRY_DBS
+    now = datetime.now(timezone.utc)
+
+    # Nothing on disk: the read databases are missing, Grype's is absent and unused.
+    rows = {r["name"]: r for r in q.vulndb_status(con)["rows"]}
+    assert rows["grype"]["reader"] is None and not rows["grype"]["stale"]
+    assert not rows["grype"]["present"] and not rows["grype"]["missing"]
+    assert rows["trivy"]["missing"] and rows["osv"]["missing"]
+    cells = _db_cells(client)
+    assert ">stale<" not in cells["grype"] and ">missing<" not in cells["grype"]
+    assert '<span class="pill inert">absent, not used</span>' in cells["grype"]
+    assert '<span class="pill alarm">missing</span>' in cells["trivy"]
+
+    # All three on disk: Trivy a day old, OSV 20 days, Grype 30 days. Only OSV is
+    # stale; Grype is older and is not, because nothing reads it.
+    (root / "trivy" / "db").mkdir(parents=True)
+    (root / "trivy" / "db" / "metadata.json").write_text(json.dumps(
+        {"UpdatedAt": (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")}))
+    z = root / "osv" / "osv-scalibr" / "PyPI" / "all.zip"
+    z.parent.mkdir(parents=True)
+    z.write_bytes(b"")
+    t = (now - timedelta(days=20)).timestamp()
+    os.utime(z, (t, t))
+    (root / "grype" / "6").mkdir(parents=True)
+    built = (now - timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    (root / "grype" / "6" / "import.json").write_text(json.dumps(
+        {"source": f"x/vulnerability-db_v6.1.10_{built}_1.tar.zst"}))
+    rows = {r["name"]: r for r in q.vulndb_status(con)["rows"]}
+    assert [(n, rows[n]["stale"], rows[n]["missing"]) for n in ("trivy", "osv", "grype")] \
+        == [("trivy", False, False), ("osv", True, False), ("grype", False, False)]
+    assert rows["grype"]["age_days"] > 29
+    cells = _db_cells(client)
+    assert '<span class="pill incomplete">stale</span>' in cells["osv"]
+    assert "pill" not in cells["trivy"]
+    assert '<span class="pill inert">not used</span>' in cells["grype"]
+    assert ">stale<" not in cells["grype"]
+
+    # A read database on disk with no readable build time is still stale, not missing.
+    (root / "trivy" / "db" / "metadata.json").unlink()
+    rows = {r["name"]: r for r in q.vulndb_status(con)["rows"]}
+    assert rows["trivy"]["stale"] and not rows["trivy"]["missing"]
+    assert rows["trivy"]["age_days"] is None
 
 
 def test_the_setup_page_starts_nothing(seeded):

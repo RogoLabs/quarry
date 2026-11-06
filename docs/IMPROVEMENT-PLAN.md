@@ -656,9 +656,23 @@ be told from a genuine one.
   deleted; the space comes back when the Trash is emptied. `db status` and `doctor`
   report Grype as absent and still run. The grype binary is still installed. Kept:
   `quarry-2026-11-05-before-restart.db` and `quarry-2026-11-06-before-granite.db`, the
-  rollback points for the restart and item 27. Also seen, not fixed: the dashboard's
-  database panel marks a database with no age as stale, so Grype still shows there as
-  stale, as it already did at 9.6 days old, though nothing reads it.
+  rollback points for the restart and item 27. Also seen then: the dashboard's
+  database panel marked a database with no age as stale, so Grype still showed there
+  as stale, as it already did at 9.6 days old, though nothing reads it.
+  **Done 2026-11-06.** `queries.vulndb_status` now calls a database stale only when a
+  scanner reads it (`vulndb.DB_OF_TOOL`) and its age is unknown or past 7 days. A read
+  database whose directory is not on disk is `missing`, shown as an alarm pill, which is
+  louder than the stale pill it had before. A database no scanner reads shows "not
+  used", or "absent, not used" when its directory is gone, and is never stale, at any
+  age. Checked by a new test in `tests/test_web_dashboard.py` over an empty database
+  directory, then Trivy 1 day, OSV 20 days and Grype 30 days old, then Trivy with no
+  metadata; without the change it fails on Grype being stale. The Setup page test's
+  expectation for an empty directory changed from 3 stale pills to 2 missing (Trivy,
+  OSV) and Grype absent and not used. Against the live database directory (read only)
+  the panel reads Trivy and OSV 0.6 days old and Grype absent, not used. Not changed:
+  the run page's table of databases at scan time, which lists only databases a scanner
+  read during that scan, and `quarry db status`, which has no stale label but still
+  prints any age past 7 days in red, a present Grype database's included.
 - **I. Re-refute.** `quarry deep --resume <run>` and a funnel pass would give the
   deferred Layer 2 rows (12, 2 and 302 in runs 1 to 3) their missing verdicts, under
   decision F's rule. It runs the local models for a while; not started. It does not

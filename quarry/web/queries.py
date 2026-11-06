@@ -1486,20 +1486,32 @@ def environment(con: sqlite3.Connection, root: Path, db_path: Path) -> dict[str,
 
 def vulndb_status(con: sqlite3.Connection) -> dict[str, Any]:
     """Each vulnerability database's build time and age now, which scanner reads it,
-    and when `quarry db sync` last reached the network for it (the egress ledger)."""
+    and when `quarry db sync` last reached the network for it (the egress ledger).
+
+    Stale is a warning about a scanner's clean results, so only a database a scanner
+    reads (`vulndb.DB_OF_TOOL`) can be stale: its age unknown or past STALE_DAYS. One a
+    scanner reads that is not on disk at all is `missing`, louder than stale. A
+    database no scanner reads is neither: Grype's has had no adapter since decision A
+    and was removed on purpose in decision H, and the panel called it stale anyway,
+    which taught the operator to ignore the word."""
     from .. import vulndb
     readers = {v: k for k, v in vulndb.DB_OF_TOOL.items()}
+    root = vulndb.db_dir()
     rows = []
-    for name, a in vulndb.ages().items():
+    for name, a in vulndb.ages(root=root).items():
         age = a.get("age_days")
+        reader = readers.get(name)
+        present = (root / name).exists()
         last = con.execute(
             "SELECT MAX(created_at) t FROM egress WHERE stage='db-sync' AND note LIKE ?",
             (f"{name}%",)).fetchone()["t"]
         rows.append({"name": name, "built": a.get("built"), "age_days": age,
-                     "basis": a.get("basis") or "", "reader": readers.get(name),
-                     "stale": not isinstance(age, (int, float)) or age > vulndb.STALE_DAYS,
+                     "basis": a.get("basis") or "", "reader": reader, "present": present,
+                     "stale": reader is not None and (
+                         not isinstance(age, (int, float)) or age > vulndb.STALE_DAYS),
+                     "missing": reader is not None and not present,
                      "last_sync": last})
-    return {"rows": rows, "dir": str(vulndb.db_dir()), "stale_days": vulndb.STALE_DAYS}
+    return {"rows": rows, "dir": str(root), "stale_days": vulndb.STALE_DAYS}
 
 
 def targets(con: sqlite3.Connection, limit: int = 100) -> dict[str, Any]:
