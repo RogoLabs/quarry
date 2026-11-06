@@ -859,8 +859,8 @@ def probe_missing_rate_limit(running: RunningTarget, candidate: Candidate,
 # difference measured in the same run.
 # _TIMING_OVER_SPREAD, 2: and more than twice the within-class spread, the population
 # standard deviation averaged over the three classes, so the distributions barely
-# overlap. The standard deviation and not a robust spread, on purpose: one slow outlier
-# raises it, which makes confirming and rejecting both harder, never easier.
+# overlap. The standard deviation in place of the median absolute deviation, on purpose:
+# one slow outlier raises it, which makes confirming and rejecting both harder.
 # A rejection needs the spread small enough that a separation at the floor would have
 # shown (twice the spread under the floor), both present-to-absent differences and the
 # A/A difference under the floor, the same status for every class, a present identifier

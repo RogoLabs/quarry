@@ -208,8 +208,77 @@ benign token with `"'><marker>`. Command injection uses `echo $((a*b))` and a re
 root page as an internal-only canary. A live fixture run decided 12 of 12 cases as
 designed. Merging it with item 17 needed one fix: replay counts a held control by the
 direction-aware comparison, since a rate-limit confirmation does not differ from its
-baseline. Still open: the timing probe has no baseline comparison, SQLi never rejects,
-and a rate-limit rejection is not carried forward (the conservative side).
+baseline. Left open then, and closed on 2026-11-06 below: the timing probe had no
+baseline comparison, SQLi never rejected, and a rate-limit rejection was not carried
+forward (the conservative side).
+
+**Done 2026-11-06, the timing probe (e28a0d9).** It now times a present identifier
+against two absent ones shaped like it (same length and character classes, random
+letters and digits), and the two absent ones are the control: an A/A comparison of what
+the target's timing does for no reason under the same conditions. The three are
+interleaved round by round with the order rotated, 15 rounds in three curl runs of 16
+requests each, the first request of each run discarded as a warm-up. A sample is curl's
+time to first byte minus its time to the end of connection setup. The thresholds, stated
+beside `_TIMING_FLOOR` in `probes.py`:
+
+- Confirm: the present identifier separates from both absent ones in the same direction
+  by at least 10 ms, at least 3 times the A/A difference, and more than 2 times the
+  within-class spread (population standard deviation averaged over the three classes).
+  10 ms is the floor the old probe used; below it the container network and the host's
+  scheduler are a likelier cause than the handler, and an oracle that small needs far
+  more than 15 samples per class across a real network. The standard deviation is used
+  in place of the median absolute deviation on purpose: one slow outlier raises it,
+  which makes confirming and rejecting both harder.
+- Reject: both present-to-absent differences and the A/A difference under 10 ms, twice
+  the spread under 10 ms (so a 10 ms separation would have shown), the same status from
+  all three classes, the finding's own route, a declared parameter named like an
+  identifier, and a present identifier known to exist: the seed recipe's value for that
+  parameter, or the login of a seeded account whose API key the target's own command
+  printed. With a guessed `admin` both sides may be absent, so a flat result is
+  needs-review. It stays a statistical rejection, which the funnel does not carry forward.
+- Anything else, including a status that differs between present and absent identifiers
+  (an existence oracle of its own), is needs-review with the numbers in the summary.
+
+A confirmation goes through the same replay as every other probe (item 17). Checked with
+13 fake-curl cases on the probe body and two through `run_validation` (a confirmation
+replayed 4 of 4 times and held; a target that goes flat after the first probe is held
+with "did not replay"), and live on Docker through the real sidecar: an 80 ms delay for
+the one existing account confirmed, and a flat handler rejected. I read the output of 3
+live runs: all three rejected the flat handler with a 0.1 ms spread and n=15 per class,
+and the first showed medians of 0.4 ms. Against the c8cb8b7 probe the new timing tests
+fail; it rejected a flat result with a guessed `admin` and could not confirm a
+separation at all. Not done: the identifier goes in the query or a declared parameter of
+a GET, so a login that reads a POST body is not timed. Not run against VulnLookup.
+
+**Done 2026-11-06, SQLi rejection (e28a0d9).** The SQLi probe can now reject, on the bar
+the command-injection and traversal probes use. On the finding's own route, every
+declared parameter (up to six per route, up to three routes; any more and it does not
+reject) must answer the plain value `1` with a status outside 400, 403, 404, 405 and 422
+and with no SQL error, and refuse each of `1'`, `1"`, `1)` and `1 AND 1=2` with 400,
+403 or 422 and no SQL error signature. That is a handler validating the value, a
+typed id for example, before it can reach a query. The inputs can break a statement or
+narrow it to nothing, never widen it: no `OR 1=1`, because a GET handler that runs an
+UPDATE or DELETE would apply it to every row. A guessed `q`, a sibling route, a refused
+or unrouted control, one parameter that accepts the inputs, or a SQL error behind a 400
+leaves it needs-review. It is a deterministic rejection, so it carries forward under
+item 18's identity rules. Checked with five new fake-curl tests and live on Docker:
+sqlite string interpolation confirmed, a typed id rejected. Input from a body, a header
+or a cookie is not tested, and the rejection says so.
+
+**Done 2026-11-06, rate-limit carry-forward decided: not carried (bd2483d).** Under item
+18's identity rule a carried rejection reopens only when the probe source or the
+finding's evidence window changes, and a rate limit almost never lives in that window.
+It is an app-wide limiter, a middleware, a reverse proxy in the compose file or a
+gateway, with settings from the environment, so removing it would leave the finding
+killed on a measurement that no longer holds. One branch is also weaker than the other
+probes' rejections: a RateLimit-Remaining header on the lone request shows a limiter
+exists, not that its budget stops guessing. Not carrying it costs one lone request and a
+20-request burst per later run. The exclusion used to be a side effect of the
+`differs_from_baseline is False` check; `_controlled_rejection` now tests
+`reproduces_when` explicitly and says why. Three parametrized cases pin it: the
+rate-limit shape is not carried, a `same` rejection is not carried whatever its
+comparison field says (the c8cb8b7 code carried that one), and the same identity on a
+`differs` rejection is.
 
 ### 4. Needs-review counts as adjudicated [code]
 
@@ -794,6 +863,12 @@ the two accounts and their keys. The keys are captured and on the RunningTarget;
 reads them yet. That probe body is new, measured, read-only logic and is deferred for a
 go-ahead.
 
+**2026-11-06, seeding and the timing probe (item 3).** The timing probe uses seeding as
+its evidence that an account exists: a recipe's value for the identifier parameter, or
+the login of a seeded account whose API key the target's own command printed (for the
+`vulnlookup` recipe, `quarry_admin`, `quarry_user` and `quarry_user2`). Without a seed it
+can still confirm a separation, but it does not reject.
+
 ---
 
 ## Lessons from the Harness Engineering workshop book, 2026-11-05
@@ -906,8 +981,28 @@ random path's answer beside it; when the two match, the route did not tell the a
 a catch-all, and the run page warns. No such route, or none answering before the
 deadline, raises and nothing is probed. Measured live on Docker 29.9.2 with the
 containment test's `http.server` target: `GET /` 200, random path 404. The served-spec
-comparison in the plan was not built; the committed spec's routes are among the
-candidates instead. Not checked against VulnLookup, whose build takes about 30 minutes.
+comparison in the plan was not built then (it was on 2026-11-06, below); the committed
+spec's routes are among the candidates instead. Not checked against VulnLookup, whose
+build takes about 30 minutes.
+
+**Done 2026-11-06, the served-spec comparison (0b0d58c).** `run_validation` keeps the
+OpenAPI document the target serves (the same fetch that adds its routes) and compares it
+with every spec committed to the clone, as operations: method and path with the base
+path applied, so a Swagger 2 `basePath` and an OpenAPI 3 server path compare equal. The
+best committed match goes to `manifest.validate.readiness.served_spec`: the served path
+and its canonical sha256, the committed file compared, operation counts on both sides,
+the shared count, whether the documents are identical, and `matches`. They match when
+identical or when at least half the smaller document's operations appear in the other:
+a committed spec a few releases stale still shares most of its operations, while a
+different service on the same port shares few or none. A mismatch is a run-page warning
+(`validate`, `served-spec`) naming both documents and the counts; a later run that
+matches clears it. It is never a requirement: when the target serves no spec at the six
+paths tried, or the clone commits none, `matches` is null with a note and nothing warns.
+Nothing is recorded when route enrichment is off. Checked with seven tests: three on
+the comparison (base paths, the half rule both ways, the best of several committed
+documents, nothing to compare) and four through `run_validation` (same, different,
+none committed, none served with the earlier warning cleared). Not run live, and not
+against VulnLookup, whose served and committed specs are the case this was written for.
 
 ### 17. A confirmation is one observation [code]
 
@@ -984,9 +1079,48 @@ the live copy (283,287 records), 3.2 to 3.4 s per lookup; django matched 339, an
 three targets Quarry has run matched none. SECURITY.md presence is stated. HEAD is not
 re-checked, because the clone is depth 1 and there is no network, and the draft says
 so. Credential headers and credential-shaped query values in the evidence are redacted.
-Still open: a HEAD re-check, and a real package name for the OSV name match in place of
-the repository name. No real `quarry report` was run: the live DB has no confirmed
-verdict.
+Left open then, and closed on 2026-11-06 below: a HEAD re-check, and a real package name
+for the OSV name match in place of the repository name. No real `quarry report` was run:
+the live DB has no confirmed verdict.
+
+**Done 2026-11-06, package names for the prior check (93e2b79).** `draft_reports` reads
+the names the clone's own manifests declare, nearest the finding's file first and then
+each parent up to the root, so a monorepo package holding the flagged file comes before
+the workspace root: package.json `name` (npm), pyproject.toml `[project].name` or
+`[tool.poetry].name`, setup.cfg `[metadata] name`, setup.py's literal `name=` inside
+`setup(` (read as text, never run; a test checks a side effect in it does not happen),
+all PyPI, go.mod `module` (Go) and Cargo.toml `[package].name` (crates.io). Each is
+matched in its own ecosystem's local OSV copy; the repository-URL match stays. One
+lookup runs per distinct set of names. The draft names each name searched with the file
+it came from, and lists separately each one not searched and why: a package.json marked
+`private` is never published, so an npm advisory under its name is another project's;
+an ecosystem with no local copy is not searched. With no manifest the repository name
+stands in and the draft says so. The files are the target's: only regular files inside
+the clone, under 1 MB, are read, and a name is kept only if it is shaped like a name in
+its registry, so a symlinked manifest or a Markdown-shaped name yields nothing. Checked
+with seven tests, including the regression (run `acme/widgets`, published as
+`acme-widgets`): the c8cb8b7 code matched PyPI's unrelated `widgets` and missed the
+project's own advisory. Not measured on the live OSV copy.
+
+**Done 2026-11-06, the HEAD re-check, opt-in (75c063d).** `quarry report --check-head`
+asks the target's git host for its HEAD with one `git ls-remote <clone url> HEAD` and
+compares it with the commit the run cloned. It goes out the way ingest's clone does:
+`/usr/bin/git` with hooks off, file and ext protocols refused and an empty credential
+helper, no terminal prompt, under the clone sandbox profile. The egress ledger gets a
+`report-head-check` row naming the host before the request leaves, also when the
+request then fails. Only a plain https URL with no credential in it is asked, and a run
+with no recorded commit asks nothing. The result goes to `manifest.report.head_check`.
+Every draft's Affected versions and Limitations then say that HEAD is still the
+observed commit (only the commit was compared, nothing re-tested), that it moved to a
+named commit where the issue was not re-tested, or "not re-checked" with the reason: a
+failed or empty ls-remote, or, without the flag, that drafting makes no network request
+unless asked. The check runs once per report and only when there is a draft to write.
+Opt-in rather than automatic, for three reasons: drafting was offline and the reporter
+should decide when Quarry reaches the network; the request goes to the target's own git
+host while an unpublished advisory is being drafted, which a self-hosted forge logs; and
+without the flag re-drafting gives the same bytes. Checked with 12 tests and a stand-in
+runner. The default runner's argv, profile and environment were checked with `tier1`
+stubbed, so `git ls-remote` itself never ran and no request reached a real remote.
 
 ### 20. Layer 2 has no record of intended behaviour [file]
 
