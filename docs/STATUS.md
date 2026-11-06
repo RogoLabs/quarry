@@ -34,7 +34,10 @@ On `OWASP/Nettacker` (860 files): **616 findings in ~38 s** — opengrep 105, ba
 gitleaks 13, zizmor 23, osv-scanner 71, trivy 39, checkov 10.
 
 `quarry db sync` provisions Trivy (1.3 GB) and OSV (48 MB) *outside*
-the sandbox — the one deliberate network step — and writes every fetch to the egress ledger.
+the sandbox and writes every fetch to the egress ledger. It is not the only network step:
+ingest's anonymous clone, `targets score`, `validate`'s image pulls and the opt-in
+`report --check-head` are on the ledger too, and `validate --build-network` lets a
+Dockerfile's RUN steps reach the network, which no ledger can list (the run page warns).
 
 ### The funnel — Seat 1's twelve canonical stages
 

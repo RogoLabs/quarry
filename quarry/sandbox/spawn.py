@@ -40,7 +40,7 @@ def rules_dir() -> Path:
 
 def db_dir() -> Path:
     """Vulnerability databases (Trivy, OSV, Grype). Fetched by `quarry db sync`
-    OUTSIDE the sandbox — that is the one deliberate network step — then read-only
+    OUTSIDE the sandbox, a deliberate and ledgered network step, then read-only
     inside it. Trivy cannot run with --skip-db-update on a first run, and OSV-Scanner
     has no offline database until one is downloaded; both are provisioning steps, not
     flags (Seat 5's measurement)."""
