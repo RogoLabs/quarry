@@ -11,6 +11,7 @@ handler per class. The probes run through DockerRuntime.probe_exec exactly as in
 from __future__ import annotations
 
 import dataclasses
+import os
 
 import sys
 from pathlib import Path
@@ -198,7 +199,9 @@ def _route(method, path, **kw):
 
 @pytest.fixture(scope="module")
 def target(tmp_path_factory):
-    tmp = tmp_path_factory.mktemp("live")
+    # The compose project is named after this directory; a pid keeps two concurrent
+    # sessions (worktrees, a helper agent) from sharing one project and its containers.
+    tmp = tmp_path_factory.mktemp(f"live{os.getpid()}")
     src = tmp / "src"
     src.mkdir()
     (src / "app.py").write_text(APP)

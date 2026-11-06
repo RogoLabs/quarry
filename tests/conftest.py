@@ -14,6 +14,11 @@ import tempfile
 
 _HOME = tempfile.mkdtemp(prefix="quarry-test-home-")
 os.environ["QUARRY_HOME"] = _HOME
+# The vulnerability databases resolve from QUARRY_DBS, not QUARRY_HOME, so without this
+# any test that did not set it read the operator's real vulndb (found 2026-11-06 by the
+# advisory tests, which searched the live OSV copy). A test that needs a real database
+# sets QUARRY_DBS itself.
+os.environ.setdefault("QUARRY_DBS", os.path.join(_HOME, "vulndb"))
 
 
 def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
