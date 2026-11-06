@@ -1181,3 +1181,16 @@ crash. Two tests cover it. Run 4 cannot be rescanned (a second scan would duplic
 every finding), so VulnLookup is ingested again as a new run, scanned with
 `--timeout 3600`: at 1800 s, the reruns share roughly 1350 s, which the javascript tree
 alone nearly fills.
+
+### 26. Two workers can resume the same deep review [code]
+
+`quarry deep --resume <id>` does not check whether another worker already holds that
+research run. The dashboard knows (`web/queries.live_status` reads the pid, host and
+heartbeat), but the CLI path does not ask. The 21:00 launchd job resumes the newest
+research run with unfinished units, so enabling it while a manual review of the same
+run is going starts a second worker on the same units. Found 2026-11-05 while starting
+the run 7 review by hand; the job was left disabled for that night for this reason.
+Not fixed: refuse a resume when `live_status` says running, starting or unverified.
+
+Also seen: `/private/tmp/quarry` holds 78 leftover `run-9xxxxx` directories, none
+mounted, the oldest from 2026-11-02, apparently left by tests. Harmless, not cleaned.
