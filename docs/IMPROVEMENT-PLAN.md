@@ -405,8 +405,115 @@ paths and get 404s. That feeds item 3. OpenAPI and crawl routes carry
   `app.use`/`router.use` with a `require`, an `import` or a local `Router()`, nested.
   JS routes count only on `app`/`router`/`r` or a variable bound to `Router()`, so
   `axios.get("/x")` is not a route. `crawl_routes` now runs after the OpenAPI fetch.
-  Not covered: Django `urls.py`, Starlette `Mount`, NestJS decorators, and prefixes
-  built from variables rather than string literals.
+  Not covered then: Django `urls.py`, Starlette `Mount`, NestJS decorators, and prefixes
+  built from variables rather than string literals. All four were done on 2026-11-06
+  (below).
+
+**Done 2026-11-06 (77e9441).** The four open forms are read. Each new reader resolves
+the handler itself, so its routes carry the handler's file and line span
+(`Route.encloses` works on them) and what the handler declares about access, which item
+20 needed.
+
+- **Django** (`dynamic/routes_py.py`, parsed with `ast`, never imported). `urlpatterns`
+  built from `path()`, `re_path()` and legacy `url()`, including patterns added under a
+  module-level `if`. `include()` of a module string, an imported module, a pattern list
+  (same file or imported), `(patterns, app_name)` and a DRF `router.urls`, nested, with
+  the including pattern as prefix, concatenated the way Django does. Also
+  `i18n_patterns` (its language prefix is counted as unresolved),
+  `format_suffix_patterns`, and Django 1.x `patterns()` with string views. Views:
+  functions, `View.as_view()` (verbs from the class's own methods, its bases in the
+  tree, and a table of Django and DRF generic views), `ViewSet.as_view({...})`, and a
+  view assigned at module level. A view the tree does not define (an installed app's, a
+  `redirect_view("name")` factory, a lambda) is kept and tied to the URLconf line that
+  declares it. DRF routers: list and detail routes from the viewset's actions,
+  `lookup_field`, `@action` (`detail`, `methods`, `url_path`), `trailing_slash=False`,
+  and registrations made inside a helper the router is passed to (DefectDojo's
+  `add_*_urls(router)`). A `re_path` regex becomes a template: named groups become
+  `<name>`, unnamed ones `<arg1>`, optional pieces are left out. A pattern that is still
+  a regex after that (a lookahead, an alternation outside a group) is not rendered and
+  is counted. A URLconf that no other includes is a root. An include whose module name
+  matches more than one file adds no prefix, and the candidates' routes are flagged.
+- **Starlette**: `Route` lists with the path of every enclosing `Mount`, lexically or by
+  name (`Mount("/users", routes=users.routes)`), `Router` and `Starlette(routes=)`,
+  `HTTPEndpoint` classes (one route per method), `methods=`, and a FastAPI or Starlette
+  sub-application mounted with `app.mount("/v1", v1)`, which now also prefixes FastAPI
+  decorator routes on that sub-application.
+- **NestJS** (`dynamic/routes_js.py`, on text with comments and string contents
+  blanked): `@Controller('p')`, `@Controller({ path })` and arrays; `@Get`, `@Post`,
+  `@Put`, `@Patch` and `@Delete` with a string, an array or a constant; `@Query('x')`
+  names; and `app.setGlobalPrefix` with its `exclude` list, applied only when the tree
+  sets exactly one value.
+- **Prefixes from variables**, for FastAPI, Flask, Flask-RESTX, Express `app.use`,
+  Django, Starlette and NestJS: a module-level string constant of the same file, or an
+  f-string, template literal, `+` concatenation or `.format()` of constants. Two
+  extensions beyond the brief, both conservative: a constant imported from exactly one
+  file of the tree (DefectDojo's router prefixes are `from dojo.x.api import path`), and
+  a pattern whose only unknown pieces lead it, such as
+  `r"^{}api/v2/".format(get_system_setting("url_prefix"))`, which keeps the known rest
+  and leaves the unknown piece out. Anything else adds nothing to the path. In both
+  cases the route carries `prefix_resolved=False` and the expression is listed in
+  `StaticRouteSource.unresolved` as file, line and expression. A deep run's manifest
+  counts both (`route_intent.prefix_unresolved_routes`, `unresolved_prefixes`), and the
+  intent block says "mount prefix not resolved" on the route. An ambiguous Python mount
+  target is now flagged and counted the same way. A reader that raises is named in
+  `StaticRouteSource.errors` and the others still run.
+- A class-view or viewset verb inherited from a base spans only the class's decorators,
+  header and attributes, not the whole class. A whole-class span would also enclose the
+  class's other methods, so a probe on `GET /items/` could decide a finding in `destroy`
+  (item 3). A line in a helper method that no route serves alone is enclosed by no
+  route, which is needs-review.
+- The `(\w+)\s*=` mount patterns now run only on files that contain their constructor's
+  name. Matches are unchanged. On DefectDojo, discovery took 2.64 s before and 0.76 s
+  after, best of three each, back to back on this Mac.
+
+**How it was checked.** `tests/test_routes_frameworks.py` adds 20 tests on fixtures in
+the shapes real projects use: a Django project with app URLconfs, legacy `url()`, an
+inline pattern list, a DRF router, a settings module, and access by wrapper, decorator,
+mixin, `method_decorator`, `permission_classes` and `@action`; a DefectDojo-style router
+helper with an imported prefix; a Starlette app with nested Mounts, a by-name Mount, an
+`HTTPEndpoint` and middleware; FastAPI sub-applications; a NestJS controller with class
+and method guards, `@Query`, a global prefix with `exclude`, `useGlobalGuards` and an
+`APP_GUARD` provider. The ambiguous forms are tested to add no prefix and to be counted:
+an include that matches two files, `settings.API_PREFIX`, a constant assigned twice, an
+unknown piece in the middle of a pattern, a lookahead regex, `settings.API_V1_STR`,
+`register_blueprint(url_prefix=<call>)`, an imported Express constant, a controller path
+from `config`, and a global prefix from `process.env`. The existing route, intent and
+probe tests pass unchanged. Full suite: 1,054 passed, 10 skipped, 1 failed, and the
+failure is the documented test-count check (the suite now collects 1,065). The 10 skips
+are environmental: 3 need setuptools, and 7 need bandit, checkov or opengrep in a
+`.venv` the worktree did not have.
+
+Measured read-only on the two Django projects already on this machine, DefectDojo and
+IntelOwl (under Qwythos/work/repos). Static routes went from 16 to 1,059
+on DefectDojo and from 3 to 193 on IntelOwl, and every route found before is still
+found. On DefectDojo, 1,043 of the 1,059 come from the Django reader. 1,001 of the 1,059
+carry `prefix_resolved=False`: every UI route sits under
+`r"^{}".format(get_system_setting("url_prefix"))` and the API under `r"^{}api/v2/"` built
+the same way, so the paths are what the server answers when that setting is empty. 10
+expressions are listed as unresolved. 94 of the 1,043 stay tied to their URLconf line:
+88 `redirect_view(...)` factories, 5 views from installed packages and 1 lambda. On
+IntelOwl, 190 of 193 come from the Django reader, none is flagged, and the 2 unresolved
+entries are the `re_path` lookaheads that serve its React app.
+
+**Still not covered.**
+
+- Methods: a class view whose verbs come from a base outside the tree and outside the
+  generic-view table is listed as GET only (IntelOwl's `RegistrationView`, a
+  `rest_email_auth` subclass, takes POST), and a function view without a method
+  decorator is GET plus whatever methods its body compares `request.method` against.
+- drf-nested-routers, Django Ninja (`NinjaAPI.add_router`), NestJS `RouterModule` module
+  prefixes and URI versioning, Starlette `Host`, and Express mounts with middleware
+  between the path and the router (`app.use("/x", auth, router)`, unchanged).
+- An Express member expression as a prefix (`app.use(config.base, router)`) is read as
+  middleware, as before, and is not counted. An UPPER_CASE name, a template literal or a
+  concatenation that does not resolve is counted.
+- FastAPI's `prefix=settings.API_V1_STR`, the full-stack template's shape, is an
+  attribute of a settings object: it stays unresolved and is counted.
+- Function parameters and class attributes as constants, and `.format()` fields with a
+  format spec.
+- No Starlette or NestJS project is on this machine, so those two readers were checked
+  on fixtures only. No Layer 3 probe and no deep run were made against a Django target:
+  this measured route extraction and the intent map, not verdicts.
 
 ### 13. Layer 2 integrity [agent, checked for 13b; rest agent]
 
@@ -1014,8 +1121,43 @@ guard. Human verdicts are rows in migration v9's append-only `deep_verdicts` tab
 matches on lens and file plus enclosing symbol or overlapping quote; an `intended`
 match reaches the refuter with the note and is never dropped. Run 1's two verdicts
 (#1, #141) were recorded on 2026-11-06 (decision G). Not done: showing verdicts in
-the dashboard and
-digest, and Django URLconf routes, so the block is empty on Django targets.
+the dashboard and digest. Django URLconf routes, which left the block empty on Django
+targets, were done on 2026-11-06 (below).
+
+**Done 2026-11-06 (77e9441), the Django part.** Routes from the Django, Starlette and
+NestJS readers (item 12) carry the handler's name, its guards as written, and the app-
+or project-wide ones, and `research/intent.py` uses them as they are. Before, the route
+map found no Django routes, and matching declarations in the handler's file, as intent
+does for Flask and Express, would not have helped: a Django views module declares no
+routes. Django: URLconf wrappers
+(`login_required(views.x)`); decorators on the view (`login_required`,
+`permission_required`, `user_passes_test`, `staff_member_required`, DRF
+`@permission_classes`); access mixins on a class view and its bases in the tree
+(`LoginRequiredMixin`, `PermissionRequiredMixin`, `UserPassesTestMixin`, and any
+`...Mixin` named for login, permission, auth, staff, superuser, admin, access, owner,
+group or role);
+`permission_classes`, `authentication_classes` and `permission_required` attributes;
+`@method_decorator` on the class, on `dispatch` or on the verb's own method; an
+`@action`'s `permission_classes`; and `as_view(permission_classes=...)`. Project-wide:
+a login-required entry in a settings module's `MIDDLEWARE` (followed through a
+same-file list it is assigned from), and DRF's `DEFAULT_PERMISSION_CLASSES` and
+`DEFAULT_AUTHENTICATION_CLASSES` for a DRF view that does not set its own. NestJS:
+class and method decorators except documentation ones (Swagger's auth decorators are
+kept), plus `useGlobalGuards` and `APP_GUARD` providers. Starlette: endpoint decorators
+(`requires(...)`) and `middleware=` on the Route, Mount or app. The block lists the
+project-wide ones under "app- or project-wide, before it", passes all of them through
+the same control-character scrub as the other guards, and says "mount prefix not
+resolved" where item 12 flagged the route.
+
+Checked by the item 12 tests, one of which builds the intent map on the Django fixture
+and reads its block for `blog/views.py`. On the two real projects the route-intent
+block had 0 routes with a guard before. It now has 1,043 of 1,059 on DefectDojo and 190
+of 193 on IntelOwl with at least one. On DefectDojo most of that is the project-wide
+`dojo.middleware.LoginRequiredMiddleware`: 452 of its 1,043 Django routes have a guard
+of their own and 591 have only project-wide ones. On IntelOwl the split is 134 and 56
+of 190. Not done: exemptions a login-required middleware reads from settings are not
+read, so it is listed on routes it may exempt; when several settings modules define
+`MIDDLEWARE`, each entry is named with its file and the active one is not chosen.
 
 ### 21. Layer 2 changes are not compared against a fixed set
 
