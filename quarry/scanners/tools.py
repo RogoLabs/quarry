@@ -133,16 +133,23 @@ class Opengrep(Scanner):
         return cov
 
     def _per_tree(self, rundir: Path, src: Path, timeout: int) -> ScanOutcome:
+        """One invocation per rule tree, in two passes.
+
+        Pass one gives every tree an equal slice of the budget, which bounds a hung
+        tree. Pass two reruns the trees that ran out of their slice, sharing whatever
+        the fast trees left. MEASURED on VulnLookup (run 4, 2026-11-05): once item 15
+        stopped opengrep skipping test/, vendor/ and minified files, the python,
+        javascript, typescript and generic trees each needed more than the 72 s slice
+        (1800 s over 25 trees) and were killed with no output, so opengrep reported 43
+        findings against run 3's 656 while about 1500 s of its budget went unused."""
         import time
         binpath = self.available()
         outdir = rundir / "out"
         trees = self.config_paths()
         per = max(60, timeout // max(1, len(trees)))   # bound a single hung tree
-        records: list[Record] = []
-        failed: list[str] = []
-        cov = Coverage()
         t0 = time.time()
-        for c in trees:
+
+        def attempt(c: Path, budget: int) -> tuple[str, list[Record], Coverage]:
             out = outdir / f"{self.name}-{c.name}.json"
             for stale in self.outputs(out):
                 stale.unlink(missing_ok=True)
@@ -151,20 +158,40 @@ class Opengrep(Scanner):
             # tree, so the combined run's crash log and all but the last tree's were
             # gone by the time anyone looked (IMPROVEMENT-PLAN item 24).
             res = tier1(rundir, argv, name=f"{self.name}-{c.name}",
-                        cwd=self.workdir(rundir, src), timeout=per)
-            cov.merge(self.coverage(out, src, label=c.name))
+                        cwd=self.workdir(rundir, src), timeout=budget)
+            got = self.coverage(out, src, label=c.name)
+            # tier1 reports its own kill as -9 after the whole budget.
+            if res.returncode == -9 and res.duration_s >= budget - 1:
+                return "timeout", [], got
             if res.returncode < 0 or not out.exists():
-                failed.append(c.name)
-                continue
+                return "failed", [], got
             try:
                 recs = list(self.parse(out, src))
             except Exception:                           # noqa: BLE001 - a bad tree is data
-                failed.append(c.name)
-                continue
+                return "failed", [], got
             if res.returncode and not recs:             # crashed: no usable output
-                failed.append(c.name)
-                continue
-            records.extend(recs)
+                return "failed", [], got
+            return "ok", recs, got
+
+        status: dict[str, str] = {}
+        found: dict[str, list[Record]] = {}
+        covs: dict[str, Coverage] = {}
+        for c in trees:
+            status[c.name], found[c.name], covs[c.name] = attempt(c, per)
+        retried: list[str] = []
+        slow = [c for c in trees if status[c.name] == "timeout"]
+        for i, c in enumerate(slow):
+            share = int((timeout - (time.time() - t0)) // (len(slow) - i))
+            if share <= per:
+                break                                   # nothing left worth a rerun
+            retried.append(c.name)
+            status[c.name], found[c.name], covs[c.name] = attempt(c, share)
+
+        records = [r for c in trees for r in found[c.name]]
+        failed = [c.name for c in trees if status[c.name] != "ok"]
+        cov = Coverage()
+        for c in trees:
+            cov.merge(covs[c.name])
         if trees and len(failed) == len(trees):
             # Every tree failed, so nothing was scanned. MEASURED: an option opengrep
             # 1.27.1 rejects made every invocation exit 2 with no output, and this
@@ -175,10 +202,16 @@ class Opengrep(Scanner):
                                      f"logs/{self.name}-<tree>.stderr",
                                coverage=cov)
         note = ""
+        if failed or retried:
+            note = "combined run crashed; recovered per tree."
+        if retried:
+            note += (f" {len(retried)} tree(s) outran the {per} s slice and were rerun "
+                     f"with the time the others left: {', '.join(retried)}.")
         if failed:
-            note = (f"combined run crashed; recovered per tree. "
-                    f"{len(failed)} of {len(trees)} rule tree(s) produced no usable "
-                    f"output and were skipped: {', '.join(sorted(failed))}")
+            timed = sorted(n for n in failed if status[n] == "timeout")
+            note += (f" {len(failed)} of {len(trees)} rule tree(s) produced no usable "
+                     f"output and were skipped: {', '.join(sorted(failed))}"
+                     + (f" (out of time: {', '.join(timed)})" if timed else ""))
         # A tree that crashes is a recorded gap, not a zeroed tool: ok as long as the
         # per-tree pass recovered findings or nothing actually failed.
         return ScanOutcome(self.name, True, 0 if records or not failed else 2,

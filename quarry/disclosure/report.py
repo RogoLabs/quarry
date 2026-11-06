@@ -933,8 +933,8 @@ def _render_research_finding(d: dict[str, Any]) -> str:
         f"- Severity (model-claimed, not computed): {_text(d['severity'] or 'unstated')}",
         f"- Cross-family vote: {int(d['n_survived'])} defended, "
         f"{int(d['n_refuted'])} refuted"
-        + (f", {int(d['n_unsupported'])} refuted without evidence on the claim's path "
-           f"(not rebutted)" if d.get("n_unsupported") else ""),
+        + (f", {int(d['n_unsupported'])} not rebutted (uncertain, or refuted without "
+           f"evidence on the claim's path)" if d.get("n_unsupported") else ""),
         "",
         "Claimed code:",
         "",

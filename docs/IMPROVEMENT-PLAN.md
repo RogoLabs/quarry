@@ -19,8 +19,9 @@ item 14's Grype entry (decision A), Layer 3 against VulnLookup (e9b8e94, 141a1e0
 febc240), the opengrep per-tree fallback (ef62ff2), and items 15, 23 and 24 (b707e82).
 On 2026-11-05 the rest of the list followed, each recorded under its item: items 16
 to 22, the open parts of items 2, 3 and 5, P3, P4, and decisions A, B, D and E.
-Decision F (the Layer 2 refuter) is done. Open decisions are G to K. The suite
-collects 1017 and passes 1014, with 3 skipped because setuptools is absent.
+Decision F (the Layer 2 refuter) is done, K was tried and reverted, and L and item
+25 are done. Open decisions are G to J. The suite collects 1021 and passes 1018, with
+3 skipped because setuptools is absent.
 
 Every item says where its evidence came from:
 
@@ -617,12 +618,23 @@ be told from a genuine one.
   answered `survives` in 62 refutations; the prompt's "Default to `refuted`" mandate is
   unchanged (decision K). Records written before F carry no grounding and count as
   they did.
-- **K. The refuter's kill mandate (new, 2026-11-05).** After F, every remaining plant
-  kill on the replay rests on a guard that exists but does not answer the claim, and in
-  three of them the refuter's own reason concedes the claim. Options: drop "Default to
-  `refuted`. Most findings are wrong." and measure again on the replay; or require the
-  `reason` to say how the guard defeats the specific attack, which no check here can
-  verify. My default: drop the mandate line, rerun the same two replays, and compare.
+- **K. The refuter's kill mandate. Tried 2026-11-05 and reverted.** After F, every
+  remaining plant kill on the replay rests on a guard that exists but does not answer
+  the claim. Dropping "Default to `refuted`. Most findings are wrong." and rerunning
+  the same two replays made it worse: 3 of 7 plants missed after refutation with route
+  intent off (2 of 7 under F) and 5 of 7 with it on (2 of 7 under F). The second is
+  three plants, outside the one-plant noise. One refuter answered `survives` in 32
+  refutations, so the line was not what kept the refuters from defending. The kills
+  were the same two kinds as under F (a real guard that does not apply, such as
+  `login_required` against an admin-only reset; a "guard" that guards nothing). The
+  line is back. What is left needs a check of whether the guard answers the attack,
+  which no location rule can do.
+- **L. `uncertain` deferred a claim for good. Done 2026-11-05.** An `uncertain`
+  answer counted as a refuter error, and `--resume` re-asks only failed calls, so a
+  claim whose refuters were all uncertain stayed deferred at the gate with nothing to
+  revive it. None had happened yet (0 of 3,026 live answers; 0 on the replays), but
+  F's evidence rule makes "I cannot quote a guard" a likelier answer. It now counts in
+  `n_unsupported`, so the claim goes to a human as "not rebutted".
 - **J. Dismissal reach.** Neither "dismiss for this repo" nor "dismiss everywhere"
   touches findings already live in other existing runs; both apply to later funnel
   passes. A repo dismissal can be withdrawn from any run of the target, the corpus
@@ -1144,3 +1156,28 @@ field read a note with zero records as nothing to scan. The tool table's detail 
 shows the coverage counts (files scanned, source files in the tree, unexplained
 files, invocations with no report). A web test renders all three cases; the page was
 not checked in a browser.
+
+### 25. Opengrep's per-tree fallback starves the slow trees [measured]
+
+The fresh VulnLookup scan (run 4, 2026-11-05) recovered per tree, as run 3 did, but
+4 of 25 trees (generic, javascript, python, typescript) were killed with no output, and
+opengrep reported 43 findings against run 3's 656. Each tree got an equal slice,
+`max(60, 1800 // 25)` = 72 s. Item 15 stopped opengrep skipping test/, vendor/ and
+minified files, so those four trees now scan up to 630 files and each outran 72 s,
+while the opengrep run as a whole took 277 s and left about 1500 s unused. The note
+said the trees "produced no usable output", which read as a crash.
+
+Rerun on their own afterwards, under the same sandbox and flags, the python tree took
+23 s and found 522 results, and the javascript tree took 473 s and found 168. Why python
+took longer than 72 s inside the scan is not settled (the replay was using the machine
+at the time, and opengrep may cache between runs). The javascript tree is slow because
+it now reads the vendored, minified editor and toolbar scripts under `website/web/static`.
+
+**Done 2026-11-05.** The fallback now runs two passes: every tree gets the equal slice,
+then a tree killed at the end of its slice is rerun with an equal share of the time the
+others left. Its coverage counts from its final attempt only. The note names the
+reruns, and a tree still out of time is listed as "out of time" rather than as a
+crash. Two tests cover it. Run 4 cannot be rescanned (a second scan would duplicate
+every finding), so VulnLookup is ingested again as a new run, scanned with
+`--timeout 3600`: at 1800 s, the reruns share roughly 1350 s, which the javascript tree
+alone nearly fills.

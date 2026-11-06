@@ -200,3 +200,23 @@ results record.
 Seven plants and two replays per version: the move from 7/7 to 2/7 is five plants on each
 side, outside the one-plant noise the A/A2 repeat measured, but it is still two runs on a
 synthetic set and says nothing yet about the ten repositories above.
+
+### Decision K: without the kill mandate, 2026-11-05
+
+The same two replays with F2's rule and the prompt's last line, "Default to `refuted`.
+Most findings are wrong.", removed. Same models, digests, budget and corpus; run on
+9465131 plus that one change.
+
+| replay | route intent | missed at the hunt | missed after refutation | unsupported claims | kept claims, on a plant / not | `survives` answers | refute / wall |
+|---|---|---|---|---|---|---|---|
+| F2 off | off | 2/7 | 2/7 (N1, N2) | 4/16 | 6 / 1 | 0 of 16 | 184 / 372 s |
+| K off | off | 2/7 | 3/7 (N1, N2, T3) | 2/15 | 6 / 2 | 1 of 15 | 239 / 446 s |
+| F2 on | on | 1/7 | 2/7 (N2, T1) | 1/16 | 5 / 2 | 0 of 16 | 235 / 441 s |
+| K on | on | 1/7 | 5/7 (N1, N2, N4, T1, T3) | 3/17 | 3 / 2 | 0 of 17 | 260 / 528 s |
+
+Worse with intent on by three plants, and within noise with intent off. The plant kills
+in K on are the kinds F2 left: `login_required` cited against an admin-only password
+reset, a role allow-list cited against a missing admin check, `g.user['id']` against
+SQL injection through `q`, and code that guards nothing. The line was restored. Both K
+replays ran while the machine was also scanning, which moves wall time, not the
+verdicts.

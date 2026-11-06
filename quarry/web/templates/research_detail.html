@@ -63,7 +63,7 @@
         {% if f.n_refuted %}<span class="pill killed">refuted ×{{ f.n_refuted }}</span>{% endif %}
         {#  Decision F: a refuter said refuted but quoted no code on the claim's path, even
             when asked again. Not a defence, so not `verified`; not a kill either. #}
-        {% if f.n_unsupported %}<span class="pill incomplete" title="refuted without evidence on the claim's path">not rebutted ×{{ f.n_unsupported }}</span>{% endif %}
+        {% if f.n_unsupported %}<span class="pill incomplete" title="uncertain, or refuted without evidence on the claim's path">not rebutted ×{{ f.n_unsupported }}</span>{% endif %}
         {% if f.refuter_errors %}<span class="pill alarm">{{ f.refuter_errors }} refuter error</span>{% endif %}
         {#  The way to the same finding in the funnel. Triage shows a candidate only
             once a funnel pass has seen it and left it live; anything else opens its

@@ -356,14 +356,15 @@ def _layer2_gate(con, run_id, rows, src, prior=()) -> StageResult:
                   deterministic=False)
             sr.killed += 1
         elif r.get("n_unsupported"):
-            # Decision F: every answering refuter said `refuted` and none could quote
-            # code on the claim's path that defeats it, even when asked again. That is
-            # not a rejection, so the claim goes to a human, as a Layer 3 probe that
-            # could not decide does. The event says why, since a plain pass would look
-            # like a defence.
+            # Decision F: no answering refuter rebutted the claim. Each either said
+            # `refuted` without quoting a guard on the claim's path, even when asked
+            # again, or said `uncertain`. That is not a rejection, so the claim goes to a
+            # human, as a Layer 3 probe that could not decide does. The event says why,
+            # since a plain pass would look like a defence.
             db.funnel(con, run_id, occurrence_id=r["id"], stage=sr.stage, action="pass",
                       reason=f"not rebutted: {r['n_unsupported']} cross-family "
-                             f"refutation(s) gave no evidence on the claim's path",
+                             f"answer(s) were uncertain or refuted without evidence on "
+                             f"the claim's path",
                       deterministic=False)
             sr.passed += 1
         elif (r["refutations"] or "[]") == "[]":

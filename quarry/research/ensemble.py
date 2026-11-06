@@ -408,13 +408,20 @@ class Finding:
 
     @property
     def unsupported(self) -> int:
-        """Cross-family refutations of a verified claim whose evidence did not ground
-        them: no counter_quote, one not in the code, or one found only off the claim's
-        path. A claim every answering refuter tried and failed to rebut this way is
-        kept for a human (`KEPT_SQL`), as Layer 3 keeps a probe it could not decide."""
+        """Cross-family answers on a verified claim that did not rebut it: a refutation
+        whose evidence did not ground it (no counter_quote, one not in the code, a guard
+        not in it or off the claim's path), or an `uncertain`. A claim every answering
+        refuter failed to rebut is kept for a human (`KEPT_SQL`), as Layer 3 keeps a
+        probe it could not decide.
+
+        `uncertain` used to count as a refuter error, which left the claim deferred at
+        the Layer 2 gate for good: `--resume` re-asks only failed calls. The prompt
+        reserves it for "a specific named fact would settle it and it is genuinely not
+        in the source", which is a question for a human, not a missing answer."""
         if not self.quote_verified:
             return 0
-        return sum(1 for r in self._cross_family() if ungrounded(r))
+        return sum(1 for r in self._cross_family()
+                   if ungrounded(r) or r.get("verdict") == "uncertain")
 
     @property
     def refuter_errors(self) -> int:

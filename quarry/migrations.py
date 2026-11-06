@@ -271,7 +271,8 @@ def _v9_deep_verdicts(con: sqlite3.Connection) -> None:
 
 
 def _v10_unsupported_refutations(con: sqlite3.Connection) -> None:
-    """How many cross-family refutations of a finding gave evidence that did not hold.
+    """How many cross-family answers on a finding did not rebut it: a refutation whose
+    evidence did not hold, or an `uncertain`.
 
     Decision F: a `refuted` verdict now has to quote the code that defeats the claim, on
     the claim's own path (`research.grounding`). One that does not is neither a vote nor

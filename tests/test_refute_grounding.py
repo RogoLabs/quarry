@@ -225,6 +225,28 @@ def test_a_grounded_refutation_counts():
     assert (f.refuted, f.unsupported, f.refuter_errors) == (1, 1, 0)
 
 
+def test_uncertain_is_not_rebutted_rather_than_a_refuter_error():
+    """`uncertain` was a refuter error, and `--resume` re-asks only failed calls, so the
+    claim stayed deferred at the gate for good."""
+    unsure = {"model": "devstral:24b", "verdict": "uncertain", "reason": "needs config"}
+    f = _finding([unsure])
+    assert (f.refuted, f.survived, f.unsupported, f.refuter_errors) == (0, 0, 1, 0)
+    assert (_finding([unsure, GOOD]).refuted, _finding([unsure, GOOD]).unsupported) == (1, 1)
+    assert _finding([unsure], verified=False).unsupported == 0
+
+
+def test_an_uncertain_answer_reaches_the_gate_as_not_rebutted(con, src, monkeypatch):
+    _answers(monkeypatch, {"verdict": "uncertain", "reason": "depends on deployment"})
+    runner._refute_pass(con, 1, src, {"core": _Sub()}, MODELS, None, lambda *_: None)
+    r = _row(con)
+    assert (r["n_unsupported"], r["refuter_errors"]) == (1, 0) and E.kept(r)
+    oid = _deep_occurrence(con)
+    funnel.run(con, 1)
+    ev = con.execute("SELECT action, reason FROM funnel_events WHERE occurrence_id=? AND "
+                     "stage='layer2-gate'", (oid,)).fetchone()
+    assert ev["action"] == "pass" and "uncertain" in ev["reason"]
+
+
 def test_a_record_from_before_grounding_counts_as_it_did():
     assert (_finding([LEGACY]).refuted, _finding([LEGACY]).unsupported) == (1, 0)
 

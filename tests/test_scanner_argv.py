@@ -386,3 +386,62 @@ def test_opengrep_keeps_combined_result_when_it_does_not_crash(tmp_path, monkeyp
     outcome = og.run(tmp_path, tmp_path / "src", timeout=300)
     assert outcome.ok and len(outcome.records) == 1 and outcome.note == ""
     assert per_tree["n"] == 0                          # no fallback when combined succeeds
+
+
+def _slow_tree_setup(tmp_path, monkeypatch, *, second_pass_ok: bool):
+    from quarry.scanners import base, tools as T
+    (tmp_path / "out").mkdir()
+    (tmp_path / "src").mkdir()
+    trees = [tmp_path / "rules" / n for n in ("python", "generic", "go", "rust")]
+    og = T.Opengrep()
+    monkeypatch.setattr(og, "available", lambda: "/usr/bin/opengrep")
+    monkeypatch.setattr(og, "config_paths", lambda: trees)
+    monkeypatch.setattr(og, "workdir", lambda rundir, src: src)
+    budgets: list[tuple[str, int]] = []
+
+    class R:
+        def __init__(self, rc, secs):
+            self.returncode, self.duration_s = rc, secs
+
+    def fake_tier1(rundir, argv, *, name, cwd, timeout):
+        out = Path(argv[argv.index("--sarif-output") + 1])
+        if argv.count("--config") != 1:              # combined run: core crash
+            out.write_text("{}")
+            return R(2, 1.0)
+        tree = Path(argv[argv.index("--config") + 1]).name
+        budgets.append((tree, timeout))
+        if tree == "python" and (timeout <= 75 or not second_pass_ok):
+            return R(-9, float(timeout))             # killed at the end of its budget
+        out.write_text("{}")
+        import json
+        Path(argv[argv.index("--json-output") + 1]).write_text(json.dumps(
+            {"paths": {"scanned": [f"{tree}.src"], "skipped": []}}))
+        return R(0, 2.0)
+
+    monkeypatch.setattr(base, "tier1", fake_tier1)
+    monkeypatch.setattr(T, "tier1", fake_tier1)
+    monkeypatch.setattr(og, "parse", lambda out, src: [] if Path(out).stem == "opengrep"
+                        else [base.Record(tool="opengrep", rule_id=f"{Path(out).stem}.rule",
+                                          path="a.py")])
+    return og, budgets
+
+
+def test_a_tree_that_outruns_its_slice_is_rerun_with_the_time_left(tmp_path, monkeypatch):
+    """MEASURED on run 4: four trees were killed at the 72 s slice with no output while
+    about 1500 s of opengrep's 1800 s budget went unused."""
+    og, budgets = _slow_tree_setup(tmp_path, monkeypatch, second_pass_ok=True)
+    outcome = og.run(tmp_path, tmp_path / "src", timeout=300)
+    assert budgets[:4] == [("python", 75), ("generic", 75), ("go", 75), ("rust", 75)]
+    assert budgets[4][0] == "python" and budgets[4][1] > 200
+    assert "opengrep-python.rule" in {r.rule_id for r in outcome.records}
+    assert "rerun with the time the others left: python" in outcome.note
+    assert "skipped" not in outcome.note
+    assert outcome.coverage.unreported == []
+
+
+def test_a_tree_still_out_of_time_after_the_rerun_is_named(tmp_path, monkeypatch):
+    og, budgets = _slow_tree_setup(tmp_path, monkeypatch, second_pass_ok=False)
+    outcome = og.run(tmp_path, tmp_path / "src", timeout=300)
+    assert [t for t, _ in budgets].count("python") == 2
+    assert outcome.ok and "1 of 4" in outcome.note and "(out of time: python)" in outcome.note
+    assert outcome.coverage.unreported == ["python"]
