@@ -68,6 +68,7 @@
     {% else %}
     <p class="dim fs-cell">No cross-family model has answered yet.</p>
     {% endif %}
+    {% if rf.human %}{{ m.human_verdict(rf.human, rf.id) }}{% endif %}
     <p class="fs-cell mt-2"><a href="/research/{{ rf.research_id }}#cand-{{ rf.id }}">Open this
       candidate in deep review {{ rf.research_id }}</a></p>
   </div>

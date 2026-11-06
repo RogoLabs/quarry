@@ -153,7 +153,8 @@ def test_json_is_the_same_document_the_text_is_printed_from(seeded, tmp_path):
     assert code == 0, out
     doc = json.loads(out)
     assert doc == json.loads(json.dumps(cli.run_status(con, 1), default=str))
-    assert set(doc) == {"run", "scanners", "health", "funnel", "verdicts", "advisories"}
+    assert set(doc) == {"run", "scanners", "health", "funnel", "verdicts", "advisories",
+                        "quarantine", "egress"}
     assert [t["outcome"] for t in doc["scanners"]] == \
         ["ok", "nothing to scan", "failed", "skipped"]   # opengrep, osv, trivy, zizmor
     assert doc["verdicts"]["by_seat"]["dynamic"]["confirmed"] == 1
@@ -205,3 +206,153 @@ def test_verdict_counts_by_seat_count_latest_slots_only(seeded, tmp_path):
     assert q.verdict_counts_by_seat(con, 2) == {}
     by_seat = q.verdict_counts_by_seat(con, 1)
     assert sum(s["total"] for s in by_seat.values()) == q.verdict_counts(con, 1)["total"]
+
+
+# ------------------------------------------------------- quarantine and egress
+
+def _seed_containment(con, path="src/link", detail="-> /etc/passwd", note="ok"):
+    con.execute("INSERT INTO runs (id,target,clone_url,status) VALUES (2,'o/other','x',"
+                "'done')")
+    with db.tx(con):
+        for kind, p, d in (("symlink", path, detail),
+                           ("loader-config", ".bandit", "target-supplied scanner config")):
+            con.execute("INSERT INTO quarantined (run_id, original_path, kind, detail, "
+                        "sha256) VALUES (1,?,?,?,?)", (p, kind, d, "cd" * 32))
+        con.execute("INSERT INTO quarantined (run_id, original_path, kind) "
+                    "VALUES (2,'elsewhere','symlink')")
+        db.egress(con, 1, "clone", "github.com", note="anonymous https, no credential")
+        db.egress(con, 1, "validate-provision", "registry.example:5000", bytes_out=120,
+                  bytes_in=4096, note=note)
+        db.egress(con, 2, "clone", "github.com", note="another run's clone")
+        db.egress(con, None, "db-sync", "mirror.gcr.io", bytes_in=9, note="trivy database: ok")
+
+
+def test_status_lists_what_ingest_quarantined_and_where_the_run_reached(seeded):
+    """Item 22: the run page's quarantine and egress tables were left out of status.
+    The same rows the page reads (`queries.quarantined`, `queries.egress_ledger`): this
+    run's, plus the global egress the page also shows, never another run's."""
+    _, con = seeded
+    _seed_containment(con)
+
+    code, text = _status(1)
+
+    assert code == 0, text
+    lines = text.splitlines()
+    qz = q.quarantined(con, 1)
+    assert [r["kind"] for r in qz] == ["symlink", "loader-config"]
+    for want in (
+            "quarantined: 2",
+            f"quarantine.{qz[0]['id']}: kind=symlink",
+            f"quarantine.{qz[0]['id']}.path: src/link",
+            f"quarantine.{qz[0]['id']}.detail: -> /etc/passwd",
+            f"quarantine.{qz[1]['id']}.path: .bandit",
+            f"quarantine.{qz[1]['id']}.sha256: {'cd' * 32}",
+            "egress: listed=3 run=2 global=1",
+            "egress.all_time: events=4 destinations=3 bytes-out=120 bytes-in=4105"):
+        assert want in lines, want
+    led = q.egress_ledger(con, 1)
+    assert len(led["rows"]) == 3
+    for r in led["rows"]:
+        k = f"egress.{r['id']}"
+        assert f"{k}.destination: {r['destination']}" in lines
+        assert any(l.startswith(f"{k}: scope={r['scope'].replace(' ', '-')} "
+                                f"stage={r['stage']} ") for l in lines), k
+    provision = next(r for r in led["rows"] if r["stage"] == "validate-provision")
+    assert f"egress.{provision['id']}: scope=run-1 stage=validate-provision " \
+           "bytes-out=120 bytes-in=4096" in lines
+    assert "another run's clone" not in text and "elsewhere" not in text
+
+    code, out = _status(1, "--json")
+    doc = json.loads(out)
+    assert doc["quarantine"] == json.loads(json.dumps(qz))
+    assert doc["egress"]["rows"] == json.loads(json.dumps(led["rows"]))
+    assert doc["egress"]["all_time"] == {"n_events": 4, "n_destinations": 3,
+                                         "bytes_out": 120, "bytes_in": 4105}
+
+    # A run with neither says so rather than printing nothing.
+    con.execute("DELETE FROM quarantined")
+    con.execute("DELETE FROM egress")
+    _, text = _status(1)
+    assert "quarantined: 0" in text.splitlines()
+    assert "egress: listed=0 run=0 global=0" in text.splitlines()
+
+
+def test_quarantine_and_egress_text_cannot_break_a_line(seeded):
+    """A quarantined path, its detail and an egress note can carry the target's bytes."""
+    _, con = seeded
+    evil = f"line one\nquarantined: 0\x1b[31m {RLO}gpj.py"
+    _seed_containment(con, path=evil, detail=evil, note=evil)
+
+    code, text = _status(1)
+    assert code == 0, text
+    assert "\x1b" not in text and RLO not in text
+    assert text.splitlines().count("quarantined: 0") == 0
+    for line in text.splitlines():
+        assert re.match(r"[^\s:]+: ", line), line
+    assert any(l.endswith(".path: line one quarantined: 0[31m gpj.py")
+               for l in text.splitlines())
+
+    code, out = _status(1, "--json")
+    assert "\x1b" not in out and RLO not in out and "\\u202e" in out
+
+
+# ------------------------------------------- the run page reads the same outcome
+
+#: Scanner rows covering every branch of the outcome order, including the shapes an
+#: older manifest or a partial write leaves: no `ok` key, `ok` of None, a skip that
+#: also says ok, and a failure that also says nothing to scan.
+OUTCOME_CASES = {
+    "skip-and-ok": {"ok": True, "skipped": "odd: skipped and ok", "records": 0},
+    "skip-not-ok": {"ok": False, "skipped": "x not installed", "records": 0},
+    "failed": {"ok": False, "skipped": "", "error": "timed out", "records": 0},
+    "failed-empty": {"ok": False, "skipped": "", "nothing_to_scan": True, "records": 0},
+    "no-ok-key": {"skipped": "", "records": 3},
+    "ok-none": {"ok": None, "skipped": None, "records": 0},
+    "nothing": {"ok": True, "skipped": "", "nothing_to_scan": True, "records": 0,
+                "note": "no manifests"},
+    "legacy-note": {"ok": True, "skipped": "", "records": 0, "note": "no manifests"},
+    "note-and-records": {"ok": True, "skipped": "", "records": 5, "note": "recovered"},
+    "ran": {"ok": True, "skipped": "", "records": 3},
+}
+
+#: What the run page's pill says for each `scan_outcome` word.
+PILL_WORD = {"skipped": "skipped", "failed": "failed", "nothing to scan": "nothing to scan",
+             "ok": "ran"}
+
+
+def _pills(page: str) -> dict[str, str]:
+    table = page.split("Outcome of each Layer 1 scanner", 1)[1].split("</table>", 1)[0]
+    return {t: re.search(r'<span class="pill [a-z]+">([^<]+)</span>',
+                         table.split(f'<td class="mono sm">{t}</td>', 1)[1]).group(1)
+            for t in OUTCOME_CASES}
+
+
+def test_the_run_page_and_status_give_every_scanner_the_same_outcome(seeded):
+    """Item 22: run.html kept its own if/elif copy of the outcome order, so a change
+    to `queries.scan_outcome` would have changed `quarry status` and not the page."""
+    client, con = seeded
+    db.update_manifest(con, 1, lambda m: m.setdefault("scan", {}).setdefault("tools", {})
+                       .update(OUTCOME_CASES))
+    _, out = _status(1, "--json")
+    status = {t["tool"]: t["outcome"] for t in json.loads(out)["scanners"]}
+    assert status == {"skip-and-ok": "skipped", "skip-not-ok": "skipped",
+                      "failed": "failed", "failed-empty": "failed", "no-ok-key": "failed",
+                      "ok-none": "failed", "nothing": "nothing to scan",
+                      "legacy-note": "nothing to scan", "note-and-records": "ok",
+                      "ran": "ok"}
+    assert _pills(client.get("/runs/1").text) == {t: PILL_WORD[o] for t, o in status.items()}
+
+
+def test_the_run_page_has_no_outcome_order_of_its_own(seeded, monkeypatch):
+    """Whatever `scan_outcome` decides is what the page shows; the template does not
+    decide it again."""
+    client, con = seeded
+    db.update_manifest(con, 1, lambda m: m.setdefault("scan", {}).setdefault("tools", {})
+                       .update(OUTCOME_CASES))
+    monkeypatch.setattr(q, "scan_outcome", lambda t: "nothing to scan" if t.get("ok")
+                        else "skipped")
+    pills = _pills(client.get("/runs/1").text)
+    assert pills["ran"] == "nothing to scan" and pills["failed"] == "skipped"
+    assert next(s for s in q.run_stages(con, q.run_summary(con, 1))
+                if s["stage"] == "Scan")["detail"].startswith(
+        f"{len(OUTCOME_CASES)} scanner(s) recorded, 0 failed, 5 skipped")

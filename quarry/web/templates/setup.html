@@ -58,14 +58,18 @@
           <td class="mono sm">{% if d.reader %}{{ d.reader }}{% else %}<span class="dim">no scanner</span>{% endif %}</td>
           <td class="mono sm dim nowrap">{{ d.built|local if d.built else 'unknown' }}</td>
           <td class="r num nowrap">{% if d.age_days is number %}{{ '%.1f'|format(d.age_days) }} d{% else %}?{% endif %}
-            {%- if d.stale %} <span class="pill incomplete">stale</span>{% endif %}</td>
+            {%- if d.missing %} <span class="pill alarm">missing</span>
+            {%- elif d.stale %} <span class="pill incomplete">stale</span>
+            {%- elif not d.reader %} <span class="pill inert">{{ 'not used' if d.present else 'absent, not used' }}</span>{% endif %}</td>
           <td class="mono sm dim nowrap">{{ d.last_sync|local if d.last_sync else 'never, per the egress ledger' }}</td>
           <td class="dim sm">{{ d.basis|visible }}</td></tr>
       {% endfor %}
       </tbody>
     </table>
   </div>
-  <p class="note">Stale past {{ dbs.stale_days }} days. Read from
+  <p class="note">Stale past {{ dbs.stale_days }} days, or when its age is unknown; a
+    database no scanner reads is never called stale, and one a scanner reads that is not
+    on disk is missing. Read from
     <code>{{ dbs.dir|visible }}</code>. Syncing is the one deliberate network step, and
     every fetch is written to the <a href="/egress">egress ledger</a>.
     {{ m.cmd('quarry db sync') }} {{ m.cmd('quarry db status') }}</p>

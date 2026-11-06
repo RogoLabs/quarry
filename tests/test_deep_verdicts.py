@@ -208,6 +208,37 @@ def test_execute_counts_survivors_already_judged_intended(env, monkeypatch):
     assert stats["prior_intended"] == 1 and stats["prior_intended_survived"] == 1
 
 
+# ---------------------------------------------------------------- display
+
+
+def test_standing_reports_the_own_verdict_and_the_match_and_a_changed_mind(env):
+    """What the dashboard and the digest show, read once here rather than re-joined
+    in each of them (item 20)."""
+    con, src = env
+    first = _persist(con, src, 1, _finding())
+    assert verdicts.standing(con, first["id"]) == {"own": None, "prior": None}
+    vid = verdicts.record(con, first["id"], "intended", NOTE, actor="jerry")
+    again = _persist(con, src, 2, _finding())
+
+    s = verdicts.standing(con, again["id"])
+    assert s["own"] is None
+    p = s["prior"]
+    assert p["verdict_id"] == vid and p["verdict"] == "intended" and p["note"] == NOTE
+    assert p["rf_id"] == first["id"] and p["run_id"] == 1 and p["actor"] == "jerry"
+    assert p["basis"] == again["prior_match"] and "symbol" in p["basis"]
+    assert p["now"] is None
+
+    # The run-2 finding gets its own verdict, and the human changes their mind on the
+    # run-1 one after the match: the match still names what it matched, and says what
+    # the judged finding's verdict is now.
+    verdicts.record(con, again["id"], "unclear", "need the controller", actor="ops")
+    changed = verdicts.record(con, first["id"], "real", "owning_cna leaks")
+    s = verdicts.standing(con, again["id"])
+    assert s["own"]["verdict"] == "unclear" and s["own"]["actor"] == "ops"
+    assert s["prior"]["verdict_id"] == vid and s["prior"]["verdict"] == "intended"
+    assert s["prior"]["now"]["id"] == changed and s["prior"]["now"]["verdict"] == "real"
+
+
 # ---------------------------------------------------------------- CLI
 
 

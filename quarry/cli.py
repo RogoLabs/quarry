@@ -872,14 +872,25 @@ def run_status(con, run_id: int) -> dict | None:
             row["in"] = (row["out"] + s["kill"] + s["defer"] + s["merge"]
                          - s.get("restored", 0) - s.get("arrived", 0))
         stages.append(row)
+    # The run page's egress table: this run's rows and the global ones (db sync,
+    # target scoring), each marked with its scope, and the ledger's all-time totals,
+    # which are named as such here so they cannot be read as this run's.
+    led = q.egress_ledger(con, run_id)
+    egress = {"rows": led["rows"],
+              "all_time": {k: led[k] for k in ("n_events", "n_destinations",
+                                               "bytes_out", "bytes_in")}}
     return {
         "run": header,
-        "scanners": [{**t, "outcome": q.scan_outcome(t)} for t in run["scan_tools"]],
+        # Each row's `outcome` is queries.scan_outcome, set by run_summary, the same
+        # field the run page's pill reads.
+        "scanners": run["scan_tools"],
         "health": run["health"],
         "funnel": stages,
         "verdicts": {"by_verdict": q.verdict_counts(con, run_id),
                      "by_seat": q.verdict_counts_by_seat(con, run_id)},
         "advisories": q.advisories(con, run_id),
+        "quarantine": q.quarantined(con, run_id),
+        "egress": egress,
     }
 
 
@@ -983,6 +994,35 @@ def status_lines(s: dict) -> list[str]:
         out.append(f"{k}.file: {_line(a.get('path'))}")
         out.append(f"{k}.sha256: {_line(a.get('sha256'))}")
         out.append(f"{k}.created_at: {_line(a.get('created_at'))}")
+
+    # What ingest moved aside. The path and detail come from the target's tree.
+    out.append(f"quarantined: {len(s['quarantine'])}")
+    for qz in s["quarantine"]:
+        k = f"quarantine.{qz['id']}"
+        out.append(f"{k}: " + _pairs(kind=qz.get("kind")))
+        out.append(f"{k}.path: {_line(qz.get('original_path'))}")
+        out.append(f"{k}.detail: {_line(qz.get('detail'))}")
+        out.append(f"{k}.sha256: {_line(qz.get('sha256'))}")
+
+    # The network. Listed: this run's rows and the global ones, as on the run page,
+    # but all of them; the page shows twelve and links to the rest.
+    e, rows = s["egress"], s["egress"]["rows"]
+    mine = sum(1 for r in rows if r.get("scope") != "global")
+    out.append("egress: " + _pairs(listed=len(rows), run=mine,
+                                   **{"global": len(rows) - mine}))
+    t = e["all_time"]
+    out.append("egress.all_time: " + _pairs(
+        events=t["n_events"], destinations=t["n_destinations"],
+        bytes_out=t["bytes_out"], bytes_in=t["bytes_in"]))
+    for r in rows:
+        k = f"egress.{r['id']}"
+        out.append(f"{k}: " + _pairs(scope=r.get("scope"), stage=r.get("stage"),
+                                     bytes_out=r.get("bytes_out"),
+                                     bytes_in=r.get("bytes_in")))
+        out.append(f"{k}.destination: {_line(r.get('destination'))}")
+        if r.get("note"):
+            out.append(f"{k}.note: {_line(r['note'])}")
+        out.append(f"{k}.created_at: {_line(r.get('created_at'))}")
     return out
 
 

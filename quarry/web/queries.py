@@ -21,8 +21,9 @@ from pathlib import Path
 from typing import Any
 
 from .. import db, dismissals
+from ..research import verdicts as deep_verdicts
 
-BANDS = ("known-good", "unmeasured", "known-bad")
+BANDS =("known-good", "unmeasured", "known-bad")
 
 
 @dataclass
@@ -208,6 +209,7 @@ def research_finding(con: sqlite3.Connection, oid: int) -> dict[str, Any] | None
         refs = []
     d["refutations"] = [x for x in refs if isinstance(x, dict)] \
         if isinstance(refs, list) else []
+    d["human"] = deep_verdicts.standing(con, d["id"])
     return d
 
 
@@ -587,9 +589,11 @@ def producer_exists(con: sqlite3.Connection, producer_id: str) -> bool:
 
 
 def quarantined(con: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]:
-    """What ingest moved aside for a run."""
+    """What ingest moved aside for a run, in the order it was moved. The run page and
+    `quarry status` both list it from here."""
     return [dict(r) for r in con.execute(
-        "SELECT kind,original_path,detail FROM quarantined WHERE run_id=?", (run_id,))]
+        "SELECT id,kind,original_path,detail,sha256,created_at FROM quarantined "
+        "WHERE run_id=? ORDER BY id", (run_id,))]
 
 
 def research_row(con: sqlite3.Connection, rid: int) -> dict[str, Any] | None:
@@ -644,7 +648,9 @@ def run_summary(con: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
         # "nothing to scan", which mislabelled opengrep's per-tree recovery. A note
         # with zero records is the closest reading of those older rows.
         t.setdefault("nothing_to_scan", bool(t.get("note")) and not t.get("records"))
-    d["health"] = [{"source": src, "tool": tool, "message": msg}
+        # Decided once, here, for the run page and `quarry status` alike.
+        t["outcome"] = scan_outcome(t)
+    d["health"] =[{"source": src, "tool": tool, "message": msg}
                    for src, by_tool in sorted((m.get("health") or {}).items())
                    if isinstance(by_tool, dict)
                    for tool, msgs in sorted(by_tool.items()) for msg in (msgs or [])]
@@ -665,8 +671,10 @@ def run_summary(con: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
 
 
 def scan_outcome(t: dict[str, Any]) -> str:
-    """One word for a `run_summary()["scan_tools"]` row, in run.html's pill order:
-    a skip wins over a failure, and a failure over nothing-to-scan."""
+    """One word for a `run_summary()["scan_tools"]` row, which `run_summary` stores as
+    the row's `outcome`: a skip wins over a failure, and a failure over
+    nothing-to-scan. The run page's pill (`_macros.scan_pill`) and `quarry status`
+    both read that, so neither keeps a copy of this order."""
     if t.get("skipped"):
         return "skipped"
     if not t.get("ok"):
@@ -1030,7 +1038,26 @@ def research_detail(con: sqlite3.Connection, rid: int) -> dict[str, Any] | None:
             f["refutations"] = json.loads(f.get("refutations") or "[]")
         except ValueError:
             f["refutations"] = []
+        f["human"] = deep_verdicts.standing(con, f["id"])
+    head["survivors"] = research_survivors(con, head["run_id"], rid)
     return head
+
+
+def research_survivors(con: sqlite3.Connection, run_id: int,
+                       rid: int) -> dict[str, Any]:
+    """One research run's Layer 2 survivors with their human verdicts: the list
+    `quarry deep-survivors` prints (`verdicts.survivors`, the digest's bar), narrowed
+    to this research run, each with `verdicts.standing`. Not capped: the candidate
+    cards stop at FINDINGS_SHOWN, and a survivor must not fall off this list."""
+    rows = [s for s in deep_verdicts.survivors(con, run_id) if s["research_id"] == rid]
+    for s in rows:
+        s["human"] = deep_verdicts.standing(con, s["id"])
+    return {"rows": rows,
+            "new": sum(1 for s in rows if not s["prior_verdict"]),
+            "prior_intended": sum(1 for s in rows if s["prior_verdict"] == "intended"),
+            "prior_other": sum(1 for s in rows
+                               if s["prior_verdict"] in ("real", "unclear")),
+            "judged": sum(1 for s in rows if s["verdict"])}
 
 
 def ingested_runs(con: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -1386,8 +1413,8 @@ def run_stages(con: sqlite3.Connection, run: dict[str, Any],
         "SELECT COUNT(*) c FROM occurrences o JOIN producers p ON p.id = o.producer_id "
         "WHERE o.run_id=? AND p.tool != 'deep'", (rid,)).fetchone()["c"]
     if tools:
-        failed = sum(1 for t in tools if not t.get("ok") and not t.get("skipped"))
-        skipped = sum(1 for t in tools if t.get("skipped"))
+        outcomes = [scan_outcome(t) for t in tools]
+        failed, skipped = outcomes.count("failed"), outcomes.count("skipped")
         status = "failed" if failed else "done"
         detail = (f"{len(tools)} scanner(s) recorded, {failed} failed, {skipped} skipped; "
                   f"{n_scan} occurrence(s)")
@@ -1486,20 +1513,32 @@ def environment(con: sqlite3.Connection, root: Path, db_path: Path) -> dict[str,
 
 def vulndb_status(con: sqlite3.Connection) -> dict[str, Any]:
     """Each vulnerability database's build time and age now, which scanner reads it,
-    and when `quarry db sync` last reached the network for it (the egress ledger)."""
+    and when `quarry db sync` last reached the network for it (the egress ledger).
+
+    Stale is a warning about a scanner's clean results, so only a database a scanner
+    reads (`vulndb.DB_OF_TOOL`) can be stale: its age unknown or past STALE_DAYS. One a
+    scanner reads that is not on disk at all is `missing`, louder than stale. A
+    database no scanner reads is neither: Grype's has had no adapter since decision A
+    and was removed on purpose in decision H, and the panel called it stale anyway,
+    which taught the operator to ignore the word."""
     from .. import vulndb
     readers = {v: k for k, v in vulndb.DB_OF_TOOL.items()}
+    root = vulndb.db_dir()
     rows = []
-    for name, a in vulndb.ages().items():
+    for name, a in vulndb.ages(root=root).items():
         age = a.get("age_days")
+        reader = readers.get(name)
+        present = (root / name).exists()
         last = con.execute(
             "SELECT MAX(created_at) t FROM egress WHERE stage='db-sync' AND note LIKE ?",
             (f"{name}%",)).fetchone()["t"]
         rows.append({"name": name, "built": a.get("built"), "age_days": age,
-                     "basis": a.get("basis") or "", "reader": readers.get(name),
-                     "stale": not isinstance(age, (int, float)) or age > vulndb.STALE_DAYS,
+                     "basis": a.get("basis") or "", "reader": reader, "present": present,
+                     "stale": reader is not None and (
+                         not isinstance(age, (int, float)) or age > vulndb.STALE_DAYS),
+                     "missing": reader is not None and not present,
                      "last_sync": last})
-    return {"rows": rows, "dir": str(vulndb.db_dir()), "stale_days": vulndb.STALE_DAYS}
+    return {"rows": rows, "dir": str(root), "stale_days": vulndb.STALE_DAYS}
 
 
 def targets(con: sqlite3.Connection, limit: int = 100) -> dict[str, Any]:

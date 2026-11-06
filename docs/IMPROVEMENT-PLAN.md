@@ -532,9 +532,9 @@ records the deep-review digest in the run manifest and the advisories pages list
 Resume claims the research run in the database before it spawns. A Setup page and a
 per-run terminal table give each CLI-only stage a state and a command to copy, with no
 buttons that run anything. Item 9's four defects are fixed. After all six branches were
-merged, 15 pages rendered 200 against a copy of the post-funnel live DB. Not done: a
-parallel race test for the resume claim. (`quarry deep --resume` from a terminal takes
-the claim since item 26.) Open: decision J below.
+merged, 15 pages rendered 200 against a copy of the post-funnel live DB. (`quarry deep
+--resume` from a terminal takes the claim since item 26, and the parallel race test for
+the claim was added on 2026-11-06; see item 26.) Open: decision J below.
 
 ---
 
@@ -670,9 +670,23 @@ be told from a genuine one.
   deleted; the space comes back when the Trash is emptied. `db status` and `doctor`
   report Grype as absent and still run. The grype binary is still installed. Kept:
   `quarry-2026-11-05-before-restart.db` and `quarry-2026-11-06-before-granite.db`, the
-  rollback points for the restart and item 27. Also seen, not fixed: the dashboard's
-  database panel marks a database with no age as stale, so Grype still shows there as
-  stale, as it already did at 9.6 days old, though nothing reads it.
+  rollback points for the restart and item 27. Also seen then: the dashboard's
+  database panel marked a database with no age as stale, so Grype still showed there
+  as stale, as it already did at 9.6 days old, though nothing reads it.
+  **Done 2026-11-06.** `queries.vulndb_status` now calls a database stale only when a
+  scanner reads it (`vulndb.DB_OF_TOOL`) and its age is unknown or past 7 days. A read
+  database whose directory is not on disk is `missing`, shown as an alarm pill, which is
+  louder than the stale pill it had before. A database no scanner reads shows "not
+  used", or "absent, not used" when its directory is gone, and is never stale, at any
+  age. Checked by a new test in `tests/test_web_dashboard.py` over an empty database
+  directory, then Trivy 1 day, OSV 20 days and Grype 30 days old, then Trivy with no
+  metadata; without the change it fails on Grype being stale. The Setup page test's
+  expectation for an empty directory changed from 3 stale pills to 2 missing (Trivy,
+  OSV) and Grype absent and not used. Against the live database directory (read only)
+  the panel reads Trivy and OSV 0.6 days old and Grype absent, not used. Not changed:
+  the run page's table of databases at scan time, which lists only databases a scanner
+  read during that scan, and `quarry db status`, which has no stale label but still
+  prints any age past 7 days in red, a present Grype database's included.
 - **I. Re-refute. Superseded 2026-11-06 by the hard reset:** the runs it concerns are
   archived rather than re-refuted (Jerry, 2026-11-06: abandon the current runs and start
   over once the plan is built). The text below is kept as the record.
@@ -1030,9 +1044,34 @@ guard. Human verdicts are rows in migration v9's append-only `deep_verdicts` tab
 `quarry deep-survivors <run>` lists survivors as new or previously judged. A later run
 matches on lens and file plus enclosing symbol or overlapping quote; an `intended`
 match reaches the refuter with the note and is never dropped. Run 1's two verdicts
-(#1, #141) were recorded on 2026-11-06 (decision G). Not done: showing verdicts in
-the dashboard and
-digest, and Django URLconf routes, so the block is empty on Django targets.
+(#1, #141) were recorded on 2026-11-06 (decision G). Not done: Django URLconf routes,
+so the block is empty on Django targets. (Showing verdicts in the dashboard and the
+digest, also left undone then, is done below.)
+
+**Done 2026-11-06, verdicts shown.** `verdicts.standing` reads, for one research
+finding, its newest verdict (`latest`) and the verdict a deep run matched it to
+(`detail` of `prior_verdict_id`, with `prior_match` as the basis). A match records the
+verdict current when the finding was stored, so when the judged finding has a newer
+verdict since, that is returned too and shown as "changed since the match". The
+dashboard and the digest read only that, through one macro (`_macros.human_verdict`)
+on the pages: the triage detail pane of a deep candidate, each candidate card on
+`/research/<id>`, and a new "Survivors and human verdicts" table at the top of that
+page, which lists the research run's survivors from `verdicts.survivors` (the
+`deep-survivors` list) with counts of new and previously judged, uncapped because the
+cards stop at 60. The digest's per-finding section now gives the research finding id,
+the human verdict with actor, time and note (or the `quarry deep-verdict` command to
+record one), and the matched earlier finding with its verdict, or "none; new to human
+review". Notes, actors and matched titles go through `|visible` on the pages and the
+digest's inert-text escaping. Four new tests (`standing` in
+`tests/test_deep_verdicts.py`, the triage pane and the research run page in
+`tests/test_web_dashboard.py`, the digest in `tests/test_disclosure.py`) all fail
+without the change; the template contract test now accepts one macro calling another
+in the same file. On a copy of the live database, `/research/1` lists its 2 survivors
+with the two decision G verdicts, the evidence pages of #1 and #141 show them, and the
+run 1 digest (written to a scratch directory, not `reports/`) carries both; each of
+the 4 research run pages and its progress fragment rendered in under 0.1 s. Not done: a judged finding that is not a survivor and falls
+below the 60 cards shown is not on its research run page (its evidence page still
+shows the verdict), and the digest header does not count judged findings.
 
 ### 21. Layer 2 changes are not compared against a fixed set
 
@@ -1079,9 +1118,38 @@ run header, each scanner's outcome and coverage counts, health warnings by sourc
 funnel stage with in, kill, defer, merge, boost, restored and out, verdicts by state and
 seat, and advisories. Text from a target or tool is scrubbed of control and bidi
 characters and flattened to one line. Against a read-only backup of the live database,
-run 3 printed 12 stages from 6,297 in to 765 out with drift 0. Not done: `run.html`
-keeps its own copy of the outcome logic, and status leaves out the quarantine and egress
-tables.
+run 3 printed 12 stages from 6,297 in to 765 out with drift 0. (The two parts left
+undone then, the run page's own outcome logic and the missing quarantine and egress
+tables, were done on 2026-11-06; see below.)
+
+**Done 2026-11-06, one outcome rule.** `run_summary` stores `queries.scan_outcome` on
+each scanner row as `outcome`; the run page's pill (`_macros.scan_pill`) and `quarry
+status` both read that field, and the page's own if/elif copy is gone, as is a third
+copy in the terminal-stage table's failed and skipped counts (`run_stages`). The page
+still says "ran" where status says `ok`. Checked by rendering `/runs/<id>` before and
+after: on a fixture run with 11 scanner rows covering every branch (a skip that also
+says ok, a failure that also says nothing to scan, no `ok` key, `ok` of None, a legacy
+note), the pages differ only in whitespace inside the pill cell and in the fixture's
+own start time; on a copy of the live database, all 7 run pages are byte-identical
+once the per-process form token is masked.
+The old copy was not wrong on any of those rows. Two tests in `tests/test_status.py`:
+the page and `status --json` agree on 10 such rows, and a page rendered with
+`scan_outcome` replaced follows the replacement, which fails without the change.
+
+**Done 2026-11-06, quarantine and egress.** `quarry status` now ends with what ingest
+quarantined (`quarantine.<id>` with its kind, path, detail and hash) and the egress the
+run page shows (`egress.<id>` with scope, stage, bytes out and in, destination, note
+and time), from the page's own `queries.quarantined` and `queries.egress_ledger`:
+this run's rows and the global ones, never another run's. Unlike the page, which shows
+the newest 12, status lists every row. The ledger's totals are printed as
+`egress.all_time` and sit under `all_time` in the JSON, so they cannot be read as this
+run's. Paths, details, destinations and notes go through the same scrub and
+flattening as the rest of the text; the JSON escapes them as before. `quarantined()`
+now also returns each row's id, hash and time, in id order. Two new tests in
+`tests/test_status.py` (the rows, the scoping and the totals; hostile text in a path,
+detail and note), and the JSON test's key list gained the two sections; all three fail
+without the change. Against a copy of the live database, run 3 printed 0 quarantined,
+and 8 egress rows, 1 its own clone and 7 global database syncs, out of 14 all-time.
 
 ### 23. Bandit, Checkov and Gitleaks also skip trees without saying so [measured]
 
@@ -1236,8 +1304,23 @@ refused: `--resume` of a research run that belongs to a different ingest run tha
 one named, which would check its units against the wrong source tree and which
 `live_status` could not see, since it matches the worker's command line on the ingest
 run. 20 tests in `tests/test_resume_guard.py`; with the refusal disabled, 9 of them
-fail. Not done: a test with two real worker processes racing (the serialisation rests
-on SQLite's `BEGIN IMMEDIATE`; the tests take one claim after the other).
+fail. Those tests take one claim after the other; the race test below runs two at once.
+
+**Done 2026-11-06, the race test.** `test_two_processes_resuming_at_once_get_one_claim`
+in `tests/test_resume_guard.py` starts two Python processes whose command lines end
+`quarry.cli deep 1`, so `ps` shows each as run 1's worker. Each opens its own connection
+to one SQLite file and, in each of 30 rounds, waits on that round's barrier file and
+calls `runner.hold` the moment it appears; the test resets the research run to
+`stopped` between rounds, and both processes stay alive throughout, since a claimant
+that exited would rightly read as `died`. Every round must end with exactly one claim,
+the database naming the claimant's pid, and the other process refused because that pid
+holds the run. In 5 runs of the test, 29 or 30 of the 30 rounds had both processes
+inside `hold` at once (the loser entered before the winner left); the test requires at
+least half. One run at 500 rounds also passed. A run took under 2.5 seconds. With
+`hold`'s transaction replaced by no transaction, both processes claimed in round 0, so
+the test sees the race it guards against. It found no race, and `hold` is unchanged.
+Not covered: the dashboard's Resume racing a terminal resume. They claim through
+different code, both in a `BEGIN IMMEDIATE` transaction.
 
 Also seen: `/private/tmp/quarry` holds 78 leftover `run-9xxxxx` directories, none
 mounted, the oldest from 2026-11-02, apparently left by tests. Harmless, not cleaned.

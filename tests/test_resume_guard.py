@@ -188,3 +188,130 @@ def test_the_cli_takes_a_free_run_and_reads_the_dashboards_marker(seeded, monkey
     r = _cli(monkeypatch, "deep", "1", "--resume", "1", env={q.RESUME_CLAIM_ENV: "1"})
     assert isinstance(r.exception, _Reached), r.output
     assert _row(con)["status"] == "running"
+
+
+# ----------------------------------------------- two real processes, one database
+
+#: Run in two child processes by the race test. Each poses as a worker to `ps` (its
+#: command line ends `quarry.cli deep 1`, which a script path ignores), opens its own
+#: connection to the test database, and then, round after round, waits on the round's
+#: barrier file and calls `runner.hold` the moment it appears. It stays alive between
+#: rounds: a claimant that exited would read as `died`, and the other process would
+#: then rightly take the run, which is not the race being tested.
+_RACER = r"""
+import json, os, sys, time
+from pathlib import Path
+sys.path.insert(0, os.environ["RACE_ROOT"])
+import quarry
+from quarry import db
+from quarry.research import runner
+
+d, me = Path(os.environ["RACE_DIR"]), os.environ["RACE_NAME"]
+rounds, give_up = int(os.environ["RACE_ROUNDS"]), time.time() + 120
+
+
+def wait_for(p):
+    while not p.exists():
+        if (d / "stop").exists():          # the test ended early, having failed
+            sys.exit(0)
+        if time.time() > give_up:
+            sys.exit(f"{me}: gave up waiting for {p.name}")
+
+
+def put(name, text):                       # whole or absent, never half written
+    (d / f"{name}.tmp").write_text(text)
+    os.replace(d / f"{name}.tmp", d / name)
+
+
+con = db.connect(Path(os.environ["RACE_DB"]))
+put(f"ready-{me}", quarry.__file__)
+for i in range(rounds):
+    wait_for(d / f"go-{i}")
+    t0 = time.time()
+    try:
+        runner.hold(con, 1, 1)
+        out = {"claimed": True, "why": ""}
+    except runner.ResumeRefused as e:
+        out = {"claimed": False, "why": str(e)}
+    out.update(t0=t0, t1=time.time(), pid=os.getpid())
+    put(f"result-{i}-{me}.json", json.dumps(out))
+wait_for(d / "stop")
+"""
+
+RACE_ROUNDS = 30
+
+
+def test_two_processes_resuming_at_once_get_one_claim(seeded, tmp_path):
+    """P3 item 7 and item 26: the claim is one `BEGIN IMMEDIATE` transaction, so two
+    resumes started at the same moment are serialised and the second reads the first
+    as running. The tests above take one claim after the other; here two real
+    processes on one SQLite file call `runner.hold` together, released by one barrier
+    file, for RACE_ROUNDS rounds. Every round must end with exactly one claim, held by
+    the process the database names, and the other refused because that process holds
+    the run."""
+    import json
+    import subprocess
+    import time
+    from quarry import config
+    _, con = seeded
+    _stopped_research(con)
+    root = Path(__file__).resolve().parents[1]
+    script = tmp_path / "racer.py"
+    script.write_text(_RACER)
+    gate = tmp_path / "gate"
+    gate.mkdir()
+    env = {**os.environ, "RACE_ROOT": str(root), "RACE_DIR": str(gate),
+           "RACE_DB": str(config.paths().db), "RACE_ROUNDS": str(RACE_ROUNDS)}
+    env.pop(q.RESUME_CLAIM_ENV, None)
+    procs = {name: subprocess.Popen(
+                 [sys.executable, str(script), "quarry.cli", "deep", "1"],
+                 env={**env, "RACE_NAME": name}, stderr=subprocess.PIPE, text=True)
+             for name in ("a", "b")}
+
+    def wait_for(paths, what):
+        deadline = time.time() + 60
+        while not all(p.exists() for p in paths):
+            dead = {n: p.poll() for n, p in procs.items() if p.poll() is not None}
+            if dead or time.time() > deadline:
+                errs = {n: procs[n].stderr.read() for n in dead}
+                pytest.fail(f"waiting for {what}: exited {dead}, stderr {errs}")
+            time.sleep(0.002)
+
+    overlapped = 0
+    try:
+        wait_for([gate / "ready-a", gate / "ready-b"], "both racers to start")
+        for n in ("a", "b"):
+            # A script's own directory comes first on sys.path, so this proves the
+            # racers run this checkout's quarry, not an installed copy.
+            assert Path((gate / f"ready-{n}").read_text()).is_relative_to(root)
+        for i in range(RACE_ROUNDS):
+            con.execute("UPDATE research_runs SET status='stopped', pid=NULL, host=NULL, "
+                        "heartbeat=NULL WHERE id=1")
+            (gate / f"go-{i}").touch()
+            wait_for([gate / f"result-{i}-a.json", gate / f"result-{i}-b.json"],
+                     f"round {i}")
+            res = {n: json.loads((gate / f"result-{i}-{n}.json").read_text())
+                   for n in ("a", "b")}
+            claimed = [n for n, r in res.items() if r["claimed"]]
+            assert len(claimed) == 1, f"round {i}: {res}"
+            won, lost = res[claimed[0]], res[({"a", "b"} - set(claimed)).pop()]
+            assert _row(con)["pid"] == won["pid"] == procs[claimed[0]].pid, (i, res)
+            assert _row(con)["status"] == "running"
+            assert f"pid {won['pid']}" in lost["why"], (i, res)
+            assert "is running" in lost["why"] or "is unverified" in lost["why"], (i, res)
+            # Both were inside hold() at once: the loser entered before the winner
+            # left, so its wait was on the lock, not on the order of the barrier.
+            overlapped += lost["t0"] < won["t1"]
+    finally:
+        (gate / "stop").touch()
+        for p in procs.values():
+            try:
+                p.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.wait()
+    assert all(p.returncode == 0 for p in procs.values()), \
+        {n: p.stderr.read() for n, p in procs.items()}
+    # Without overlap this would only re-run the sequential test above. The barrier
+    # releases both within a poll of each other; demand that it did so in most rounds.
+    assert overlapped >= RACE_ROUNDS // 2, f"{overlapped} of {RACE_ROUNDS} rounds overlapped"
