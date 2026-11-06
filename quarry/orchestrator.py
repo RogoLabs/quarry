@@ -330,6 +330,12 @@ def scan_health(per_tool: dict[str, dict[str, Any]], lockfiles: int) -> dict[str
             msgs.append(f"failed: {info['error']}")
         if isinstance(info.get("coverage"), dict):
             msgs += coverage_health(info["coverage"])
+        if dropped := info.get("dropped"):
+            msgs.append(f"{sum(dropped.values())} result(s) dropped from the report: "
+                        + ", ".join(f"{k} {v}" for k, v in sorted(dropped.items())))
+        if bad := info.get("bad_lines"):
+            msgs.append(f"{bad} result(s) had a line number that is not a positive "
+                        f"integer and were stored without a line")
         lined, got = info.get("lined", 0), info.get("captured", 0)
         if lined and got / lined < 0.5:
             msgs.append(f"evidence captured for {got} of {lined} located finding(s); "
@@ -394,6 +400,7 @@ def scan(paths: Paths, con: sqlite3.Connection, run_id: int, *,
             "skipped": outcome.skipped, "error": outcome.error, "note": outcome.note,
             "nothing_to_scan": outcome.nothing_to_scan,
             "lined": 0, "captured": 0,
+            "dropped": dict(outcome.dropped), "bad_lines": 0,
         }
         if outcome.coverage is not None:
             if expected is None:
@@ -469,14 +476,27 @@ def _persist(con: sqlite3.Connection, run_id: int, target: str, git_sha: str | N
     `secrets` is every secret known for the run. All of them are redacted from every
     window, message and raw result, whichever tool produced the record: a bandit hit
     two lines below a key captures the same window the Gitleaks hit does."""
-    from .taint import (Evidence, extract_evidence, finding_id, redact_in, redact_obj,
-                        redact_secret)
+    from .taint import (Evidence, extract_evidence, finding_id, line_number, redact_in,
+                        redact_obj, redact_secret)
 
     with db.tx(con):
         for rec in records:
             pid = db.upsert_producer(con, tool, rec.rule_id, cwe=rec.cwe,
                                      default_severity=rec.severity)
             known = (secrets | {rec.secret}) if rec.secret else secrets
+
+            # A line is the tool's word, and a tool can write "12", 12.5 or -4. The
+            # first two raised in extract_evidence, which rolled back this tool's rows
+            # and ended the scan before the tools after it (IMPROVEMENT-PLAN P4 side
+            # finding). Anything but a positive integer is stored as no line, and
+            # counted so the loss shows in the run's health.
+            start, end = line_number(rec.start_line), line_number(rec.end_line)
+            if ((start is None and rec.start_line is not None)
+                    or (end is None and rec.end_line is not None)):
+                if tool in summary.per_tool:
+                    summary.per_tool[tool]["bad_lines"] = \
+                        summary.per_tool[tool].get("bad_lines", 0) + 1
+            rec.start_line, rec.end_line = start, end
 
             # Evidence first, redacted with every known secret (Seat 4).
             ev: Evidence | None = extract_evidence(

@@ -201,26 +201,56 @@ def _run_with_report(vol: Path, monkeypatch, doc):
     return ck.run(vol, vol / "src", timeout=60)
 
 
-@pytest.mark.parametrize("bad", [
+_DAMAGED = [
     {"ruleId": "X", "locations": ["Dockerfile"]},
     {"ruleId": "X", "locations": {"0": {}}},
     {"ruleId": "X", "locations": [{"physicalLocation": "/etc/passwd"}]},
     {"ruleId": "X", "locations": [{"physicalLocation": {"artifactLocation": "/etc/passwd"}}]},
+    {"ruleId": "X", "locations": [{"physicalLocation": {
+        "artifactLocation": {"uri": "Dockerfile"}, "region": "1-2"}}]},
     {**_result("Dockerfile"), "message": "not a mapping"},
     {**_result("Dockerfile"), "properties": "not a mapping"},
+    {**_result("Dockerfile"), "properties": {"tags": 7}},
     {**_result("Dockerfile"), "partialFingerprints": ["x"]},
-], ids=["location-str", "locations-dict", "physical-str", "artifact-str", "message-str",
-        "properties-str", "fingerprints-list"])
-def test_a_damaged_checkov_result_is_dropped_or_refused_never_stored(vol, monkeypatch, bad):
-    """One structurally damaged result beside the good ones may cost that result or the
-    whole report, but only loudly: the outcome is a success carrying every good finding
-    and nothing else, or a failure with an error. Never a success built on a path that
-    skipped the boundary, and never a success that quietly lost the good findings."""
+    {**_result("Dockerfile"), "level": ["error"]},
+    {**_result("Dockerfile"), "ruleId": 7},
+]
+_DAMAGED_IDS = ["location-str", "locations-dict", "physical-str", "artifact-str",
+                "region-str", "message-str", "properties-str", "tags-int",
+                "fingerprints-list", "level-list", "rule-int"]
+
+
+@pytest.mark.parametrize("bad", _DAMAGED, ids=_DAMAGED_IDS)
+def test_a_damaged_checkov_result_costs_that_result_and_is_counted(vol, monkeypatch, bad):
+    """One structurally damaged result beside the good ones costs that one result, and
+    the outcome says so. It used to raise out of the parser, which failed the whole tool
+    and lost every good finding beside it (IMPROVEMENT-PLAN P4 side finding)."""
     outcome = _run_with_report(vol, monkeypatch, _sarif(_good(vol) + [bad]))
-    if outcome.ok:
-        assert sorted(r.path for r in outcome.records) == sorted(GOOD)
-    else:
-        assert outcome.error and outcome.records == []
+    assert outcome.ok, outcome.error
+    assert sorted(r.path for r in outcome.records) == sorted(GOOD)
+    assert outcome.dropped == {base.DAMAGED_RESULT: 1}
+
+
+def test_damaged_results_are_counted_in_the_manifest_and_health(tmp_path, monkeypatch):
+    """Through orchestrator.scan: the count reaches the stored outcome and a health
+    warning, so a report that lost results to damage does not read as a clean one."""
+    ck = tools.Checkov()
+    c, paths = _scan_env(tmp_path, monkeypatch, {"checkov": ck})
+    mount = tmp_path / "vol"
+    (mount / "src" / "Dockerfile").write_text(DOCKERFILE)
+    (mount / "out").mkdir()
+    doc = _sarif([_result("Dockerfile"), _result("app.py")] + _DAMAGED[:3]
+                 + [_result("/etc/passwd")])
+    monkeypatch.setattr(ck, "available", lambda: "/usr/local/bin/checkov")
+    monkeypatch.setattr(base, "tier1", lambda *a, **kw: (_write_report(mount, doc), _Res())[1])
+
+    s = orchestrator.scan(paths, c, 1)
+
+    kept = db.read_manifest(c, 1)["scan"]["tools"]["checkov"]
+    assert kept["ok"] and kept["records"] == 2
+    assert kept["dropped"] == {base.DAMAGED_RESULT: 3, base.NO_PATH: 1}
+    assert any("4 result(s) dropped from the report" in m and "damaged 3" in m
+               for m in s.health["checkov"]), s.health["checkov"]
 
 
 @pytest.mark.parametrize("doc", [

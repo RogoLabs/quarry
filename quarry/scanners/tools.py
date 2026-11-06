@@ -234,7 +234,7 @@ class Opengrep(Scanner):
         doc = taint.load_json(out)
         if not doc:
             return
-        for rec in sarif_records(doc, src, self.name):
+        for rec in sarif_records(doc, src, self.name, dropped=self.dropped):
             rec.rule_id = self.normalise_rule_id(rec.rule_id)
             yield rec
 
@@ -340,7 +340,7 @@ class Zizmor(Scanner):
         # zizmor writes SARIF to stdout; the runner captured it in logs/.
         stdout = out.parent.parent / "logs" / f"{self.name}.stdout"
         doc = taint.load_json(stdout if stdout.exists() else out)
-        return sarif_records(doc, src, self.name) if doc else []
+        return sarif_records(doc, src, self.name, dropped=self.dropped) if doc else []
 
 
 # osv-scanner aborts the whole offline scan (exit 127, no output) if any ecosystem it
@@ -436,7 +436,7 @@ class TrivyFS(Scanner):
 
     def parse(self, out: Path, src: Path) -> Iterable[Record]:
         doc = taint.load_json(out)
-        return sarif_records(doc, src, self.name) if doc else []
+        return sarif_records(doc, src, self.name, dropped=self.dropped) if doc else []
 
 
 class Checkov(Scanner):
@@ -479,7 +479,7 @@ class Checkov(Scanner):
         # checkov writes results.sarif into the directory it is given.
         sarif = out.parent / "results_sarif.sarif"
         doc = taint.load_json(sarif) if sarif.exists() else None
-        return sarif_records(doc, src, self.name) if doc else []
+        return sarif_records(doc, src, self.name, dropped=self.dropped) if doc else []
 
 
 # Gitleaks runs first: every later tool's evidence window is redacted with the

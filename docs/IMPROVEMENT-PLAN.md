@@ -579,6 +579,38 @@ not counted in `refuter_errors`, so the gate's "N refuter error(s)" can say 0 wh
 every refuter errored; and a pre-fix record that names the other real refuter cannot
 be told from a genuine one.
 
+**Done 2026-11-06, the first two side findings.** A damaged SARIF result now costs that
+result only. `sarif_records` drops a result whose location, physical location, artifact
+location, region, message, properties or `partialFingerprints` is present but not a
+mapping, whose `locations` or `tags` is not a list, or whose `ruleId`, `level` or
+fingerprint is not a string. It counts each drop by reason on `ScanOutcome.dropped`:
+`damaged`, or `no path in the clone` for a result with no location or one `rel_or_none`
+refused, which used to be dropped without a count. The orchestrator stores the counts in
+`manifest.scan.tools.<tool>.dropped` and adds a health warning ("N result(s) dropped
+from the report"). A log whose frame is broken (`runs` not a list of runs) still fails
+the tool, loudly, as before. Checked: 11 damaged shapes, each placed beside five good
+Checkov results, now keep all five and count one drop. On the previous code 10 of the 11
+failed the tool with no records, and the eleventh, a numeric `ruleId`, was kept as a
+finding (in opengrep's parser the same value would have raised, since it normalises the
+id as a string). Re-parsing run 7's own SARIF reports (opengrep,
+checkov, trivy and zizmor, 756 records) dropped nothing, so the warning should not fire
+on an ordinary run. Bandit and Gitleaks write their own JSON, not SARIF, and a result
+there that is not a mapping still fails the tool; not changed.
+
+For the line number: `taint.line_number` accepts only a positive int as a line, so not a
+bool, string, float, zero or negative value. `_persist` passes each record's start and
+end line through it, stores anything else as no line, and counts the record in the
+tool's `bad_lines`, which becomes a health warning. `extract_evidence` applies the same
+rule itself, since the deep-review path calls it too. The tests came first and failed
+on the previous code: with `"12"`, `[3]` or `{"n": 1}` as the line, `_persist` raised
+TypeError, and `12.5` raised on the slice. Run through `orchestrator.scan` with three
+canned tools, a `"1"` from the second one rolled back its rows and ended the scan, and
+the third tool never ran; with the fix all three stored their rows. `True` was stored
+and anchored on line 1, and `-1000` in a 2,000-line file built a 1,040-line window
+ending at line -960. 11 new tests in `test_scan_bookkeeping.py` and 5 more cases in
+`test_checkov_parse.py`. The other two side findings (refuter errors, pre-fix records)
+are not touched.
+
 ---
 
 ## Order of work

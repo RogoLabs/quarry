@@ -281,6 +281,16 @@ class Evidence:
     match_sha: str | None = None    # content_key of the flagged line(s); see finding_id
 
 
+def line_number(value: Any) -> int | None:
+    """A 1-based line number, or None. A tool's line is target-influenced output, and
+    a string, float, bool, zero or negative value is not a line. MEASURED before this:
+    "12" and 12.5 raised TypeError in extract_evidence; True anchored the finding on
+    line 1; -1000 in a 2,000-line file built a 1,040-line window ending at line -960."""
+    if type(value) is int and value >= 1:
+        return value
+    return None
+
+
 def extract_evidence(root: Path, rel: Path, line: int | None, *,
                      end_line: int | None = None,
                      context: int = EVIDENCE_CONTEXT,
@@ -313,6 +323,7 @@ def extract_evidence(root: Path, rel: Path, line: int | None, *,
     if not lines:
         return None
 
+    line, end_line = line_number(line), line_number(end_line)
     centre = (line or 1) - 1
     start = max(0, centre - context)
     end = min(len(lines), centre + context + 1)
