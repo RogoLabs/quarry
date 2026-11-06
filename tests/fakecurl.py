@@ -3,8 +3,8 @@
 A probe talks to the target only through exec_fn(argv), where argv is curl's. This parses
 the argv the probes build (method, headers, body, -o, -w, one or more URLs), calls a
 Python handler for each request, and prints what curl would: the body unless it went to
-/dev/null, then the -w write-out with %{http_code}, %{time_total}, %{content_type} and
-%header{name} filled in. The handler sees decoded paths and query values, as a server
+/dev/null, then the -w write-out with %{http_code}, %{time_total}, %{time_pretransfer},
+%{time_starttransfer}, %{content_type} and %header{name} filled in. The handler sees decoded paths and query values, as a server
 would. Not a test module (no test_ prefix); imported by the probe tests.
 """
 from __future__ import annotations
@@ -38,6 +38,10 @@ class Reply:
 def _expand(fmt: str, r: Reply) -> str:
     out = fmt.replace("%{http_code}", f"{r.status:03d}" if r.status else "000")
     out = out.replace("%{time_total}", f"{r.secs:.6f}")
+    # Connection setup takes a fixed 0.5 ms here, so first byte minus setup is r.secs.
+    out = out.replace("%{time_pretransfer}", "0.000500" if r.status else "0.000000")
+    out = out.replace("%{time_starttransfer}",
+                      f"{r.secs + 0.0005:.6f}" if r.status else "0.000000")
     out = out.replace("%{content_type}", r.ctype)
     hdrs = {k.lower(): v for k, v in r.headers.items()}
     return re.sub(r"%header\{([^}]*)\}", lambda m: hdrs.get(m[1].lower(), ""), out)

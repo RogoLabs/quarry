@@ -16,8 +16,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from quarry.dynamic.validate import (                                         # noqa: E402
-    Candidate, RunningTarget, adjudicate, adjudicate_with_reason)
+    NO_CONTROL, Candidate, RunningTarget, adjudicate, adjudicate_with_reason)
 from quarry.dynamic.routes import Route                                       # noqa: E402
+from quarry.dynamic.seed import CrossUser                                     # noqa: E402
 from quarry.dynamic.probes import (                                           # noqa: E402
     probe_missing_rate_limit, probe_auth_timing_oracle)
 from fakecurl import Reply, curl                                              # noqa: E402
@@ -131,50 +132,153 @@ def test_rate_limit_needs_review_without_routes():
     assert adjudicate(ev) == "needs-review" and fake.requests == []
 
 
-def _timings(present_ms, absent_ms, code="200"):
-    """Fake exec_fn for timing probes: `<status> <seconds>` keyed by the username."""
+# ------------------------------------------------------------------ timing oracle
+# A present identifier against two absent ones shaped like it; the two absent ones are
+# the A/A control. The thresholds (10 ms floor, 3x the A/A difference, 2x the spread)
+# are in probes.py beside _TIMING_FLOOR.
+
+TIMING = Candidate("f2", 2, "o/r", "app/auth.py", 5, "prod", "CWE-208", "timing")
+# A run whose seed created quarry_user and read its key back, so that login exists.
+SEEDED = RunningTarget(base_url="http://web:8080", stop=lambda: None, network="net",
+                       credentials={"user_api_key": "k" * 24},
+                       cross_user=CrossUser(header="X-API-KEY",
+                                            accounts={"user_api_key": "quarry_user"}))
+# The finding's own handler, with the identifier parameter declared.
+LOGIN_ID = [Route("GET", "/login", "app/auth.py", "openapi+static", query=("username",),
+                  line=3, end_line=9)]
+
+
+def _clock(present_ms, absent_ms, *, present=("quarry_user", "admin"), code=200,
+           present_code=None, absent2_ms=None, jitter_ms=0.0):
+    """A /login that answers a present identifier in present_ms and any other in
+    absent_ms. The second absent identifier of each probe gets absent2_ms when given (an
+    A/A difference). Each identifier's own samples alternate +jitter, -jitter, so every
+    class has the same median and a spread of about jitter_ms. The first request of each
+    curl run is the probe's warm-up; it is answered and not counted."""
+    seen: list[str] = []
+    count: dict[str, int] = {}
+    state = {"first": False}
+
+    def handle(req):
+        who = req.query.get("username", "")
+        if state.pop("first", False):
+            return Reply(code, "", "application/json", 0.001)
+        count[who] = count.get(who, 0) + 1
+        j = jitter_ms if count[who] % 2 else -jitter_ms
+        if who in present:
+            return Reply(present_code or code, "", "application/json",
+                         (present_ms + j) / 1000)
+        if who not in seen:
+            seen.append(who)
+        ms = absent2_ms if absent2_ms is not None and seen.index(who) % 2 else absent_ms
+        return Reply(code, "", "application/json", (ms + j) / 1000)
+    inner = curl(handle)
+
     def run(argv):
-        url = argv[-1]
-        ms = present_ms if "username=admin" in url else absent_ms
-        return 0, f"{code} {ms / 1000:.6f}"
+        state["first"] = True
+        return inner(argv)
+    run.requests = inner.requests
     return run
 
 
-def test_timing_oracle_confirmed_on_clear_separation():
-    ev = probe_auth_timing_oracle(RUNNING, CAND, LOGIN, _timings(60.0, 5.0), samples=15)
+def test_timing_confirms_against_the_a_a_control():
+    ev = probe_auth_timing_oracle(SEEDED, TIMING, LOGIN_ID, _clock(60.0, 5.0))
     assert ev.reproduced is True and ev.determinism == "statistical"
-    # A separation is recorded without a baseline comparison, so it waits for a human.
-    assert adjudicate(ev) == "needs-review" and "separates" in ev.summary
+    assert ev.differs_from_baseline is True and ev.handled is True
+    assert adjudicate_with_reason(ev) == ("confirmed", "statistical")
+    assert "two absent identifiers" in ev.baseline and "A/A difference 0.0 ms" in ev.baseline
+    assert "`quarry_user` (account quarry_user, created by the seed recipe" in ev.observed
+    assert "separates a present identifier from two absent ones by 55.0 ms" in ev.summary
 
 
-def test_timing_oracle_rejected_when_no_separation():
-    ev = probe_auth_timing_oracle(RUNNING, CAND, LOGIN, _timings(20.0, 20.0), samples=15)
-    assert ev.reproduced is False and ev.determinism == "statistical"
-    assert adjudicate(ev) == "rejected"            # the absent identifier is the control
-    assert "absent identifier" in ev.baseline and ev.handled is True
+def test_a_separation_also_confirms_with_a_guessed_identifier():
+    """A separation shows the guessed identifier exists and the handler read it."""
+    ev = probe_auth_timing_oracle(RUNNING, TIMING, LOGIN, _clock(60.0, 5.0))
+    assert adjudicate(ev) == "confirmed" and "`admin` (guessed)" in ev.observed
+
+
+def test_no_confirmation_when_the_absent_identifiers_differ_as_much():
+    """55 ms and 20 ms from the two absent identifiers, which differ by 35 ms between
+    themselves: the separation is not three times the A/A difference."""
+    ev = probe_auth_timing_oracle(SEEDED, TIMING, LOGIN_ID,
+                                  _clock(60.0, 5.0, absent2_ms=40.0))
+    assert ev.reproduced is False and adjudicate(ev) == "needs-review"
+    assert "A/A difference 35.0 ms" in ev.summary
+
+
+def test_timing_rejects_with_a_known_identifier_on_a_declared_parameter():
+    ev = probe_auth_timing_oracle(SEEDED, TIMING, LOGIN_ID, _clock(20.0, 20.0, jitter_ms=1))
+    assert ev.reproduced is False and ev.differs_from_baseline is False
+    assert ev.handled is True and adjudicate_with_reason(ev) == ("rejected", "statistical")
+    assert "A separation of 10.0 ms or more is excluded" in ev.summary
+    assert "A/A difference" in ev.baseline
+
+
+def test_timing_does_not_reject_without_an_identifier_known_to_exist():
+    """REGRESSION. `admin` may not exist, and then both sides are absent."""
+    ev = probe_auth_timing_oracle(RUNNING, TIMING, LOGIN_ID,
+                                  _clock(20.0, 20.0, present=("admin",)))
+    assert adjudicate_with_reason(ev) == ("needs-review", NO_CONTROL)
+    assert "a guess that may not exist" in ev.summary
+
+
+def test_timing_does_not_reject_on_a_guessed_parameter():
+    ev = probe_auth_timing_oracle(SEEDED, TIMING, LOGIN, _clock(20.0, 20.0))
+    assert adjudicate_with_reason(ev) == ("needs-review", NO_CONTROL)
+    assert "`username` is a guessed parameter" in ev.summary
+
+
+def test_timing_too_noisy_to_exclude_the_floor_does_not_reject():
+    """Equal medians, but an 8 ms spread could hide a 10 ms separation."""
+    ev = probe_auth_timing_oracle(SEEDED, TIMING, LOGIN_ID, _clock(20.0, 20.0, jitter_ms=8))
+    assert adjudicate(ev) == "needs-review" and "too noisy to exclude 10.0 ms" in ev.summary
+
+
+def test_a_status_that_splits_the_identifiers_is_held_for_review():
+    ev = probe_auth_timing_oracle(SEEDED, TIMING, LOGIN_ID,
+                                  _clock(20.0, 20.0, code=400, present_code=401))
+    assert adjudicate(ev) == "needs-review" and "different statuses" in ev.summary
+
+
+def test_timing_samples_are_interleaved_in_a_few_curl_runs():
+    fake = _clock(20.0, 20.0)
+    calls = []
+
+    def counting(argv):
+        calls.append(argv)
+        return fake(argv)
+    probe_auth_timing_oracle(SEEDED, TIMING, LOGIN_ID, counting, samples=15)
+    assert len(calls) == 3 and len(fake.requests) == 48     # 3 x (1 warm-up + 5 x 3)
+    who = [r.query["username"] for r in fake.requests]
+    assert who[0] == "quarry_user"                            # the warm-up
+    p, a, b = who[1:4]
+    assert p == "quarry_user" and len({p, a, b}) == 3 and len(a) == len(p)
+    assert who[4:7] == [a, b, p] and who[7:10] == [b, p, a]  # the order rotates
+    assert {who.count(x) for x in (a, b)} == {15} and who.count(p) == 18
+    assert all("%{time_starttransfer}" in " ".join(c) for c in calls)
 
 
 def test_timing_oracle_does_not_reject_on_a_sibling_route():
     # The auth-like route is in the finding's file, but its handler does not enclose the
     # finding's line; equal timing there says nothing about the flagged code.
-    sibling = [Route("GET", "/login", "app/auth.py", "static", line=30, end_line=40)]
-    ev = probe_auth_timing_oracle(RUNNING, CAND, sibling, _timings(20.0, 20.0), samples=15)
+    sibling = [Route("GET", "/login", "app/auth.py", "static", query=("username",),
+                     line=30, end_line=40)]
+    ev = probe_auth_timing_oracle(SEEDED, TIMING, sibling, _clock(20.0, 20.0))
     assert ev.handled is True and ev.differs_from_baseline is None
     assert adjudicate_with_reason(ev)[0] == "needs-review"
 
 
-@pytest.mark.parametrize("code", ["404", "405"])
+@pytest.mark.parametrize("code", [404, 405])
 def test_timing_oracle_is_not_rejected_when_no_handler_answered(code):
     """Both identifiers 404: equal medians time the router, not the auth check. This
     was a rejection, and rejected-carry-forward then killed the finding in every run."""
-    ev = probe_auth_timing_oracle(RUNNING, CAND, LOGIN, _timings(20.0, 20.0, code),
-                                  samples=15)
+    ev = probe_auth_timing_oracle(SEEDED, TIMING, LOGIN_ID, _clock(20.0, 20.0, code=code))
     assert ev.handled is False and adjudicate(ev) == "needs-review"
-    assert code in ev.summary
+    assert str(code) in ev.summary
 
 
 def test_timing_oracle_needs_review_without_auth_route():
     # a route with no auth-like name is not a timing target.
-    ev = probe_auth_timing_oracle(RUNNING, CAND, [Route("GET", "/items", "app/auth.py")],
-                                  _timings(60.0, 5.0))
+    ev = probe_auth_timing_oracle(SEEDED, TIMING, [Route("GET", "/items", "app/auth.py")],
+                                  _clock(60.0, 5.0))
     assert adjudicate(ev) == "needs-review"

@@ -9,9 +9,10 @@ It also states the limits of what was verified. Severity is labelled a class def
 kept apart from Confidence, which comes from the verdict and its replays. Conditions lists
 what had to be true for the observation (commit, route, seed recipe, auth role, `--env`
 names) from the verdict's rationale and the run manifest, and says "not recorded" for
-anything missing. Limitations names the single weakest link. Nothing is fetched: the
-prior-advisory check reads the local OSV copy, and current HEAD is not re-checked, which
-the draft says. `--env` values and a seed recipe's keys and password are never stored,
+anything missing. Limitations names the single weakest link. Nothing is fetched by
+default: the prior-advisory check reads the local OSV copy, and current HEAD is
+re-checked only when the reporter asks (`quarry report --check-head`, disclosure.head),
+which the draft says either way. `--env` values and a seed recipe's keys and password are never stored,
 so the draft can only name them; it also redacts credential headers and
 credential-shaped query values in the evidence, in case a probe sent one.
 
@@ -133,6 +134,10 @@ class DisclosureContext:
     seed_notes: tuple[str, ...] = ()
     prior: Any = None            # vulndb.PriorCheck; None when no lookup ran
     security_policy: tuple[str, ...] | None = None   # SECURITY.md paths; None: not checked
+    # The names the clone's manifests declare (packages.PackageName); () when none
+    # declares one, so the repository name stood in; None when they were not read.
+    packages: Any = None
+    head: Any = None             # head.HeadCheck; None when no re-check was asked for
 
 
 def guess_ecosystem(primary_language: str) -> str:
@@ -550,6 +555,38 @@ def _render_conditions(ctx: DisclosureContext, f: _Facts) -> str:
     return "\n".join(lines)
 
 
+def _head_reason(head: Any) -> str:
+    from .head import NOT_REQUESTED
+    return _text(getattr(head, "reason", "") or NOT_REQUESTED)
+
+
+def _head_versions(head: Any) -> str:
+    """The Affected versions lines about current HEAD (disclosure.head)."""
+    if head is None or not getattr(head, "checked", False):
+        return (f"Current HEAD was not re-checked: {_head_reason(head)}. Confirm the issue "
+                "reproduces on the latest commit before sending.")
+    when = _text(head.at) or "an unrecorded time"
+    if head.moved:
+        return (f"Current HEAD was re-checked with `git ls-remote` at {when} and is now "
+                f"{_code(head.head)}, not the observed commit. The issue was not "
+                "re-tested there; confirm it reproduces on the latest commit before "
+                "sending.")
+    return (f"Current HEAD was re-checked with `git ls-remote` at {when} and is still the "
+            "observed commit. Only the commit was compared; the issue was not re-tested.")
+
+
+def _head_limit(head: Any) -> str:
+    if head is None or not getattr(head, "checked", False):
+        return (f"It was observed at one commit, and current HEAD was not re-checked "
+                f"({_head_reason(head)}).")
+    if head.moved:
+        return (f"It was observed at one commit. HEAD has since moved to "
+                f"{_code(head.head)}, where it was not re-tested.")
+    return (f"It was observed at one commit, still HEAD when re-checked at "
+            f"{_text(head.at) or 'an unrecorded time'}; the issue itself was not "
+            "re-tested.")
+
+
 _ROUTE_LINK = ("Quarry matched the flagged file to the route it probed and did not trace "
                "whether the flagged code ran for this request. The response could have "
                "come from other code on the same route.")
@@ -580,7 +617,7 @@ def _render_limits(ctx: DisclosureContext, f: _Facts, rp: _Replay) -> str:
     else:
         weakest = _ROUTE_LINK
     others = [] if weakest is _ROUTE_LINK else [_ROUTE_LINK]
-    others.append("It was observed at one commit, and current HEAD was not re-checked.")
+    others.append(_head_limit(ctx.head))
     if f.missing:
         others.append("Not recorded for this verdict: " + ", ".join(f.missing)
                       + ". A maintainer may need these to reproduce it.")
@@ -655,12 +692,54 @@ def _how_confirmed(ctx: DisclosureContext, rp: _Replay) -> str:
 _PRIOR_LISTED = 10
 
 
-def _render_prior(prior: Any, cwe: str | None, policy: tuple[str, ...] | None) -> str:
+def _searched_names(prior: Any, packages: Any) -> str:
+    """The package names the lookup searched, each with the manifest it came from, or ""
+    when it searched none. A check made before names were read from manifests says only
+    the one name it was given."""
+    names = [(e, n) for e, n, ok in getattr(prior, "names", ()) or () if ok]
+    if not names:
+        if getattr(prior, "names", ()) or not prior.package_ecosystem:
+            return ""
+        return (f"package name {_code(prior.package)} in "
+                f"{_text(prior.package_ecosystem)}")
+    where = {(p.ecosystem, p.name): p.source for p in packages or ()}
+    parts = [f"{_code(n)} in {_text(e)}"
+             + (f" (from {_code(where[(e, n)])})" if (e, n) in where else
+                " (the repository name)" if packages == () else "")
+             for e, n in names]
+    return ("package name " if len(parts) == 1 else "package names ") + ", ".join(parts)
+
+
+def _unsearched_names(prior: Any, packages: Any) -> str:
+    """A bullet naming every declared name that was not searched, and why."""
+    gaps: list[str] = []
+    for p in packages or ():
+        if p.skip:
+            gaps.append(f"{_code(p.name)} ({_text(p.ecosystem)}, {_code(p.source)}): "
+                        f"{_text(p.skip)}")
+    where = {(p.ecosystem, p.name): p.source for p in packages or ()}
+    for e, n, ok in getattr(prior, "names", ()) or ():
+        if not ok:
+            src = f", {_code(where[(e, n)])}" if (e, n) in where else ""
+            gaps.append(f"{_code(n)} ({_text(e)}{src}): no local OSV copy for "
+                        f"{_text(e)}")
+    return ("- Not searched by package name: " + "; ".join(gaps) + ".") if gaps else ""
+
+
+def _render_prior(prior: Any, cwe: str | None, policy: tuple[str, ...] | None,
+                  packages: Any = None) -> str:
     """What the local, offline prior-advisory check searched and found, and whether the
     clone carries a SECURITY.md. Quarry does not reach the network here, so anything it
-    could not search locally is stated as not checked."""
+    could not search locally is stated as not checked. `packages` are the names the
+    clone's manifests declare (None when they were not read); the draft names each one
+    searched and each one that was not."""
     from ..vulndb import BASES
     lines: list[str] = []
+    if packages == ():
+        from .packages import MANIFESTS
+        lines.append("- Package names: no manifest in the clone declares one (looked "
+                     "for " + ", ".join(_code(m) for m in MANIFESTS)
+                     + "), so the repository name stood in.")
     if prior is None or not getattr(prior, "checked", False):
         why = _text(getattr(prior, "reason", "")) if prior is not None else ""
         lines.append("- Prior advisories: not checked (offline"
@@ -671,9 +750,8 @@ def _render_prior(prior: Any, cwe: str | None, policy: tuple[str, ...] | None) -
         matches.sort(key=lambda m: (klass not in {probe_class(c) for c in m.cwes},
                                     BASES.index(m.basis) if m.basis in BASES else 9))
         by = []
-        if prior.package_ecosystem:
-            by.append(f"package name {_code(prior.package)} in "
-                      f"{_text(prior.package_ecosystem)}")
+        if (names := _searched_names(prior, packages)):
+            by.append(names)
         if prior.repo:
             by.append(f"repository {_code(prior.repo)}")
         searched = (f"{prior.entries_read:,} records in the local OSV copies for "
@@ -700,6 +778,8 @@ def _render_prior(prior: Any, cwe: str | None, policy: tuple[str, ...] | None) -
                              + (f": {summ}" if summ else ""))
             if len(matches) > _PRIOR_LISTED:
                 lines.append(f"  - and {len(matches) - _PRIOR_LISTED} more not listed here")
+    if (gaps := _unsearched_names(prior, packages)):
+        lines.append(gaps)
     if policy is None:
         sec = "not checked (the clone was not available)"
     elif not policy:
@@ -710,10 +790,12 @@ def _render_prior(prior: Any, cwe: str | None, policy: tuple[str, ...] | None) -
     lines.append(f"- SECURITY.md in the clone: {sec}")
     lines.append("")
     if prior is not None and getattr(prior, "checked", False):
+        names = ("the names searched are the ones the clone's manifests declare, which "
+                 "may not be every name the project publishes under" if packages else
+                 "the repository name may not be the published package name")
         lines.append("A miss here does not show the issue is new. The local OSV copy is a "
-                     "snapshot, the repository name may not be the published package name, "
-                     "and reports outside OSV, such as the project's issue tracker or "
-                     "changelog, were not searched.")
+                     f"snapshot, {names}, and reports outside OSV, such as the project's "
+                     "issue tracker or changelog, were not searched.")
     else:
         lines.append("Nothing was searched for an earlier report of this issue. Search OSV, "
                      "GitHub's advisory database and the project's issue tracker before "
@@ -809,7 +891,7 @@ def render_report(ctx: DisclosureContext) -> str:
 ## Affected versions
 
 Observed at commit {sha}.
-Current HEAD was not re-checked; confirm the issue reproduces on the latest commit before sending.
+{_head_versions(ctx.head)}
 The affected version range is for the maintainer to confirm;
 this report records the single revision the probe ran against, and does not infer a range.
 
@@ -854,7 +936,7 @@ Observed:
 
 ## Prior advisories checked
 
-{_render_prior(ctx.prior, ctx.cwe, ctx.security_policy)}
+{_render_prior(ctx.prior, ctx.cwe, ctx.security_policy, ctx.packages)}
 
 ## Suggested remediation
 
@@ -1071,14 +1153,27 @@ def draft_research_digest(con: sqlite3.Connection, run_id: int, *,
                           sha256=hashlib.sha256(text).hexdigest())
 
 
-def _prior_check(ecosystem: str, package: str, clone_url: str, root: Path | None):
+def _prior_check(ecosystem: str, package: str, clone_url: str, root: Path | None,
+                 packages: list[tuple[str, str]] | None = None):
     """The local OSV lookup, or a PriorCheck saying why it did not run. A failure here
-    must not stop a draft: the section then says "not checked"."""
+    must not stop a draft: the section then says "not checked". `packages` are the
+    (ecosystem, name) pairs to search by name in place of (ecosystem, package)."""
     from .. import vulndb
     try:
-        return vulndb.local_prior_advisories(ecosystem, package, clone_url, root=root)
+        return vulndb.local_prior_advisories(ecosystem, package, clone_url, root=root,
+                                             packages=packages)
     except Exception as e:                       # noqa: BLE001 - a gap, stated in the draft
         return vulndb.PriorCheck(False, f"lookup failed: {type(e).__name__}")
+
+
+def _names_to_search(ecosystem: str, package: str,
+                     declared: list) -> list[tuple[str, str]]:
+    """What the prior lookup searches by name: every name a manifest declares and that
+    is published (a private npm package is not), or the repository name in the guessed
+    ecosystem when no manifest declares one (IMPROVEMENT-PLAN item 19)."""
+    if not declared:
+        return [(ecosystem, package)]
+    return [(p.ecosystem, p.name) for p in declared if not p.skip]
 
 
 def digest_name(run_id: int) -> str:
@@ -1109,7 +1204,8 @@ def record_digest(con: sqlite3.Connection, run_id: int, digest: ResearchDigest) 
 
 
 def draft_reports(con: sqlite3.Connection, run_id: int, src: Path, *,
-                  out_dir: Path, vulndb_root: Path | None = None) -> list[Draft]:
+                  out_dir: Path, vulndb_root: Path | None = None,
+                  check_head: Any = None) -> list[Draft]:
     """Write a Markdown advisory for every finding whose latest dynamic verdict in the run
     is confirmed. Returns one Draft per file. Reproducible from the DB: the probe evidence was
     stored on the verdict as JSON.
@@ -1124,8 +1220,17 @@ def draft_reports(con: sqlite3.Connection, run_id: int, src: Path, *,
     The conditions come from the verdict's rationale (replay, probe, conditions, when
     the probe recorded them) and the run manifest's validate block. The prior-advisory
     lookup reads the local OSV copy under `vulndb_root` (default: `quarry db sync`'s
-    directory) once per call, and only when there is a draft to write."""
+    directory) only when there is a draft to write, by the package names the manifests
+    nearest the finding's file declare, once per distinct set of names.
+
+    `check_head`, when given, is called once, before the first draft is written, and
+    returns the head.HeadCheck every draft states. It is the only network request this
+    function can cause, and only the CLI's --check-head passes one; without it each
+    draft says HEAD was not re-checked and why."""
     from ..research.profile import profile_repo
+    from .packages import declared_packages
+    head: Any = None
+    asked = check_head is None
 
     prof = profile_repo(src)
     ecosystem = guess_ecosystem(prof.primary_language)
@@ -1135,7 +1240,7 @@ def draft_reports(con: sqlite3.Connection, run_id: int, src: Path, *,
     validate = _dict(manifest.get("validate"))
     seed_notes = tuple(n for n in _dict(_dict(manifest.get("health")).get("validate"))
                        .get("seed") or [] if isinstance(n, str))
-    prior: Any = None
+    priors: dict[tuple, Any] = {}
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1165,8 +1270,14 @@ def draft_reports(con: sqlite3.Connection, run_id: int, src: Path, *,
             ev = {}
         if not isinstance(ev, dict) or not _has_baseline(ev):
             continue
-        if prior is None:
-            prior = _prior_check(ecosystem, package, d["clone_url"], vulndb_root)
+        declared = tuple(declared_packages(src, d["path"]))
+        search = _names_to_search(ecosystem, package, list(declared))
+        if (key := tuple(search)) not in priors:
+            priors[key] = _prior_check(ecosystem, package, d["clone_url"], vulndb_root,
+                                       packages=search)
+        prior = priors[key]
+        if not asked:
+            head, asked = check_head(), True
 
         def ev_text(key: str, default: str = "") -> str:
             return scrub_text(ev.get(key) or default)
@@ -1181,7 +1292,7 @@ def draft_reports(con: sqlite3.Connection, run_id: int, src: Path, *,
             verdict="confirmed", verdict_reason=scrub_text(d["reason"] or ""),
             replay=ev.get("replay"), probe=ev.get("probe"),
             conditions=ev.get("conditions"), validate=validate, seed_notes=seed_notes,
-            prior=prior, security_policy=policy)
+            prior=prior, security_policy=policy, packages=declared, head=head)
         path = out_dir / f"{run_id}-{_slug(d['cwe'] or 'finding')}-{d['finding_id'][:8]}.md"
         body = render_report(ctx).encode("utf-8")
         path.write_bytes(body)

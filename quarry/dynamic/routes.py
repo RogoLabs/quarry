@@ -704,43 +704,55 @@ class OpenApiFileRouteSource:
     name: str = "openapi"
 
     def discover(self, src: Path) -> list[Route]:
-        import json
-        import os
-        import yaml
-        src = Path(src)
-        found: list[tuple[int, str]] = []
-        for dp, dn, fn in os.walk(src):
-            rel = Path(dp).relative_to(src)
-            depth = len(rel.parts)
-            dn[:] = sorted(d for d in dn if d not in _OPENAPI_SKIP
-                           and depth < _OPENAPI_MAX_DEPTH)
-            for name in fn:
-                if name in _OPENAPI_FILES:
-                    found.append((depth, str(rel / name)))
         out: list[Route] = []
-        for _, rel in sorted(found):
-            p = src / rel
-            try:
-                if p.is_symlink() or p.stat().st_size > _OPENAPI_MAX_BYTES:
-                    continue
-                text = p.read_text(errors="replace")
-                doc = json.loads(text) if rel.endswith(".json") else yaml.safe_load(text)
-            except (OSError, ValueError, yaml.YAMLError):
-                continue
-            if isinstance(doc, dict) and ("openapi" in doc or "swagger" in doc):
-                out.extend(routes_from_openapi(doc))
+        for _, doc in committed_specs(src):
+            out.extend(routes_from_openapi(doc))
         return out
+
+
+def committed_specs(src: Path) -> list[tuple[str, dict]]:
+    """The OpenAPI/Swagger documents committed to the clone, shallowest first, as (path
+    relative to the clone, parsed document). Hermetic: reads files, sends nothing."""
+    import json
+    import os
+    import yaml
+    src = Path(src)
+    found: list[tuple[int, str]] = []
+    for dp, dn, fn in os.walk(src):
+        rel = Path(dp).relative_to(src)
+        depth = len(rel.parts)
+        dn[:] = sorted(d for d in dn if d not in _OPENAPI_SKIP
+                       and depth < _OPENAPI_MAX_DEPTH)
+        for name in fn:
+            if name in _OPENAPI_FILES:
+                found.append((depth, str(rel / name)))
+    out: list[tuple[str, dict]] = []
+    for _, rel in sorted(found):
+        p = src / rel
+        try:
+            if p.is_symlink() or p.stat().st_size > _OPENAPI_MAX_BYTES:
+                continue
+            text = p.read_text(errors="replace")
+            doc = json.loads(text) if rel.endswith(".json") else yaml.safe_load(text)
+        except (OSError, ValueError, yaml.YAMLError):
+            continue
+        if isinstance(doc, dict) and ("openapi" in doc or "swagger" in doc):
+            out.append((rel, doc))
+    return out
 
 
 # ------------------------------------------------------------------ runtime sources
 # These need a running target. `exec_fn` runs a command in a sidecar on the isolated
 # network (DockerRuntime.probe_exec), so discovery stays inside containment.
 
-def fetch_openapi_routes(exec_fn, base_url: str,
-                         specs=("/openapi.json", "/swagger.json",
-                                "/v3/api-docs", "/swagger/v1/swagger.json",
-                                "/api/swagger.json", "/api/openapi.json")) -> list[Route]:
-    """Fetch an OpenAPI document the running target serves and parse it. Read-only."""
+SERVED_SPECS = ("/openapi.json", "/swagger.json", "/v3/api-docs", "/swagger/v1/swagger.json",
+                "/api/swagger.json", "/api/openapi.json")
+
+
+def fetch_openapi_doc(exec_fn, base_url: str,
+                      specs=SERVED_SPECS) -> tuple[str, dict] | None:
+    """(path, document) for the first OpenAPI document the running target serves at
+    one of `specs`, or None. Read-only."""
     import json
     for spec in specs:
         rc, out = exec_fn(["-s", "--max-time", "5", base_url.rstrip("/") + spec])
@@ -751,8 +763,65 @@ def fetch_openapi_routes(exec_fn, base_url: str,
         except ValueError:
             continue
         if isinstance(doc, dict) and doc.get("paths"):
-            return routes_from_openapi(doc)
-    return []
+            return spec, doc
+    return None
+
+
+def fetch_openapi_routes(exec_fn, base_url: str, specs=SERVED_SPECS) -> list[Route]:
+    """Fetch an OpenAPI document the running target serves and parse it. Read-only."""
+    got = fetch_openapi_doc(exec_fn, base_url, specs)
+    return routes_from_openapi(got[1]) if got else []
+
+
+def _canonical_sha(doc: dict) -> str:
+    import hashlib
+    import json
+    return hashlib.sha256(json.dumps(doc, sort_keys=True, separators=(",", ":"),
+                                     default=str).encode()).hexdigest()
+
+
+def compare_served_spec(committed: list[tuple[str, dict]],
+                        served: tuple[str, dict] | None) -> dict:
+    """Readiness evidence (IMPROVEMENT-PLAN item 16): does the OpenAPI document the
+    running target serves describe the same API as the one committed to the clone?
+
+    Compared as operations, (method, path) with the base path applied, against each
+    committed document, keeping the best. `matches` is True when the documents are
+    identical or at least half the operations of the smaller one appear in the other:
+    a committed spec a few releases stale still shares most of its operations, while a
+    different service on the same port shares few or none. It is None when there is
+    nothing to compare, which is common and never a failure: many targets serve no
+    spec, and many clones commit none."""
+    out: dict = {"basis": "served-spec",
+                 "committed": [rel for rel, _ in committed]}
+    if served is None:
+        return {**out, "served": None, "matches": None,
+                "note": "the target served no OpenAPI document at "
+                        + ", ".join(SERVED_SPECS)}
+    path, doc = served
+    s_ops = {r.key for r in routes_from_openapi(doc)}
+    out.update(served=path, served_sha256=_canonical_sha(doc), served_ops=len(s_ops))
+    if not committed:
+        return {**out, "matches": None,
+                "note": "the clone commits no OpenAPI document to compare with"}
+    best = None
+    for rel, cdoc in committed:
+        c_ops = {r.key for r in routes_from_openapi(cdoc)}
+        row = {"compared_with": rel, "committed_ops": len(c_ops),
+               "shared_ops": len(s_ops & c_ops),
+               "identical": _canonical_sha(cdoc) == out["served_sha256"]}
+        if best is None or (row["identical"], row["shared_ops"]) > (best["identical"],
+                                                                    best["shared_ops"]):
+            best = row
+    out.update(best)
+    smaller = min(len(s_ops), best["committed_ops"])
+    if best["identical"]:
+        out["matches"] = True
+    elif smaller == 0:
+        out.update(matches=None, note="one of the documents declares no operations")
+    else:
+        out["matches"] = 2 * best["shared_ops"] >= smaller
+    return out
 
 
 _HREF = re.compile(r"""(?:href|action|src)\s*=\s*["']([^"'#?]+)""", re.I)

@@ -62,8 +62,10 @@ def _target(statuses, *, rc=0):
         fmt = argv[argv.index("-w") + 1] if "-w" in argv else None
         if fmt == "%{http_code}":
             return 0, status()
-        if fmt == "%{http_code} %{time_total}":
-            return 0, f"{status()} 0.020000"
+        if fmt and "%{time_starttransfer}" in fmt:
+            # The timing probe's batch: one row per URL, 0.5 ms setup, 20 ms server time.
+            urls = [a for a in argv if a.startswith("http")]
+            return 0, "".join(f"<<qz|{status()}|0.000500|0.020500>>\n" for _ in urls)
         path = argv[-1].split("://", 1)[-1].partition("/")[2]
         s = status()
         return 0, (f"<html><title>{s}</title><body><h1>{s}</h1>"
@@ -97,10 +99,18 @@ def test_no_probe_rejects_when_nothing_answered(lens, cwe):
 
 def test_the_sweep_can_see_a_rejection():
     """Guard against a vacuous sweep: with the same stub answering 200, the timing
-    probe's equal medians are a handled control comparison, and that rejects."""
+    probe's equal medians are a handled control comparison, and that rejects once the
+    present identifier is one the seed named and the parameter is declared."""
     timing = next(lens for lens in lenses.CATALOGUE if lens.key == "auth-timing-oracle")
-    ev = timing.probe(RUNNING, _cand("CWE-208"), ROUTES, _target(["200"]))
+    seeded = RunningTarget(base_url="http://web:8080", stop=lambda: None, network="net",
+                           param_values={"username": "quarry_user"})
+    login = [Route("GET", "/login", "app.py", "static", query=("username",), line=1,
+                   end_line=10)]
+    ev = timing.probe(seeded, _cand("CWE-208"), login, _target(["200"]))
     assert adjudicate_with_reason(ev) == ("rejected", "statistical")
+    # And the 404 sweep above reached the timing probe's status check, not a parse gap.
+    ev = timing.probe(seeded, _cand("CWE-208"), login, _target(["404"]))
+    assert ev.handled is False and "['404']" in ev.summary
 
 
 class _NotFoundRuntime:

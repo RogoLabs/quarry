@@ -31,6 +31,7 @@ quarry validate 1               # stand the target up in Docker and probe the su
 # a real-world target usually needs more, e.g. VulnLookup:
 #   quarry validate 1 --build-network --memory 6g --env INSTANCE_UUID=$(uuidgen)
 quarry report 1                 # Markdown advisory drafts for confirmed findings
+quarry report 1 --check-head    # also ask the target's git host whether HEAD moved
 quarry serve                    # dashboard on 127.0.0.1:8099
 ```
 
@@ -51,16 +52,20 @@ it stops the attack.
 **Validation is conservative by design.** A probe result counts as confirmed only when it
 recorded a baseline request and the result differs from it. It counts as rejected only
 when a handler answered (not 404 or 405) and the result matched a recorded control, and
-only a deterministic rejection of that kind carries forward to later runs. Anything else
-is stored as needs-review. Today the SQL injection probe records a baseline and the
-auth-timing probe records a control; the other probes record neither yet, so their
-results are all needs-review. `quarry report` only drafts confirmed findings, and every
+only a deterministic rejection of that kind carries forward to later runs (not a
+rate-limit rejection: the throttle usually lives outside the flagged code). Anything else
+is stored as needs-review. Every probe class records a control; the auth-timing probe's
+is a pair of absent identifiers timed beside the present one, and a SQL injection
+rejection needs every declared parameter to refuse every metacharacter input.
+`quarry report` only drafts confirmed findings, and every
 draft ends with a reminder to review it before sending. A draft also lists the conditions
 Quarry recorded for the observation (and says which it did not record), names the weakest
 link in the evidence, keeps the per-CWE severity default apart from a confidence line taken
-from the verdict, and searches the local OSV copy for earlier advisories. It does not claim
-the result reproduces unless replays were recorded, and it does not re-check the current
-HEAD.
+from the verdict, and searches the local OSV copy for earlier advisories under the package
+names the clone's manifests declare. It does not claim the result reproduces unless
+replays were recorded. It re-checks the current HEAD only with `quarry report
+--check-head`, one anonymous `git ls-remote` on the egress ledger, and otherwise says it
+did not.
 
 ## Why it is shaped this way
 

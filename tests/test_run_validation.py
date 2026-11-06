@@ -528,3 +528,129 @@ def test_a_sameness_confirmation_counts_its_control_as_held():
     assert ev.has_baseline_comparison
     out = replay_confirmation(lambda: ev, times=3)
     assert (out["reproduced"], out["control_held"], out["held"]) == (3, 3, True)
+
+
+# ------------------------------------------------- item 16: served spec beside readiness
+
+OTHER_APP = {"openapi": "3.0.0", "paths": {"/metrics": {"get": {}}, "/admin": {"get": {}},
+                                           "/queue": {"post": {}}}}
+
+
+@pytest.mark.parametrize("committed, matches, warns", [
+    (SPEC, True, False),                    # the clone's spec is what the target serves
+    (OTHER_APP, False, True),               # a different API answered on the port
+    (None, None, False),                    # nothing committed: recorded, not a failure
+], ids=["same", "different", "none-committed"])
+def test_the_served_spec_is_compared_with_the_committed_one(scanned, committed, matches,
+                                                             warns):
+    con, rundir = scanned
+    if committed is not None:
+        (rundir / "src" / "docs").mkdir()
+        (rundir / "src" / "docs" / "openapi.json").write_text(json.dumps(committed))
+    res = run_validation(con, 1, rundir, FakeRuntime({"/secret": "401"}))
+    assert res.verdicts                                  # it never blocked probing
+    m = db.read_manifest(con, 1)
+    got = m["validate"]["readiness"]["served_spec"]
+    assert got["matches"] is matches and got["served"] == "/openapi.json"
+    assert got["served_ops"] == 2
+    warning = m.get("health", {}).get("validate", {}).get("served-spec")
+    assert bool(warning) is warns
+    if warns:
+        assert "shares 0 of its 2 operations with the 3 in the committed " \
+               "docs/openapi.json" in warning[0]
+    if matches:
+        assert got["identical"] is True and got["compared_with"] == "docs/openapi.json"
+
+
+def test_a_target_that_serves_no_spec_is_recorded_and_a_rerun_clears_the_warning(scanned):
+    con, rundir = scanned
+    (rundir / "src" / "openapi.json").write_text(json.dumps(OTHER_APP))
+    run_validation(con, 1, rundir, FakeRuntime({"/secret": "401"}))
+    assert db.read_manifest(con, 1)["health"]["validate"]["served-spec"]
+
+    class Silent(FakeRuntime):
+        def probe_exec(self, running, argv):
+            return (0, "") if "-w" not in argv else self.http(argv)
+    run_validation(con, 1, rundir, Silent({"/secret": "401"}))
+    m = db.read_manifest(con, 1)
+    got = m["validate"]["readiness"]["served_spec"]
+    assert got["served"] is None and got["matches"] is None
+    assert got["committed"] == ["openapi.json"]
+    assert "served-spec" not in m["health"]["validate"]
+
+
+# ------------------------------------------------------------------ timing, end to end
+
+TIMING_APP = (
+    "import bcrypt\n"
+    "@app.get('/login')\n"
+    "def login():\n"
+    "    user = User.find(request.args.get('username'))  # the flagged line\n"
+    "    return {}\n"
+    "@app.get('/health')\n"
+    "def health(): ...\n")
+
+
+@pytest.fixture
+def timing_run(tmp_path):
+    """A service with an auth capability and a live CWE-208 finding inside GET /login."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "app.py").write_text(TIMING_APP)
+    (src / "docker-compose.yml").write_text("services:\n  web:\n    image: x\n")
+    p = tmp_path / "quarry.db"
+    db.init(p)
+    con = db.connect(p)
+    with db.tx(con):
+        con.execute("INSERT INTO runs (id, target, clone_url) VALUES (1,'o/r','https://x')")
+        con.execute("""INSERT INTO producers (id,tool,rule_id,cwe) VALUES
+                       ('t:timing','opengrep','timing','CWE-208')""")
+        con.execute("""INSERT INTO findings (id,target,path,producer_id,first_seen_run,
+                       last_seen_run) VALUES ('f-timing','o/r','app.py','t:timing',1,1)""")
+        con.execute("""INSERT INTO occurrences (id,run_id,finding_id,producer_id,path,
+                       start_line,message) VALUES (10,1,'f-timing','t:timing','app.py',4,
+                       'timing')""")
+    return con, tmp_path
+
+
+class TimingTarget(Restartable):
+    """GET /login answers `admin` in 60 ms and anything else in 5 ms, until `flat_after`
+    login requests have been answered; after that every identifier takes 20 ms."""
+    def __init__(self, flat_after=None):
+        super().__init__({})
+        self.flat_after, self.logins = flat_after, 0
+
+    def handle(self, req):
+        if req.path != "/login":
+            return Reply(404, "", "text/plain")
+        self.logins += 1
+        if self.flat_after is not None and self.logins > self.flat_after:
+            return Reply(401, "", "application/json", 0.020)
+        slow = req.query.get("username") == "admin"
+        return Reply(401, "", "application/json", 0.060 if slow else 0.005)
+
+
+def test_a_timing_confirmation_is_replayed_like_the_others(timing_run):
+    con, rundir = timing_run
+    target = TimingTarget()
+    res = run_validation(con, 1, rundir, target)
+    assert res.verdicts == [("f-timing", "auth-timing-oracle", "confirmed")]
+    assert target.restarts == 1 and target.logins == 5 * 48   # first + 3 + 1 after restart
+    row = dict(con.execute("SELECT * FROM verdicts WHERE finding_id='f-timing'").fetchone())
+    assert row["reason"] == "statistical"
+    ev = json.loads(row["rationale"])
+    assert {k: ev["replay"][k] for k in ("attempts", "reproduced", "control_held",
+                                         "after_restart", "held")} == \
+        {"attempts": 4, "reproduced": 4, "control_held": 4, "after_restart": True,
+         "held": True}
+    assert ev["probe"]["route"] == "/login" and ev["differs_from_baseline"] is True
+    assert "two absent identifiers" in ev["baseline"]
+
+
+def test_a_timing_separation_that_does_not_replay_is_held(timing_run):
+    con, rundir = timing_run
+    res = run_validation(con, 1, rundir, TimingTarget(flat_after=48))
+    assert res.verdicts == [("f-timing", "auth-timing-oracle", "needs-review")]
+    row = dict(con.execute("SELECT * FROM verdicts WHERE finding_id='f-timing'").fetchone())
+    assert row["reason"] == "did not replay"
+    assert json.loads(row["rationale"])["replay"]["reproduced"] == 0

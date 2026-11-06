@@ -512,7 +512,8 @@ VALIDATE = {"provisioning": {"build_network": "default", "dotenv": ".env.sample"
                              "env_files": [], "env_overrides": ["INSTANCE_UUID"],
                              "mem_limit": "6g"},
             "seed": "vulnlookup", "service": "vulnerability_lookup"}
-HEAD_LINE = ("Current HEAD was not re-checked; confirm the issue reproduces on the latest "
+HEAD_LINE = ("Current HEAD was not re-checked: report drafting makes no network request "
+             "unless run with --check-head. Confirm the issue reproduces on the latest "
              "commit before sending.")
 
 

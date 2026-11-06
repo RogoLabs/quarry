@@ -107,6 +107,36 @@ def test_only_a_controlled_deterministic_rejection_carries_forward(con, kw):
     assert oid in {r["id"] for r in con.execute("SELECT id FROM live_occurrences")}
 
 
+@pytest.mark.parametrize("when, differs, carried", [
+    ("same", True, False),      # what the rate-limit probe writes when it sees a throttle
+    ("same", False, False),     # never carried, whatever the comparison field says
+    ("differs", False, True),   # the same identity on a differs-shaped rejection is
+], ids=["rate-limit", "same-any-shape", "control"])
+def test_a_rate_limit_rejection_is_not_carried_forward(con, when, differs, carried):
+    """IMPROVEMENT-PLAN item 3, decided 2026-11-06. A throttle the rate-limit probe saw
+    is usually configured outside the flagged handler's evidence window (an app-wide
+    limiter, a proxy, the environment), so item 18's identity check could not reopen
+    the kill when the limiter went away. It stays a verdict on its own run, even with
+    the full identity a carried rejection needs. The control case shows the identity
+    itself is good enough to carry, so the difference is reproduces_when alone."""
+    oid = add(con, "bandit", "B307", "src/a.py", 10)
+    con.execute("INSERT INTO runs (id,target,clone_url,status) VALUES (0,'o/r','x','done')")
+    fid = con.execute("SELECT finding_id FROM occurrences WHERE id=?",
+                      (oid,)).fetchone()["finding_id"]
+    lens = "missing-rate-limit" if when == "same" else None
+    probe = _probe(con, fid, **({"id": lens} if lens else {}))
+    if lens:
+        from quarry.dynamic.lenses import CATALOGUE
+        from quarry.dynamic.validate import probe_source_sha
+        probe["source_sha"] = probe_source_sha(next(x for x in CATALOGUE if x.key == lens))
+    _reject(con, fid, rationale=json.dumps({
+        "baseline": "lone GET /login -> HTTP 401", "differs_from_baseline": differs,
+        "handled": True, "reproduces_when": when, "probe": probe}))
+    funnel.run(con, 1)
+    alive = oid in {r["id"] for r in con.execute("SELECT id FROM live_occurrences")}
+    assert alive is not carried
+
+
 @pytest.mark.parametrize("change,why", [
     ({"source_sha": "0" * 64}, "the probe that rejected it has changed since"),
     ({"evidence_blob": "another-window"}, "code around the flagged line changed"),

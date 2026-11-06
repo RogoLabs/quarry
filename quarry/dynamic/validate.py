@@ -455,6 +455,27 @@ def _record_provisioning(con: sqlite3.Connection, run_id: int, runtime) -> None:
     })
 
 
+def _record_served_spec(con: sqlite3.Connection, run_id: int,
+                        committed: list, served) -> None:
+    """Put the served-versus-committed OpenAPI comparison beside the readiness evidence
+    (`manifest.validate.readiness.served_spec`), and warn on the run page when the two
+    describe different APIs. Extra evidence that the probes reached this target, never a
+    requirement: a target that serves no spec, or a clone that commits none, records
+    `matches: null` and no warning."""
+    from .routes import compare_served_spec
+    cmp = compare_served_spec(committed, served)
+    db.update_manifest(con, run_id, lambda m: m.setdefault("validate", {}).setdefault(
+        "readiness", {}).update(served_spec=cmp))
+    warn = []
+    if cmp.get("matches") is False:
+        warn.append(f"the OpenAPI document the target served at {cmp['served']} shares "
+                    f"{cmp['shared_ops']} of its {cmp['served_ops']} operations with the "
+                    f"{cmp['committed_ops']} in the committed {cmp['compared_with']}, "
+                    "under half of the smaller document's: the probes may have reached a "
+                    "different application, or the committed spec is stale")
+    db.set_health(con, run_id, "validate", {"served-spec": warn})
+
+
 def _record_conditions(con: sqlite3.Connection, run_id: int, running, seed) -> None:
     """Put on the run what an advisory's Conditions section reads back: the seed recipe
     asked for and the service the probes addressed. `seed` is written as None when no
@@ -474,7 +495,8 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
     and record a verdict. Every target is torn down even on error."""
     from ..research.profile import profile_repo
     from .lenses import select_probe_lenses
-    from .routes import build_route_map, crawl_routes, fetch_openapi_routes
+    from .routes import (build_route_map, committed_specs, crawl_routes,
+                         fetch_openapi_doc, routes_from_openapi)
     from .seed import run_seed
 
     rundir = Path(rundir)
@@ -531,11 +553,19 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
             # GET-only crawl. Neither knows a handler file, so each only adds to a static
             # route it matches by (method, path); with mount prefixes resolved, that
             # match now happens for routers mounted under a prefix.
-            for discover in (fetch_openapi_routes, crawl_routes):
-                try:
-                    rmap.add_all(discover(exec_fn, running.base_url))
-                except Exception:                   # enrichment is best-effort
-                    pass
+            served = None
+            try:
+                served = fetch_openapi_doc(exec_fn, running.base_url)
+                if served is not None:
+                    rmap.add_all(routes_from_openapi(served[1]))
+            except Exception:                       # enrichment is best-effort
+                pass
+            try:
+                rmap.add_all(crawl_routes(exec_fn, running.base_url))
+            except Exception:                       # enrichment is best-effort
+                pass
+            with db.tx(con):
+                _record_served_spec(con, run_id, committed_specs(src), served)
         for lens, matching, _why in selected:
             for cand in matching:
                 routes = rmap.for_finding(cand.path)
