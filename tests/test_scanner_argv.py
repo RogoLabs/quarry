@@ -445,3 +445,217 @@ def test_a_tree_still_out_of_time_after_the_rerun_is_named(tmp_path, monkeypatch
     assert [t for t, _ in budgets].count("python") == 2
     assert outcome.ok and "1 of 4" in outcome.note and "(out of time: python)" in outcome.note
     assert outcome.coverage.unreported == ["python"]
+
+
+# --- opengrep: a crash is pinned to a file, not charged to the whole tree ----------
+# MEASURED on VulnLookup (run 7, opengrep 1.27.1): the generic tree crashed on every
+# run ("opengrep-core exited with -10!", SIGBUS from a worker thread's stack overflow)
+# and lost all 123 of its findings over 1,139 files. One file caused it. It crashes
+# alone at -j 2 and above and scans cleanly at -j 1.
+
+_CRASH = (b"opengrep-core exited with -10!\n"
+          b"Error: opengrep-core exited with unexpected output\n")
+
+
+def _crash_setup(tmp_path, monkeypatch, *, crashes_alone=False, every_file=False):
+    """A clone with a file that crashes the generic tree whenever it is in a parallel
+    run. The fake writes a real SARIF result and target report for every file it is
+    given, so the real parser and coverage reader run."""
+    import json
+    from quarry.scanners import base, tools as T
+    src = tmp_path / "src"
+    files = ["a.py", "lib/b.py", "lib/c.conf", "lib/d.py", "docs/e.md", "docs/f.md"]
+    for rel in files + [".git/HEAD"]:
+        (src / rel).parent.mkdir(parents=True, exist_ok=True)
+        (src / rel).write_text("x = 1\n")
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "host.py").write_text("x = 1\n")
+    (src / "link").symlink_to(tmp_path / "outside")
+    (src / "lib" / "l.py").symlink_to(tmp_path / "outside" / "host.py")
+    (tmp_path / "out").mkdir()
+    trees = [tmp_path / "rules" / n for n in ("python", "generic")]
+    og = T.Opengrep()
+    monkeypatch.setattr(og, "available", lambda: "/usr/bin/opengrep")
+    monkeypatch.setattr(og, "config_paths", lambda: trees)
+    monkeypatch.setattr(og, "workdir", lambda rundir, src: rundir / "out")
+    runs: list[dict] = []
+    root = src.resolve()
+
+    class R:
+        def __init__(self, rc, err=b""):
+            self.returncode, self.duration_s, self._err = rc, 1.0, err
+
+        def stderr_bytes(self):
+            return self._err
+
+    def under(targets):
+        """What a run over these targets reads: files, and the files under a
+        directory, never through a link or into .git."""
+        got = []
+        for t in map(Path, targets):
+            if t.is_file() and not t.is_symlink():
+                got.append(t.relative_to(root).as_posix())
+            elif t.is_dir() and not t.is_symlink():
+                got += [p.relative_to(root).as_posix() for p in t.rglob("*")
+                        if p.is_file() and not p.is_symlink()
+                        and not ({".git", "link"} & set(p.relative_to(root).parts))]
+        return sorted(got)
+
+    def fake_tier1(rundir, argv, *, name, cwd, timeout):
+        out = Path(argv[argv.index("--sarif-output") + 1])
+        report = Path(argv[argv.index("--json-output") + 1])
+        targets = argv[argv.index("--verbose") + 1:]
+        jobs = argv[argv.index("-j") + 1] if "-j" in argv else None
+        tree = (Path(argv[argv.index("--config") + 1]).name
+                if argv.count("--config") == 1 else "combined")
+        seen = under(targets)
+        runs.append({"name": name, "tree": tree, "files": seen, "jobs": jobs,
+                     "targets": len(targets),
+                     "argv_bytes": sum(len(t) + 1 for t in targets)})
+        out.write_text("{}")
+        crash = tree in ("combined", "generic") and bool(seen) and (
+            every_file or ("lib/c.conf" in seen and (jobs != "1" or crashes_alone)))
+        if crash:
+            report.write_text(json.dumps({
+                "errors": [{"message": "Error: opengrep-core exited with unexpected "
+                                       "output"}],
+                "paths": {"scanned": [], "skipped": []}}))
+            return R(2, _CRASH)
+        results = [{"ruleId": f"x.opengrep_opengrep-rules.{tree}.rule",
+                    "locations": [{"physicalLocation": {
+                        "artifactLocation": {"uri": str(root / f)},
+                        "region": {"startLine": 1}}}]} for f in seen]
+        out.write_text(json.dumps({"runs": [{"tool": {"driver": {}},
+                                             "results": results}]}))
+        report.write_text(json.dumps({"paths": {
+            "scanned": [str(root / f) for f in seen], "skipped": []}}))
+        return R(0)
+
+    monkeypatch.setattr(base, "tier1", fake_tier1)
+    monkeypatch.setattr(T, "tier1", fake_tier1)
+    return og, runs, files
+
+
+def _under(paths, files):
+    """The files a set of reported paths (files or directories) accounts for."""
+    return {f for f in files for p in paths if f == p or f.startswith(p + "/")}
+
+
+def test_a_file_that_crashes_a_tree_is_isolated_and_scanned_alone(tmp_path, monkeypatch):
+    og, runs, files = _crash_setup(tmp_path, monkeypatch)
+
+    outcome = og.run(tmp_path, tmp_path / "src", timeout=300)
+
+    assert outcome.ok
+    got = {(r.rule_id, r.path) for r in outcome.records}
+    # Every file's generic finding is back, the crashing one included (at -j 1).
+    assert {p for t, p in got if t == "generic.rule"} == set(files)
+    assert {p for t, p in got if t == "python.rule"} == set(files)
+    assert len(outcome.records) == 2 * len(files)        # no file counted twice
+    assert outcome.coverage.scanned == set(files)
+    assert not outcome.coverage.skipped and outcome.coverage.unreported == []
+    assert "scanned alone with -j 1: lib/c.conf" in outcome.note
+    assert "produced no usable output" not in outcome.note
+    split = [r for r in runs if r["name"].startswith("opengrep-generic.")]
+    assert [r["files"] for r in split if r["jobs"] == "1"] == [["lib/c.conf"]]
+    # Split runs never name .git or a link, and each keeps its own log.
+    assert all(".git/HEAD" not in r["files"] and "lib/l.py" not in r["files"]
+               for r in split)
+    assert len({r["name"] for r in split}) == len(split)
+    assert [r["name"] for r in runs].count("opengrep-python") == 1
+
+
+def test_a_file_that_crashes_even_alone_is_a_named_skip(tmp_path, monkeypatch):
+    og, runs, files = _crash_setup(tmp_path, monkeypatch, crashes_alone=True)
+
+    outcome = og.run(tmp_path, tmp_path / "src", timeout=300)
+
+    assert outcome.ok
+    generic = {r.path for r in outcome.records if r.rule_id == "generic.rule"}
+    assert generic == set(files) - {"lib/c.conf"}
+    reason = "crashed opengrep-core even alone with -j 1, generic rules"
+    assert outcome.coverage.skipped == {reason: {"lib/c.conf"}}
+    assert "crashed even alone, not scanned: lib/c.conf" in outcome.note
+    # And the orchestrator names it, by reason, in the run's health.
+    from quarry import orchestrator
+    summary = orchestrator.coverage_summary(outcome.coverage, set(files))
+    assert summary["skipped"][reason] == {"n": 1, "examples": ["lib/c.conf"]}
+    assert any("lib/c.conf" in m for m in orchestrator.coverage_health(summary))
+
+
+def test_a_crash_on_every_file_stops_after_a_few_and_names_the_rest(tmp_path, monkeypatch):
+    """A rule that kills opengrep-core on any input would otherwise run every file
+    alone, twice."""
+    og, runs, files = _crash_setup(tmp_path, monkeypatch, every_file=True)
+
+    outcome = og.run(tmp_path, tmp_path / "src", timeout=300)
+
+    assert outcome.ok                                  # the python tree still counts
+    assert not any(r.rule_id == "generic.rule" for r in outcome.records)
+    skipped = outcome.coverage.skipped
+    crashed = skipped["crashed opengrep-core even alone with -j 1, generic rules"]
+    untried = skipped["every split run crashed opengrep-core, generic rules"]
+    assert len(crashed) == og.ISOLATE_GIVE_UP
+    assert crashed | _under(untried, files) == set(files)
+    assert "the crash did not depend on the file" in outcome.note
+    assert "produced no usable output and were skipped: generic" in outcome.note
+
+
+def test_isolation_splits_a_group_before_its_paths_outgrow_the_command_line(
+        tmp_path, monkeypatch):
+    og, runs, files = _crash_setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(og, "ISOLATE_ARGV_BYTES", 1)
+
+    outcome = og.run(tmp_path, tmp_path / "src", timeout=300)
+
+    split = [r for r in runs if r["name"].startswith("opengrep-generic.")]
+    assert split and all(r["targets"] == 1 for r in split)   # one path each
+    assert {r.path for r in outcome.records if r.rule_id == "generic.rule"} == set(files)
+
+
+def test_isolation_stops_at_its_deadline_and_names_what_it_did_not_reach(
+        tmp_path, monkeypatch):
+    import time as _time
+    og, runs, files = _crash_setup(tmp_path, monkeypatch)
+    from quarry.scanners import base, tools as T
+    clock = {"t": _time.time()}
+    inner = T.tier1
+
+    def slow_tier1(rundir, argv, **kw):
+        clock["t"] += 40                              # every run costs 40 s
+        return inner(rundir, argv, **kw)
+
+    monkeypatch.setattr(T, "tier1", slow_tier1)
+    monkeypatch.setattr(base, "tier1", slow_tier1)
+    monkeypatch.setattr(_time, "time", lambda: clock["t"])
+
+    outcome = og.run(tmp_path, tmp_path / "src", timeout=200)
+
+    late = outcome.coverage.skipped[
+        "out of time isolating an opengrep-core crash, generic rules"]
+    generic = {r.path for r in outcome.records if r.rule_id == "generic.rule"}
+    assert late and generic | _under(late, files) == set(files)   # scanned or named
+    assert "out of time before they were scanned" in outcome.note
+
+
+def test_opengrep_argv_takes_explicit_targets_and_jobs():
+    og = tools.Opengrep()
+    argv = og._argv(SRC, OUT, [Path("/rules/generic")],
+                    targets=[SRC / "a.py", SRC / "lib"], jobs=1)
+    assert argv[-3:] == ["--verbose", "/vol/src/a.py", "/vol/src/lib"]
+    assert argv[argv.index("-j") + 1] == "1"
+    assert "-j" not in og._argv(SRC, OUT, [Path("/rules/generic")])
+
+
+def test_split_entries_never_follow_a_link_or_enter_git(tmp_path):
+    src = tmp_path / "src"
+    (src / "app").mkdir(parents=True)
+    (src / "app" / "a.py").write_text("x\n")
+    (src / ".git").mkdir()
+    (tmp_path / "host").mkdir()
+    (src / "linked").symlink_to(tmp_path / "host")
+    (src / "app" / "l.py").symlink_to(tmp_path / "host")
+    assert tools.Opengrep._entries(src, "") == ["app"]
+    assert tools.Opengrep._entries(src, "app") == ["app/a.py"]
+    assert tools.Opengrep._entries(src, "linked") is None        # refused, not listed
+    assert tools.Opengrep._entries(src, "app/a.py") is None      # a file

@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from .. import taint
 from ..sandbox.spawn import rules_dir as _sandbox_rules_dir, tier1
@@ -16,6 +17,35 @@ RULES_ENV = "QUARRY_RULES"
 def rules_dir() -> Path:
     """Single source of truth — the same path the sandbox profile allowlists."""
     return _sandbox_rules_dir()
+
+
+@dataclass
+class _Try:
+    """One opengrep invocation's result: ok, timeout, crashed (opengrep-core died) or
+    failed (any other way)."""
+    status: str
+    records: list[Record] = field(default_factory=list)
+    cov: Coverage = field(default_factory=Coverage)
+    dropped: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class _Isolated:
+    """What splitting one crashed rule tree recovered (Opengrep._isolate)."""
+    records: list[Record] = field(default_factory=list)
+    cov: Coverage = field(default_factory=Coverage)
+    dropped: dict[str, int] = field(default_factory=dict)
+    runs: int = 0
+    runs_ok: int = 0
+    alone: list[str] = field(default_factory=list)     # crashed in a group, scanned at -j 1
+    crashed: list[str] = field(default_factory=list)   # crashed even alone at -j 1
+    late: list[str] = field(default_factory=list)      # not reached before the deadline
+    untried: list[str] = field(default_factory=list)   # left after the crash looked global
+
+
+def _names(paths: list[str], shown: int = 5) -> str:
+    head = ", ".join(sorted(paths)[:shown])
+    return head + (f" and {len(paths) - shown} more" if len(paths) > shown else "")
 
 
 class Opengrep(Scanner):
@@ -52,10 +82,16 @@ class Opengrep(Scanner):
     def outputs(self, out: Path) -> list[Path]:
         return [out, self.targets_path(out)]
 
-    def _argv(self, src: Path, out: Path, configs: list[Path]) -> list[str]:
+    def _argv(self, src: Path, out: Path, configs: list[Path], *,
+              targets: list[Path] | None = None, jobs: int | None = None) -> list[str]:
+        """`targets` and `jobs` are for isolating a crash (`_isolate`): explicit paths
+        inside the clone instead of the clone root, and `-j 1` for a file that crashed
+        a parallel run."""
         flags: list[str] = []
         for c in configs:
             flags += ["--config", str(c)]
+        if jobs:
+            flags += ["-j", str(jobs)]
         return [self.binary, "scan", *flags,
                 "--sarif-output", str(out),
                 # The same run writes a second report. Its `paths` block lists every
@@ -81,7 +117,7 @@ class Opengrep(Scanner):
                 # Not --quiet: without --verbose the JSON report omits `skipped`, and
                 # stderr (a file on the run volume) is the only record of why a run
                 # crashed. Its skip lists are capped at 100 entries by opengrep.
-                "--verbose", str(src)]
+                "--verbose", *(str(t) for t in (targets or [src]))]
 
     def run(self, rundir: Path, src: Path, *, timeout: int = 1800) -> ScanOutcome:
         """One combined invocation is the fast normal path. But opengrep-core can abort a
@@ -132,66 +168,210 @@ class Opengrep(Scanner):
             cov.errors[kind] = cov.errors.get(kind, 0) + 1
         return cov
 
+    # What opengrep 1.27.1 writes when opengrep-core dies part way: "opengrep-core
+    # exited with -10!" on stderr and "opengrep-core exited with unexpected output" in
+    # the report's errors. A run that fails any other way (a rejected option, a rule
+    # that does not parse) would fail the same way on every subset, so it is not split.
+    CORE_CRASH = "opengrep-core exited with"
+    # Below this many seconds a split run is not started: opengrep spends about 5 s
+    # loading the generic tree's 257 rules before it reads a file (MEASURED, run 7).
+    ISOLATE_MIN_S = 10
+    # Explicit targets go on the command line; split a group before its paths alone
+    # come near ARG_MAX (1 MiB on macOS), which also carries the sandbox's env.
+    ISOLATE_ARGV_BYTES = 256 * 1024
+    # This many files crashing even alone, with no split run having worked yet, means
+    # the crash does not depend on the file (a rule that kills opengrep-core on any
+    # input). Bisecting further would run every file on its own.
+    ISOLATE_GIVE_UP = 3
+
+    def _crashed(self, res: Any, out: Path) -> bool:
+        try:
+            if self.CORE_CRASH.encode() in res.stderr_bytes():
+                return True
+        except Exception:                               # noqa: BLE001 - no log is not a crash
+            pass
+        try:
+            doc = taint.load_json(self.targets_path(out))
+        except (taint.TaintError, OSError):
+            return False
+        errs = doc.get("errors") if isinstance(doc, dict) else None
+        return any(isinstance(e, dict) and isinstance(e.get("message"), str)
+                   and self.CORE_CRASH in e["message"] for e in errs or [])
+
+    def _attempt(self, rundir: Path, src: Path, c: Path, budget: int, *, name: str,
+                 targets: list[Path] | None = None, jobs: int | None = None) -> _Try:
+        """One invocation of one rule tree, over the clone or over `targets`."""
+        out = rundir / "out" / f"{name}.json"
+        for stale in self.outputs(out):
+            stale.unlink(missing_ok=True)
+        argv = [self.available(), *self._argv(src, out, [c], targets=targets,
+                                              jobs=jobs)[1:]]
+        # Own log per invocation: one shared name was unlinked and recreated by every
+        # tree, so the combined run's crash log and all but the last tree's were gone
+        # by the time anyone looked (IMPROVEMENT-PLAN item 24).
+        res = tier1(rundir, argv, name=name, cwd=self.workdir(rundir, src), timeout=budget)
+        got = self.coverage(out, src, label=c.name)
+        # tier1 reports its own kill as -9 after the whole budget.
+        if res.returncode == -9 and res.duration_s >= budget - 1:
+            return _Try("timeout", cov=got)
+        if res.returncode < 0 or not out.exists():
+            return _Try("crashed" if self._crashed(res, out) else "failed", cov=got)
+        self.dropped = {}
+        try:
+            recs = list(self.parse(out, src))
+        except Exception:                               # noqa: BLE001 - a bad tree is data
+            return _Try("failed", cov=got)
+        if res.returncode and not recs:                 # no usable output
+            return _Try("crashed" if self._crashed(res, out) else "failed", cov=got)
+        return _Try("ok", recs, got, dict(self.dropped))
+
+    @staticmethod
+    def _entries(src: Path, rel: str) -> list[str] | None:
+        """The clone-relative paths in one directory of the clone, or None if `rel` is
+        not a directory. Names only, read from Tier 0. Never through a link: the open
+        refuses one in any component, and a link entry is left out, because opengrep
+        reads an explicit target wherever it points. Never `.git`, which a run over the
+        clone does not scan either."""
+        from ..sandbox.spawn import _NOFOLLOW
+        try:
+            fd = os.open(src / rel if rel else src,
+                         os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | _NOFOLLOW)
+        except OSError:
+            return None
+        try:
+            with os.scandir(fd) as it:
+                names = [e.name for e in it if e.name != ".git"
+                         and (e.is_dir(follow_symlinks=False)
+                              or e.is_file(follow_symlinks=False))]
+        finally:
+            os.close(fd)
+        return sorted(f"{rel}/{n}" if rel else n for n in names)
+
+    def _isolate(self, rundir: Path, src: Path, c: Path, deadline: float) -> _Isolated:
+        """Split a tree whose run crashed opengrep-core until each crash is pinned to a
+        file, scanning everything else.
+
+        MEASURED on VulnLookup (run 7, opengrep 1.27.1): the generic tree crashed on
+        every run, so its 123 findings over 1,139 files were lost. The cause was one
+        file, storage/kvrocks.conf. macOS's crash report shows an opengrep-core worker
+        thread running off its 544 KiB stack into the guard page (SIGBUS, "Thread stack
+        size exceeded due to excessive recursion"). Alone, the file crashed the tree at
+        -j 2, 4 and 8 and scanned cleanly at -j 1.
+
+        A crashed group of paths is split in halves; a single directory is replaced by
+        its entries; a single file is rerun with -j 1. A file that crashes even then is
+        a named skip. A group that works keeps its findings and coverage, so a crash
+        that needs two files together costs nothing. Every run fits before `deadline`,
+        and whatever is left when it passes is a named skip too."""
+        import time
+        root = Path(os.path.realpath(src))
+        iso = _Isolated()
+        stack: list[tuple[list[str], int | None]] = []
+
+        def split(group: list[str], jobs: int | None) -> None:
+            if not group:
+                return
+            if len(group) > 1:
+                mid = len(group) // 2
+                stack.extend([(group[mid:], jobs), (group[:mid], jobs)])
+                return
+            kids = self._entries(root, group[0])
+            if kids is None and jobs != 1:
+                stack.append((group, 1))                # one file: once more, -j 1
+            elif kids:
+                stack.append((kids, jobs))
+            else:
+                iso.crashed.append(group[0])
+
+        split(self._entries(root, "") or [], None)
+        while stack:
+            group, jobs = stack.pop()
+            if len(iso.crashed) >= self.ISOLATE_GIVE_UP and not iso.runs_ok:
+                iso.untried += group
+                continue
+            if deadline - time.time() < self.ISOLATE_MIN_S:
+                iso.late += group
+                continue
+            if len(group) > 1 and sum(len(str(root / g)) + 1 for g in group) \
+                    > self.ISOLATE_ARGV_BYTES:
+                split(group, jobs)
+                continue
+            iso.runs += 1
+            t = self._attempt(rundir, src, c, int(deadline - time.time()),
+                              name=f"{self.name}-{c.name}.{iso.runs}",
+                              targets=[root / g for g in group], jobs=jobs)
+            if t.status == "ok":
+                iso.runs_ok += 1
+                iso.records += t.records
+                iso.cov.merge(t.cov)
+                for k, v in t.dropped.items():
+                    iso.dropped[k] = iso.dropped.get(k, 0) + v
+                if jobs == 1:
+                    iso.alone += group
+            elif t.status == "timeout":
+                iso.late += group
+            else:
+                split(group, jobs)
+        # Named skips, by reason. The run's health reads "N path(s) skipped (<reason>)".
+        for reason, paths in (
+                (f"crashed opengrep-core even alone with -j 1, {c.name} rules", iso.crashed),
+                (f"out of time isolating an opengrep-core crash, {c.name} rules", iso.late),
+                (f"every split run crashed opengrep-core, {c.name} rules", iso.untried)):
+            if paths:
+                iso.cov.skipped.setdefault(reason, set()).update(paths)
+        return iso
+
     def _per_tree(self, rundir: Path, src: Path, timeout: int) -> ScanOutcome:
         """One invocation per rule tree, in two passes.
 
         Pass one gives every tree an equal slice of the budget, which bounds a hung
-        tree. Pass two reruns the trees that ran out of their slice, sharing whatever
-        the fast trees left. MEASURED on VulnLookup (run 4, 2026-11-05): once item 15
-        stopped opengrep skipping test/, vendor/ and minified files, the python,
-        javascript, typescript and generic trees each needed more than the 72 s slice
-        (1800 s over 25 trees) and were killed with no output, so opengrep reported 43
-        findings against run 3's 656 while about 1500 s of its budget went unused."""
+        tree. MEASURED on VulnLookup (run 4, 2026-11-05): once item 15 stopped opengrep
+        skipping test/, vendor/ and minified files, the python, javascript, typescript
+        and generic trees each needed more than the 72 s slice (1800 s over 25 trees)
+        and were killed with no output, so opengrep reported 43 findings against run
+        3's 656 while about 1500 s of its budget went unused.
+
+        Pass two shares whatever is left among the trees that need more, each in turn
+        taking an equal part of what remains. A tree whose run crashed opengrep-core is
+        split to isolate the crash (`_isolate`); these go first, since isolating run
+        7's crash took 10 runs and 52 s inside a full scan (16 runs, and 158 s with the
+        first run, for the tree on its own), and what a tree leaves of its share rolls
+        over to the next. A tree killed at the end of its slice is then rerun whole."""
         import time
-        binpath = self.available()
-        outdir = rundir / "out"
         trees = self.config_paths()
         per = max(60, timeout // max(1, len(trees)))   # bound a single hung tree
         t0 = time.time()
 
-        def attempt(c: Path, budget: int) -> tuple[str, list[Record], Coverage]:
-            out = outdir / f"{self.name}-{c.name}.json"
-            for stale in self.outputs(out):
-                stale.unlink(missing_ok=True)
-            argv = [binpath, *self._argv(src, out, [c])[1:]]
-            # Own log per tree: one shared name was unlinked and recreated by every
-            # tree, so the combined run's crash log and all but the last tree's were
-            # gone by the time anyone looked (IMPROVEMENT-PLAN item 24).
-            res = tier1(rundir, argv, name=f"{self.name}-{c.name}",
-                        cwd=self.workdir(rundir, src), timeout=budget)
-            got = self.coverage(out, src, label=c.name)
-            # tier1 reports its own kill as -9 after the whole budget.
-            if res.returncode == -9 and res.duration_s >= budget - 1:
-                return "timeout", [], got
-            if res.returncode < 0 or not out.exists():
-                return "failed", [], got
-            try:
-                recs = list(self.parse(out, src))
-            except Exception:                           # noqa: BLE001 - a bad tree is data
-                return "failed", [], got
-            if res.returncode and not recs:             # crashed: no usable output
-                return "failed", [], got
-            return "ok", recs, got
-
-        status: dict[str, str] = {}
-        found: dict[str, list[Record]] = {}
-        covs: dict[str, Coverage] = {}
+        tries: dict[str, _Try] = {}
         for c in trees:
-            status[c.name], found[c.name], covs[c.name] = attempt(c, per)
+            tries[c.name] = self._attempt(rundir, src, c, per, name=f"{self.name}-{c.name}")
         retried: list[str] = []
-        slow = [c for c in trees if status[c.name] == "timeout"]
-        for i, c in enumerate(slow):
-            share = int((timeout - (time.time() - t0)) // (len(slow) - i))
-            if share <= per:
-                break                                   # nothing left worth a rerun
-            retried.append(c.name)
-            status[c.name], found[c.name], covs[c.name] = attempt(c, share)
+        isolated: dict[str, _Isolated] = {}
+        todo = ([c for c in trees if tries[c.name].status == "crashed"]
+                + [c for c in trees if tries[c.name].status == "timeout"])
+        for i, c in enumerate(todo):
+            share = int((timeout - (time.time() - t0)) // (len(todo) - i))
+            if tries[c.name].status == "crashed":
+                if share < self.ISOLATE_MIN_S:
+                    continue
+                iso = isolated[c.name] = self._isolate(rundir, src, c, time.time() + share)
+                if iso.runs_ok:
+                    tries[c.name] = _Try("ok", iso.records, iso.cov, iso.dropped)
+                else:                                   # keep what it learned
+                    tries[c.name].cov.merge(iso.cov)
+            elif share > per:                           # else nothing worth a rerun
+                retried.append(c.name)
+                tries[c.name] = self._attempt(rundir, src, c, share,
+                                              name=f"{self.name}-{c.name}")
 
-        records = [r for c in trees for r in found[c.name]]
-        failed = [c.name for c in trees if status[c.name] != "ok"]
+        records = [r for c in trees for r in tries[c.name].records]
+        failed = [c.name for c in trees if tries[c.name].status != "ok"]
         cov = Coverage()
+        dropped: dict[str, int] = {}
         for c in trees:
-            cov.merge(covs[c.name])
+            cov.merge(tries[c.name].cov)
+            for k, v in tries[c.name].dropped.items():
+                dropped[k] = dropped.get(k, 0) + v
         if trees and len(failed) == len(trees):
             # Every tree failed, so nothing was scanned. MEASURED: an option opengrep
             # 1.27.1 rejects made every invocation exit 2 with no output, and this
@@ -202,20 +382,38 @@ class Opengrep(Scanner):
                                      f"logs/{self.name}-<tree>.stderr",
                                coverage=cov)
         note = ""
-        if failed or retried:
+        if failed or retried or isolated:
             note = "combined run crashed; recovered per tree."
+        for name, iso in isolated.items():
+            note += (f" The {name} tree crashed opengrep-core, so its paths were split "
+                     f"and rerun ({iso.runs} runs, logs/{self.name}-{name}.<n>.stderr)")
+            if iso.alone:
+                note += (f"; scanned alone with -j 1: {_names(iso.alone)}")
+            if iso.crashed:
+                note += f"; crashed even alone, not scanned: {_names(iso.crashed)}"
+            if iso.late:
+                note += f"; out of time before they were scanned: {_names(iso.late)}"
+            if iso.untried:
+                note += (f"; the crash did not depend on the file ({len(iso.crashed)} "
+                         f"crashed alone before any run worked), so these were not "
+                         f"scanned: {_names(iso.untried)}")
+            note += "."
         if retried:
             note += (f" {len(retried)} tree(s) outran the {per} s slice and were rerun "
                      f"with the time the others left: {', '.join(retried)}.")
         if failed:
-            timed = sorted(n for n in failed if status[n] == "timeout")
+            timed = sorted(n for n in failed if tries[n].status == "timeout")
+            crashed = sorted(n for n in failed if tries[n].status == "crashed")
             note += (f" {len(failed)} of {len(trees)} rule tree(s) produced no usable "
                      f"output and were skipped: {', '.join(sorted(failed))}"
-                     + (f" (out of time: {', '.join(timed)})" if timed else ""))
+                     + (f" (out of time: {', '.join(timed)})" if timed else "")
+                     + (f" (opengrep-core crashed: {', '.join(crashed)})" if crashed
+                        else ""))
         # A tree that crashes is a recorded gap, not a zeroed tool: ok as long as the
         # per-tree pass recovered findings or nothing actually failed.
         return ScanOutcome(self.name, True, 0 if records or not failed else 2,
-                           round(time.time() - t0, 1), records, note=note, coverage=cov)
+                           round(time.time() - t0, 1), records, note=note, coverage=cov,
+                           dropped=dropped)
 
     # Opengrep derives a rule id from the --config path, so an absolute config path
     # produces machine-specific ids like
