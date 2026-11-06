@@ -277,6 +277,10 @@ class PriorCheck:
     package_ecosystem: str = ""            # "" when the name was not searched
     repo: str = ""                         # normalised repository key, "" when not searched
     matches: list[PriorAdvisory] = field(default_factory=list)
+    # Every name asked for, as (ecosystem, name, searched): searched is False when no
+    # local OSV copy covers that ecosystem. Empty for a check made before names were
+    # read from manifests; `package` and `package_ecosystem` then say what was searched.
+    names: tuple[tuple[str, str, bool], ...] = ()
 
 
 def _pypi_name(name: str) -> str:
@@ -287,7 +291,21 @@ def _pypi_name(name: str) -> str:
 def _same_package(ecosystem: str, a: str, b: str) -> bool:
     if ecosystem == "PyPI":
         return _pypi_name(a) == _pypi_name(b)
+    if ecosystem == "crates.io":                 # crates.io treats - and _ as one
+        return a.lower().replace("_", "-") == b.lower().replace("_", "-")
     return a.lower() == b.lower()
+
+
+def _name_pattern(ecosystem: str, name: str) -> re.Pattern[bytes]:
+    """The byte pre-filter for a name as a JSON string. PyPI spellings differ in their
+    separators, so any run of -, _ or . stands for one; crates.io's - and _ likewise."""
+    if ecosystem in ("PyPI", "crates.io"):
+        parts = [re.escape(p) for p in re.split(r"[-_.]+" if ecosystem == "PyPI"
+                                                else r"[-_]", name.lower()) if p]
+        pat = ("[-_.]+" if ecosystem == "PyPI" else "[-_]").join(parts)
+    else:
+        pat = re.escape(name.lower())
+    return re.compile(('"' + pat + '"').encode())
 
 
 def repo_key(url: str) -> str:
@@ -311,7 +329,8 @@ def _names_repo(url: str, key: str) -> bool:
 
 
 def local_prior_advisories(ecosystem: str, package: str, repo_url: str,
-                           root: Path | None = None) -> PriorCheck:
+                           root: Path | None = None, *,
+                           packages: list[tuple[str, str]] | None = None) -> PriorCheck:
     """Search the offline OSV databases `quarry db sync` already downloaded for records
     that name this package (exact, in its own ecosystem) or this repository (a GIT
     range or a reference URL under it, in any ecosystem on disk). Reads local zips
@@ -328,26 +347,35 @@ def local_prior_advisories(ecosystem: str, package: str, repo_url: str,
     2026-10-28): 3.2 to 3.4 s per lookup over five targets. npm alone is 230,903 records
     (388 MB unpacked). A byte pre-filter means only records that mention the name or the
     repository are parsed. django matched 339 records, all by package name; the three
-    targets Quarry has run (vulnerability-lookup, ML-Gateway, cve-services) matched none."""
+    targets Quarry has run (vulnerability-lookup, ML-Gateway, cve-services) matched none.
+
+    `packages`, when given, replaces (ecosystem, package) with every (ecosystem, name)
+    the clone's manifests declare (disclosure.packages), each matched in its own
+    ecosystem; one with no local copy is recorded in `names` as not searched."""
     root = root or db_dir()
     zips = _osv_zips(root)
     if not zips:
         return PriorCheck(False, "no local OSV database; quarry db sync downloads one")
     key = repo_key(repo_url)
-    name = (package or "").strip()
-    by_name = ecosystem if (name and ecosystem in zips) else ""
-    if not key and not by_name:
-        return PriorCheck(False, f"no local OSV database for {ecosystem} and no "
-                                 f"repository URL to search by")
+    wanted: list[tuple[str, str]] = []
+    for eco, nm in (packages if packages is not None else [(ecosystem, package)]):
+        nm = (nm or "").strip()
+        if nm and (eco, nm) not in wanted:
+            wanted.append((eco, nm))
+    names = tuple((eco, nm, eco in zips) for eco, nm in wanted)
+    searched = [(eco, nm) for eco, nm, ok in names if ok]
+    if not key and not searched:
+        asked = sorted({eco for eco, _ in wanted}) or [ecosystem]
+        return PriorCheck(False, f"no local OSV database for {', '.join(asked)} and no "
+                                 f"repository URL to search by", names=names)
     when, _ = built_at("osv", root)
-    check = PriorCheck(True, ecosystems=tuple(zips), package=name,
-                       package_ecosystem=by_name, repo=key,
+    first = searched[0] if searched else ("", wanted[0][1] if wanted else "")
+    check = PriorCheck(True, ecosystems=tuple(zips), package=first[1],
+                       package_ecosystem=first[0], repo=key, names=names,
                        downloaded=when.date().isoformat() if when else None)
-    # The pre-filter looks for the name as a JSON string; PyPI spellings differ in their
-    # separators, so any run of -, _ or . stands for one.
-    parts = [re.escape(p) for p in re.split(r"[-_.]+", name.lower()) if p]
-    pat = "[-_.]+".join(parts) if ecosystem == "PyPI" else re.escape(name.lower())
-    name_re = re.compile(('"' + pat + '"').encode()) if by_name else None
+    by_eco: dict[str, list[tuple[str, re.Pattern[bytes]]]] = {}
+    for eco, nm in searched:
+        by_eco.setdefault(eco, []).append((nm, _name_pattern(eco, nm)))
     key_b = key.encode()
     found: dict[str, PriorAdvisory] = {}
     for eco, path in zips.items():
@@ -362,9 +390,9 @@ def local_prior_advisories(ecosystem: str, package: str, repo_url: str,
                 raw = zf.read(info)
                 check.entries_read += 1
                 low = raw.lower()
-                hit_name = bool(name_re and eco == by_name and name_re.search(low))
+                here = [nm for nm, rx in by_eco.get(eco, ()) if rx.search(low)]
                 hit_repo = bool(key_b and key_b in low)
-                if not (hit_name or hit_repo):
+                if not (here or hit_repo):
                     continue
                 try:
                     rec = json.loads(raw)
@@ -372,7 +400,7 @@ def local_prior_advisories(ecosystem: str, package: str, repo_url: str,
                     continue
                 if not isinstance(rec, dict):
                     continue
-                basis = _osv_basis(rec, eco, by_name, name, key)
+                basis = _osv_basis(rec, eco, here, key)
                 if not basis:
                     continue
                 adv = _prior(rec, eco, basis)
@@ -383,17 +411,17 @@ def local_prior_advisories(ecosystem: str, package: str, repo_url: str,
     return check
 
 
-def _osv_basis(rec: dict, eco: str, by_name: str, name: str, key: str) -> str:
+def _osv_basis(rec: dict, eco: str, names: list[str], key: str) -> str:
     """Why this record is about the target, re-checked on the parsed record (the byte
-    pre-filter only says the string occurs somewhere), or "" when it is not."""
+    pre-filter only says the string occurs somewhere), or "" when it is not. `names` are
+    the package names searched in this ecosystem that the pre-filter saw."""
     affected = [a for a in rec.get("affected") or [] if isinstance(a, dict)]
-    if eco == by_name:
-        for a in affected:
-            pkg = a.get("package") or {}
-            if (isinstance(pkg, dict) and pkg.get("ecosystem") == eco
-                    and isinstance(pkg.get("name"), str)
-                    and _same_package(eco, pkg["name"], name)):
-                return "package name"
+    for a in affected if names else ():
+        pkg = a.get("package") or {}
+        if (isinstance(pkg, dict) and pkg.get("ecosystem") == eco
+                and isinstance(pkg.get("name"), str)
+                and any(_same_package(eco, pkg["name"], n) for n in names)):
+            return "package name"
     if key:
         repos = [r.get("repo") for a in affected for r in a.get("ranges") or []
                  if isinstance(r, dict)]
