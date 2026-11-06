@@ -631,6 +631,20 @@ be told from a genuine one.
   `login_required` against an admin-only reset; a "guard" that guards nothing). The
   line is back. What is left needs a check of whether the guard answers the attack,
   which no location rule can do.
+- **M. The guard must answer the claim's attacker. Done 2026-11-06.** A guard that
+  passes F's placement rule must also be the right kind of check for the attacker the
+  claim describes (`research/relevance.py`, called from `grounding.ground`, and stated
+  in the refute prompt): on the authorization lenses it must check who is asking (a
+  role or permission check, or a comparison with the requesting user, directly or in a
+  helper it calls), and a login check alone answers only an unauthenticated attacker;
+  on the data lenses it must name the input the claim says the attacker controls, and
+  an existence check does not count; on every lens it must do something. A guard that
+  fails is retried once with the reason, then counted as unsupported. Measured in
+  docs/LEGA-CORPUS.md: on the two replays refutation lost no plant the hunt had found
+  (F2 lost T1 with route intent on), at the price F2 paid, two claims on no plant kept
+  per run. No refuter answered `survives` in 29 answers, and 23 of the 29 refutations
+  were finally discarded, so most verified claims now reach a human as "not rebutted";
+  the volume that means on a real repository is not measured yet.
 - **L. `uncertain` deferred a claim for good. Done 2026-11-05.** An `uncertain`
   answer counted as a refuter error, and `--resume` re-asks only failed calls, so a
   claim whose refuters were all uncertain stayed deferred at the gate with nothing to
@@ -659,7 +673,10 @@ be told from a genuine one.
   rollback points for the restart and item 27. Also seen, not fixed: the dashboard's
   database panel marks a database with no age as stale, so Grype still shows there as
   stale, as it already did at 9.6 days old, though nothing reads it.
-- **I. Re-refute.** `quarry deep --resume <run>` and a funnel pass would give the
+- **I. Re-refute. Superseded 2026-11-06 by the hard reset:** the runs it concerns are
+  archived rather than re-refuted (Jerry, 2026-11-06: abandon the current runs and start
+  over once the plan is built). The text below is kept as the record.
+  `quarry deep --resume <run>` and a funnel pass would give the
   deferred Layer 2 rows (12, 2 and 302 in runs 1 to 3) their missing verdicts, under
   decision F's rule. It runs the local models for a while; not started. It does not
   revisit kills already made: in the live DB, 620 verified claims in run 1 and 122 in
@@ -1261,9 +1278,46 @@ gpt-oss units (475 pending, 20 failed) were moved to granite in the database, wi
 change and the earlier provenance recorded in `research_runs.note`; the 42 gpt-oss
 units already hunted and their 9 findings stay as they are.
 
-Also seen, not fixed: the refute pass runs after the hunt loop, and the hunt loop runs
-to the deadline while units remain, so a large review shows no verdicts until its last
-night.
+Also seen, then fixed as item 28: the refute pass runs after the hunt loop, and the hunt
+loop runs to the deadline while units remain, so a large review shows no verdicts until
+its last night.
 Research 4 had 1,446 units left after night one; at that night's 125 units, that is
 about 12 more nights. Moving off gpt-oss should shorten it; by how much is not yet
 measured.
+
+### 28. Refutation gets no time, and every call re-reads the subsystem [measured]
+
+Item 27's side finding, measured. With a deadline, the refute pass ran only after the
+hunt loop, which ran to the deadline while units remained: research 4 (run 7) hunted
+125 of 1,551 units on its first night and refuted none of its 162 findings. Each refute
+call also re-read the whole subsystem. The prompt puts a random section tag ahead of the
+repository text, and the tag was new on every call, so Ollama could never reuse its
+cached prefix. Timed on run 7 with qwen3-coder:30b on one 41k-token subsystem and 5 of
+its findings: 102 to 123 s per call, 92 to 113 s of it reading the prompt. At that rate
+one night's 162 findings, two refuters each, need about 10 hours of refuting.
+
+**Done 2026-11-06.**
+
+- **One tag per subsystem.** The refute pass renders each subsystem once per pass with
+  one tag and refutes its findings back to back. Timed on the same 5 findings: 111 s for
+  the first call, then 8.9 to 11.0 s each, prompt reading 0.5 s; all 10 answers were
+  `refuted` with either tag. The hunt does the same: units run subsystem by subsystem,
+  model by model within one, every lens of a model back to back with one tag. Timed with
+  devstral:24b on three lenses of one subsystem: 275 s for the first (229 s reading the
+  prompt), then 46 s and 105 s (about 1 s reading). The model is also swapped once per
+  subsystem rather than on every unit. The tag still never reaches the target's files,
+  which are written before any tag exists.
+- **A refute share.** With a deadline, a night now refutes what earlier nights left
+  unanswered, hunts until `runner.REFUTE_SHARE` (0.3) of the remaining window is left,
+  refutes what it found, and hunts again with any time the refute pass did not use.
+  Without a deadline the order is unchanged. A unit is attempted once per night: one
+  that fails is retried on the next resume, not again after the refute pass.
+- Tests: `tests/test_refute_share.py` (4) and `tests/test_prompt_prefix_cache.py` (2);
+  both of the latter fail with a fresh tag per call.
+- Not measured yet: a whole night under the new order. The share is a guess bounded by
+  the timings above (0.3 of a 9.5-hour night is about 10,260 s, room for about 1,000
+  refute calls at 10 s plus a cold first call per subsystem and model; night one's 162
+  findings needed about 324 calls before retries);
+  time the refute pass does not use goes back to the hunt, so too large a share costs
+  nothing.
+

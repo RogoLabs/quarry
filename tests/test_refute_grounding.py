@@ -297,7 +297,8 @@ def con(tmp_path):
         """INSERT INTO research_findings
            (id, research_id, subsystem, lens, model, family, title, file, quote,
             quote_verified, severity, reasoning, attacker_control, self_critique)
-           VALUES (1,1,'core','injection',?,?,'t','a.js','const x = 1',1,'high','r','a','w')""",
+           VALUES (1,1,'core','injection',?,?,'t','a.js','const x = 1',1,'high','r',
+                   'the `id` route parameter','w')""",
         (AUTHOR, E.family(AUTHOR)))
     return c
 

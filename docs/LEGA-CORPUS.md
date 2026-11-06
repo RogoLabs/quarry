@@ -220,3 +220,65 @@ reset, a role allow-list cited against a missing admin check, `g.user['id']` aga
 SQL injection through `q`, and code that guards nothing. The line was restored. Both K
 replays ran while the machine was also scanning, which moves wall time, not the
 verdicts.
+
+### Decision M: the guard must answer the claim's attacker, 2026-11-06
+
+F2's remaining plant kills all rested on guards that sit on the claim's path and do not
+stop its attacker. Across the four replays that recorded guards (F2 and K, intent off
+and on), 27 refutations of verified claims passed grounding; 14 killed a plant claim
+and 13 a claim on no plant. The 14 were a login check against an attacker who is
+already logged in (`@login_required` against a cross-user download, an admin-only
+password reset and a path traversal), a lookup by the requested id or a not-found check
+offered as authorization, `ROLES.has(req.body.role)` (the attacker's requested role,
+not the caller's), `g.user['id']` against injection through `q`, `os.path.isfile(path)`
+against traversal, and the bare handler name `tickets.history`.
+
+M adds a lexical check after F2's placement rule (`quarry/research/relevance.py`, called
+from `grounding.ground`), and the refute prompt now states it:
+
+- every lens: the guard must do something (a call, a comparison, a decorator, a
+  condition) or be a known auth guard's name;
+- `broken-authz-idor` and `multi-tenancy-isolation`: the guard must check who is asking,
+  by a role or permission check or by comparing against the requesting user, directly
+  or inside a helper it calls (the helper's definition is looked up in the claim's and
+  the counter quote's files). A login check alone answers only a claim whose attacker is
+  unauthenticated;
+- data lenses (injection, filesystem-and-path, untrusted-input-handling,
+  validation-bypass, mass-assignment, redos-and-resource): the guard must name the input
+  the claim says the attacker controls, and an existence check does not count.
+
+A guard that fails is handled like any ungrounded refutation: asked once more with the
+reason, then counted as unsupported.
+
+**Offline, on the 27 recorded refutations:** M rejects all 14 plant kills and keeps 9 of
+the 13 kills on no plant. This is in-sample: the rule was written while reading these
+records. The 4 kills on no plant it rejects are three bare login checks against "IDOR
+on file delete" (the real protection is the per-user directory `_user_dir()`) and one
+share-token lookup.
+
+**Live, two replays on the same models, digests, budget and corpus** (quarry at
+c8cb8b7 plus M and item 28, uncommitted; `quarry_dirty` is recorded in each result):
+
+| replay | route intent | missed at the hunt | missed after refutation | kept claims, on a plant / not | claims on no plant kept | refutations retried | `survives` answers | wall |
+|---|---|---|---|---|---|---|---|---|
+| F2 off | off | 2/7 | 2/7 (N1, N2) | 6 / 1 | 1 of 5 | 8 of 16 | 0 of 16 | 372 s |
+| F2 on | on | 1/7 | 2/7 (N2, T1) | 5 / 2 | 2 of 5 | 9 of 16 | 0 of 16 | 441 s |
+| M off | off | 2/7 | 2/7 (N1, N2) | 7 / 2 | 2 of 3 | 9 of 15 | 0 of 15 | 387 s |
+| M on | on | 1/7 | 1/7 (N2) | 8 / 2 | 2 of 5 | 10 of 14 | 0 of 14 | 436 s |
+
+- **Refutation lost no plant the hunt found, in either run.** Every miss after
+  refutation is a miss at the hunt. F2 lost T1 at refutation with intent on; K lost up
+  to four.
+- **The price is about what F2 paid:** two claims on no plant kept for a human in each
+  run (of 3 and of 5).
+- **What it does not fix:** no refuter answered `survives` in any of the 29 answers,
+  and 23 of the 29 `refuted` answers were finally discarded (12 of 15 and 11 of 14).
+  M's relevance check was the stated reason in 14 of the rejections across both runs
+  (an answer that was retried can be rejected twice, so this counts rejections, not
+  answers). The refuter now kills little; most verified claims
+  reach a human as "not rebutted". On a small synthetic set that is cheap. On a real
+  repository it means more review, and how much more is not measured yet: the test run
+  after the reset is the first measurement at real scale.
+- One run per configuration, seven plants, a synthetic corpus written by the same
+  people who wrote the rule: read the zero as "no plant lost on this set", not as a
+  recall figure.

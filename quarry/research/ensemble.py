@@ -713,13 +713,26 @@ one, and an import line is not a check. Quoting the claimed code back without th
 it is not evidence. A refutation without such evidence is discarded. If you cannot quote \
 the guard, the claim was not refuted.
 
+The guard must also stop THIS claim's attacker, which is checked too. For a claim about who \
+may do something, the guard must check who is asking: a role or permission check, or a \
+comparison with the requesting user, directly or in a helper the code calls. A login check \
+alone answers only an attacker who is not logged in. Looking a record up by the requested id, \
+or returning 404 when it is missing, is not authorization. For a claim about input the \
+attacker controls, the guard must act on that input; checking that a file exists does not \
+constrain a path, and the current user's id does not sanitise a different parameter.
+
 Default to `refuted`. Most findings are wrong."""
 
 
 def new_tag() -> str:
-    """A per-call marker for every section header Quarry writes into a prompt. The
-    headers were fixed strings, so a target file containing "===== THE CLAIM =====" could
-    open a section of its own. A file cannot forge a tag it never saw."""
+    """A marker for every section header Quarry writes into a prompt. The headers were
+    fixed strings, so a target file containing "===== THE CLAIM =====" could open a
+    section of its own. A file cannot forge a tag it never saw.
+
+    A tag is random per prompt group, not per call: the refute pass reuses one per
+    subsystem so Ollama can reuse the cached repository prefix (IMPROVEMENT-PLAN item
+    28). That changes nothing for the target's files, which are written before any tag
+    exists and never see one."""
     import secrets
     return f"Q{secrets.token_hex(6)}"
 

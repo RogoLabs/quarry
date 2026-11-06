@@ -197,11 +197,53 @@ def _names(text: str, name: str) -> bool:
 
 def ground(src: Path, *, claim_file: str, claim_quote: str, claim_line: int | None,
            counter_quote: str | None, counter_file: str | None,
-           guard: str | None) -> Grounding:
+           guard: str | None, lens: str | None = None, title: str = "",
+           attacker_control: str = "") -> Grounding:
     """Decide whether a `refuted` verdict's evidence grounds it: `counter_quote` copied
     from `counter_file`, and `guard`, the expression in that quote the refuter says stops
     the attack, on a line that is on the claim's path. `src` is the clone; every path is
-    model output and is confined to it."""
+    model output and is confined to it.
+
+    With `lens` given, a guard that passes those checks must also answer the claim's
+    attacker (decision M, `relevance.addresses`): where a guard sits cannot tell a check
+    that stops this attack from one that stops another."""
+    placed = _place(src, claim_file=claim_file, claim_quote=claim_quote,
+                    claim_line=claim_line, counter_quote=counter_quote,
+                    counter_file=counter_file, guard=guard)
+    if not placed.ok or lens is None:
+        return placed
+    from . import relevance
+    ok, why = relevance.addresses(_ws(guard or ""), lens=lens, title=title,
+                                  attacker_control=attacker_control, quote=claim_quote,
+                                  resolve=_resolver(src, claim_file, counter_file))
+    if ok:
+        return placed
+    return Grounding(False, f"{why} ({placed.why})")
+
+
+def _resolver(src: Path, *files: str | None):
+    """name -> the text of the definition called `name` in the claim's or the counter
+    quote's file, for a guard that calls a helper (`_user_dir()`, `owned_note_or_404`)."""
+    defs: list[_Defs] = []
+    for f in dict.fromkeys(x for x in files if x):
+        got = _read(src, f)
+        if got is not None:
+            defs.append(_Defs(*got))
+
+    def resolve(name: str) -> str | None:
+        for d in defs:
+            for i in range(len(d.lines)):
+                if _bare(d.sym[i]) == name:
+                    return d.text(i)
+        return None
+    return resolve
+
+
+def _place(src: Path, *, claim_file: str, claim_quote: str, claim_line: int | None,
+           counter_quote: str | None, counter_file: str | None,
+           guard: str | None) -> Grounding:
+    """Decision F's checks: the quote is in the file and the guard's line is on the
+    claim's path."""
     cq = counter_quote or ""
     if not cq.strip():
         return Grounding(False, "no counter_quote: the refutation quotes no code")

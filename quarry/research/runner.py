@@ -33,6 +33,10 @@ UNIT_BUDGET_TOKENS = 45_000
 NUM_CTX = 65536
 HUNT_NUM_PREDICT = 8192
 REFUTE_NUM_PREDICT = 700
+#: The share of a deadline-bound night held back from the hunt for refuting what the
+#: night found (IMPROVEMENT-PLAN item 28). Time the refute pass does not use goes back
+#: to the hunt.
+REFUTE_SHARE = 0.3
 
 
 def plan(con: sqlite3.Connection, run_id: int, src: Path, *, models: list[str],
@@ -181,23 +185,90 @@ def execute(con: sqlite3.Connection, rid: int, src: Path, *,
 
     stats = {"hunted": 0, "findings": 0, "verified": 0, "refuted": 0,
              "survived": 0, "errors": 0, "skipped_deadline": 0}
-    t_hunt = time.time()
+    stats["hunt_seconds"] = stats["refute_seconds"] = 0.0
+    # A unit is attempted once per call: one that fails is retried on the next resume,
+    # not again tonight after the refute pass (a model that fails slowly would cost
+    # twice).
+    unit_args = dict(row=row, subs=subs, lens_by_key=lens_by_key, imap=imap, src=src,
+                     stats=stats, progress=progress, num_ctx=num_ctx, attempted=set(),
+                     rendered={})
 
-    # 'running' is included deliberately: a worker killed mid-unit leaves that row
-    # claimed, and without it resume would skip the one unit that never finished.
-    # `live_status()` already refuses to trust a status the dying process had to write,
-    # so the same reasoning applies one level down.
+    def refute_until(until):
+        t0 = time.time()
+        if refute:
+            stats.update(_refute_pass(con, rid, src, subs, models, until, progress,
+                                      intent=imap))
+        stats["refute_seconds"] += round(time.time() - t0, 1)
+
+    def hunt_until(until):
+        t0 = time.time()
+        _hunt(con, rid, until=until, **unit_args)
+        stats["hunt_seconds"] += round(time.time() - t0, 1)
+
+    # With a deadline, refutation gets its own share of the night (IMPROVEMENT-PLAN item
+    # 28). It used to run only after the hunt loop, and the hunt loop ran to the
+    # deadline while units remained, so a review larger than one night produced no
+    # verdicts until its last night: research 4 (run 7) hunted 125 of 1,551 units on
+    # its first night and refuted none of its 162 findings.
+    if refute and deadline:
+        refute_until(deadline)               # what earlier nights found and left unasked
+        left = (deadline - datetime.now()).total_seconds()
+        hunt_until(deadline - timedelta(seconds=max(0.0, left) * REFUTE_SHARE))
+        refute_until(deadline)
+        hunt_until(deadline)                 # any time the refute pass did not need
+    else:
+        hunt_until(deadline)
+        refute_until(deadline)
+    stats["skipped_deadline"] = con.execute(
+        "SELECT COUNT(*) FROM research_units WHERE research_id=? AND status='pending'",
+        (rid,)).fetchone()[0] if deadline else 0
+    # Findings a human already judged intended on an earlier run. Still stored, refuted
+    # and funnelled like any other; counted here so the run says how many of its
+    # survivors are not new.
+    prior = con.execute(
+        f"""SELECT COUNT(*) AS n,
+                  COALESCE(SUM({E.KEPT_SQL}), 0) AS kept
+             FROM research_findings rf JOIN deep_verdicts dv ON dv.id = rf.prior_verdict_id
+            WHERE rf.research_id = ? AND dv.verdict = 'intended'""", (rid,)).fetchone()
+    stats["prior_intended"] = prior["n"]
+    stats["prior_intended_survived"] = prior["kept"]
+
+    remaining = con.execute("SELECT COUNT(*) c FROM research_units WHERE research_id=? "
+                            "AND status='pending'", (rid,)).fetchone()["c"]
+    _finish(con, rid, "done" if not remaining else "stopped")
+    return stats
+
+
+def _hunt(con: sqlite3.Connection, rid: int, *, until, row, subs: dict, lens_by_key: dict,
+          imap, src: Path, stats: dict, progress: Progress, num_ctx: int,
+          attempted: set[int], rendered: dict[str, tuple[str, str]]) -> None:
+    """Run pending units until `until` (None: all of them).
+
+    Units run subsystem by subsystem (most security-relevant first), and within one,
+    model by model, every lens of a model back to back with one tag for the subsystem.
+    The prompt puts the repository ahead of the lens, so each lens after the first
+    reuses Ollama's cached prefix instead of re-reading about 40k tokens, and the model
+    is swapped once per subsystem rather than on every unit. The refute pass measured
+    what that buys (IMPROVEMENT-PLAN item 28): 102 to 123 s per call with a fresh tag,
+    9 to 11 s after the first with one shared.
+
+    'running' is included deliberately: a worker killed mid-unit leaves that row
+    claimed, and without it resume would skip the one unit that never finished.
+    `live_status()` already refuses to trust a status the dying process had to write,
+    so the same reasoning applies one level down."""
     pending = con.execute(
         """SELECT * FROM research_units
            WHERE research_id=? AND status IN ('pending','error','running')
-           ORDER BY weight DESC, subsystem, lens, model""", (rid,)).fetchall()
+           ORDER BY weight DESC, subsystem, model, lens""", (rid,)).fetchall()
+    pending = [u for u in pending if u["id"] not in attempted]
+    if not pending:
+        return
     progress(f"{len(pending)} units pending across {len(subs)} subsystem(s)")
-
     for u in pending:
         _beat(con, rid)
-        if deadline and datetime.now() >= deadline:
-            stats["skipped_deadline"] += 1
-            continue
+        if until and datetime.now() >= until:
+            return
+        attempted.add(u["id"])
         sub = subs.get(u["subsystem"])
         lens = lens_by_key.get(u["lens"])
         if sub is None or lens is None:
@@ -213,8 +284,10 @@ def execute(con: sqlite3.Connection, rid: int, src: Path, *,
                     "updated_at=datetime('now') WHERE id=?", (u["id"],))
         con.commit()
 
-        tag = E.new_tag()
-        text = sub.render(tag)
+        if u["subsystem"] not in rendered:
+            t = E.new_tag()
+            rendered[u["subsystem"]] = (t, sub.render(t))
+        tag, text = rendered[u["subsystem"]]
         declared = (imap.for_files([f.path for f in sub.pack.files])
                     if imap is not None and lens.key in E.INTENT_LENSES else "")
         t0 = time.time()
@@ -250,27 +323,6 @@ def execute(con: sqlite3.Connection, rid: int, src: Path, *,
             progress(f"  [error] {u['subsystem'][:28]} {u['lens'][:18]} "
                      f"{u['model'][:16]}: {str(e)[:80]}")
 
-    stats["hunt_seconds"] = round(time.time() - t_hunt, 1)
-    t_refute = time.time()
-    if refute:
-        stats.update(_refute_pass(con, rid, src, subs, models, deadline, progress,
-                                  intent=imap))
-    stats["refute_seconds"] = round(time.time() - t_refute, 1)
-    # Findings a human already judged intended on an earlier run. Still stored, refuted
-    # and funnelled like any other; counted here so the run says how many of its
-    # survivors are not new.
-    prior = con.execute(
-        f"""SELECT COUNT(*) AS n,
-                  COALESCE(SUM({E.KEPT_SQL}), 0) AS kept
-             FROM research_findings rf JOIN deep_verdicts dv ON dv.id = rf.prior_verdict_id
-            WHERE rf.research_id = ? AND dv.verdict = 'intended'""", (rid,)).fetchone()
-    stats["prior_intended"] = prior["n"]
-    stats["prior_intended_survived"] = prior["kept"]
-
-    remaining = con.execute("SELECT COUNT(*) c FROM research_units WHERE research_id=? "
-                            "AND status='pending'", (rid,)).fetchone()["c"]
-    _finish(con, rid, "done" if not remaining else "stopped")
-    return stats
 
 
 def _persist(con, rid: int, run_id: int, unit, found: list[E.Finding], src: Path) -> None:
@@ -384,7 +436,8 @@ def _refute_once(m: str, text: str, f: E.Finding, tag: str, declared: str, prior
             src, claim_file=f.file, claim_quote=f.quote, claim_line=f.line,
             counter_quote=str(rec.get("counter_quote") or ""),
             counter_file=str(rec.get("counter_file") or ""),
-            guard=str(rec.get("guard") or "")).as_record()
+            guard=str(rec.get("guard") or ""), lens=f.lens, title=f.title,
+            attacker_control=f.attacker_control).as_record()
     for k in ("reason", "counter_quote", "guard"):
         if k in rec:
             rec[k] = taint.redact_in(str(rec[k]), secrets)
@@ -416,6 +469,7 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
     Both are evidence for the refuter to weigh, and the prompt says so."""
     out = {"refuted": 0, "survived": 0}
     secrets = taint.run_secrets(src.parent)
+    rendered: dict[str, tuple[str, str]] = {}
     priors: dict[int, str] = {}
 
     def prior_text(r) -> str:
@@ -444,7 +498,7 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
         rows = con.execute(
             """SELECT * FROM research_findings
                WHERE research_id=? AND family != ?
-               ORDER BY quote_verified DESC, id""", (rid, mfam)).fetchall()
+               ORDER BY quote_verified DESC, subsystem, id""", (rid, mfam)).fetchall()
         # An error is not an answer: a model whose only record on a finding is a failed
         # call is asked again (IMPROVEMENT-PLAN item 5). Before this, --resume skipped
         # it forever and the finding stayed deferred at the Layer 2 gate; 14 candidates
@@ -474,8 +528,16 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
                        if x.get("model") == m and x.get("verdict") == "error"]
             f.refutations = [x for x in f.refutations
                              if not (x.get("model") == m and x.get("verdict") == "error")]
-            tag = E.new_tag()
-            text = sub.render(tag)
+            # One tag, so one rendered text, per subsystem for the whole pass. The tag
+            # sits ahead of the repository in the prompt, so a fresh tag per call made
+            # every call re-read the whole subsystem: 92 to 113 s of prompt evaluation
+            # per refutation, measured on run 7 (IMPROVEMENT-PLAN item 28). With it
+            # shared, consecutive findings of a subsystem reuse Ollama's cached prefix.
+            # The tag still never reaches the target's files.
+            if r["subsystem"] not in rendered:
+                t = E.new_tag()
+                rendered[r["subsystem"]] = (t, sub.render(t))
+            tag, text = rendered[r["subsystem"]]
             declared = intent.for_file(f.file) if intent is not None else ""
             rec = _refute_once(m, text, f, tag, declared, prior_text(r), secrets, src)
             if E.ungrounded(rec) and f.quote_verified:
