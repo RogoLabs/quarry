@@ -130,6 +130,71 @@ def test_sqli_needs_review_without_error():
     assert ev.reproduced is False and adjudicate(ev) == "needs-review"
 
 
+def _typed_id(req):
+    """A handler whose id is a typed integer: anything else is refused as input."""
+    v = _value(req)
+    return (200, "item") if v.isdigit() else (422, "id must be an integer")
+
+
+def test_sqli_rejected_when_every_declared_parameter_refuses_metacharacters():
+    fake = curl(_typed_id)
+    ev = probe_injection_observable(RUNNING, _cand("CWE-89"), ROUTE, fake)
+    assert ev.reproduced is False and ev.handled is True
+    assert ev.differs_from_baseline is False
+    assert adjudicate_with_reason(ev) == ("rejected", "deterministic")
+    assert "HTTP 200" in ev.baseline and "422" in ev.observed
+    assert "body, a header or a cookie was not tested" in ev.summary
+    sent = [_value(r) for r in fake.requests]
+    assert sent == ["1", "1'", '1"', "1)", "1 AND 1=2"]        # never a tautology
+    assert not any("OR" in v.upper().split() for v in sent)
+
+
+def test_sqli_is_not_rejected_when_one_declared_parameter_accepts_metacharacters():
+    route = [Route("GET", "/items/{id}", "app/api.py", "static", params=("id",),
+                   query=("sort",), line=3, end_line=9)]
+
+    def handler(req):
+        if not req.path[len("/items/"):].isdigit():
+            return 422, "id must be an integer"
+        return 200, "items"                       # `sort` takes anything, silently
+    ev = probe_injection_observable(RUNNING, _cand("CWE-89"), route, curl(handler))
+    assert adjudicate(ev) == "needs-review"
+    assert "not refused, or not decidable: `sort`" in ev.summary
+
+
+def test_sqli_is_not_rejected_on_a_guessed_parameter_or_a_sibling():
+    noparam = curl(lambda req: (200, "ok") if req.query.get("q", "1") == "1"
+                   else (400, "bad q"))
+    ev = probe_injection_observable(RUNNING, _cand("CWE-89"), NOPARAM, noparam)
+    assert adjudicate(ev) == "needs-review"                 # `q` was a guess
+    ev = probe_injection_observable(RUNNING, _cand("CWE-89"), SIBLING, curl(_typed_id))
+    assert adjudicate(ev) == "needs-review"                 # not the finding's handler
+
+
+def test_sqli_is_not_rejected_when_the_control_was_refused_or_unrouted():
+    refused = curl(lambda req: (403, "forbidden"))
+    assert adjudicate(probe_injection_observable(RUNNING, _cand("CWE-89"), ROUTE,
+                                                 refused)) == "needs-review"
+    unrouted = curl(lambda req: (404, "no route") if not _value(req).isdigit()
+                    else (404, "no such item"))
+    assert adjudicate(probe_injection_observable(RUNNING, _cand("CWE-89"), ROUTE,
+                                                 unrouted)) == "needs-review"
+
+
+def test_a_sql_error_behind_a_refusal_status_is_not_a_clean_refusal():
+    """The quote is refused cleanly, but `1)` comes back 400 with a SQL error: the
+    value reached a statement, so the 400 is not validation."""
+    def handler(req):
+        v = _value(req)
+        if v == "1":
+            return 200, "item"
+        if v == "1)":
+            return 400, "sqlite3.OperationalError: near \")\": syntax error"
+        return 422, "invalid id"
+    ev = probe_injection_observable(RUNNING, _cand("CWE-89"), ROUTE, curl(handler))
+    assert adjudicate(ev) == "needs-review"
+
+
 # ---- command injection (CWE-77, and CWE-78 folded onto it) ----
 
 _ARITH = re.compile(r"\$\(\((\d+)\*(\d+)\)\)")

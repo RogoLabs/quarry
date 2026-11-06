@@ -37,9 +37,17 @@ Per class, the control and what decides:
     refused like the control while B's own request worked.
   * rate limit: a lone request (baseline), then a bounded burst in one curl run. The
     finding is a missing defence, so it reproduces on sameness (reproduces_when="same").
+  * timing: a present identifier against two absent ones shaped like it, interleaved;
+    the two absent ones are an A/A control. Confirms on a separation of at least 10 ms
+    that is three times the A/A difference and twice the spread; rejects only with a
+    present identifier the seed shows exists, every difference under 10 ms and a spread
+    small enough to have seen 10 ms (see _TIMING_FLOOR).
   * XSS: a benign alphanumeric token (control) and a markup marker on the same parameter.
     Raw markup in a text/html response confirms; every declared parameter reflecting the
     control while encoding the markup and its quotes rejects.
+  * SQL injection: a single quote against the plain value `1`; a SQL error the plain
+    value did not raise confirms. Rejects only when every declared parameter of the
+    route refuses every metacharacter input (400/403/422) and handles the plain value.
   * command injection: an arithmetic echo whose product is not in the input (output),
     then `sleep 2` (timing), against a benign token. Rejects only when the handler
     refuses every metacharacter payload with 400/403/422 and accepts the benign token.
@@ -108,18 +116,6 @@ def _status(exec_fn, url: str) -> str:
     rc, code = exec_fn(["-s", "--path-as-is", "-o", "/dev/null", "-w", "%{http_code}",
                         "--max-time", "5", url])
     return code.strip() if rc == 0 else ""
-
-
-def _timing(exec_fn, url: str) -> tuple[str, float] | None:
-    """(status, seconds). The status is what makes a timing comparison mean anything:
-    two identifiers that both 404 time the router, not the auth check."""
-    rc, out = exec_fn(["-s", "--path-as-is", "-o", "/dev/null",
-                       "-w", "%{http_code} %{time_total}", "--max-time", "5", url])
-    try:
-        code, t = out.split()
-        return (code, float(t)) if rc == 0 else None
-    except ValueError:
-        return None
 
 
 def _auth_first(routes: list) -> list:
@@ -841,14 +837,131 @@ def probe_missing_rate_limit(running: RunningTarget, candidate: Candidate,
 
 # ------------------------------------------------------------------ timing oracle
 
+# How the timing probe measures, and the thresholds that decide.
+#
+# Three classes of request on the same parameter, interleaved round by round with the
+# order rotated, so drift (a warming cache, a GC pause, another container's load) lands
+# on every class alike: a present identifier, and two absent ones shaped like it (same
+# length and character classes, random letters and digits). The two absent identifiers
+# are the control, an A/A comparison: they should behave the same, so the difference
+# between their medians is what this target's timing does for no reason at all under
+# these exact conditions. A sample is the server's share of one request: curl's time to
+# first byte minus its time to the end of connection setup, so connect jitter is not
+# counted. Samples go in a few curl runs of several requests each (one sidecar per run,
+# one connection reused), the first request of each run discarded as a warm-up.
+#
+# _TIMING_FLOOR, 10 ms, kept from the earlier probe. Below it the container network and
+# the host's scheduler are a likelier cause than the handler, and an oracle that small
+# needs far more samples across a real network than this probe takes. It is the
+# smallest separation that can confirm, and the largest a rejection may leave
+# unexcluded.
+# _TIMING_OVER_CONTROL, 3: a confirming separation is at least three times the A/A
+# difference measured in the same run.
+# _TIMING_OVER_SPREAD, 2: and more than twice the within-class spread, the population
+# standard deviation averaged over the three classes, so the distributions barely
+# overlap. The standard deviation and not a robust spread, on purpose: one slow outlier
+# raises it, which makes confirming and rejecting both harder, never easier.
+# A rejection needs the spread small enough that a separation at the floor would have
+# shown (twice the spread under the floor), both present-to-absent differences and the
+# A/A difference under the floor, the same status for every class, a present identifier
+# known to exist (one a seed recipe created or named), a parameter the handler is known
+# to read, and the finding's own route. Without a known identifier the "present" one
+# may not exist, and then both sides are absent and equal timing means nothing.
+_TIMING_FLOOR = 0.010
+_TIMING_OVER_CONTROL = 3.0
+_TIMING_OVER_SPREAD = 2.0
+_TIMING_ROUNDS_PER_RUN = 5           # 1 warm-up + 5 rounds x 3 = 16 requests per curl run
+_TIMING_MAX_TIME = 3                 # per request; 16 x 3 s stays inside the 60 s sidecar
+_TIMING_WOUT = "<<qz|%{http_code}|%{time_pretransfer}|%{time_starttransfer}>>\n"
+_TIMING_ROW = re.compile(r"<<qz\|([^|]*)\|([^|]*)\|([^>]*)>>")
+# Parameter names that carry an account identifier.
+_ID_HINTS = ("user", "login", "mail", "account", "handle", "identifier", "uid")
+
+
+def _timed(exec_fn, urls: list[str]) -> list[tuple[str, float | None]]:
+    """One curl run over `urls`, in order, on one connection. -> per URL (status, server
+    seconds), seconds None when the request got no answer. Padded to len(urls)."""
+    argv = ["-s", "-g", "--path-as-is", "--max-time", str(_TIMING_MAX_TIME),
+            "-w", _TIMING_WOUT]
+    for u in urls:
+        argv += ["-o", "/dev/null", u]
+    _rc, out = exec_fn(argv)
+    rows: list[tuple[str, float | None]] = []
+    for m in _TIMING_ROW.finditer(out or ""):
+        code = m[1].strip()
+        try:
+            pre, first = float(m[2]), float(m[3])
+        except ValueError:
+            pre, first = 0.0, 0.0
+        answered = bool(code) and code != "000" and first > 0
+        rows.append((code, max(0.0, first - pre) if answered else None))
+    return (rows + [("", None)] * len(urls))[:len(urls)]
+
+
+def _id_slot(route) -> _Slot:
+    """The parameter that carries the identifier: a declared one named like an account
+    identifier, else the guessed query parameter `username`, which can confirm (a
+    separation shows the handler read it) but never reject."""
+    for s in _slots(route):
+        if s.declared and any(h in s.name.lower() for h in _ID_HINTS):
+            return s
+    return _Slot("query", "username", declared=False)
+
+
+def _known_identifier(running: RunningTarget, slot: _Slot) -> tuple[str, str] | None:
+    """(value, why it is known to exist) for an identifier this run created or named:
+    a seed recipe's value for the parameter, or the login of a seeded account whose key
+    the target's own command printed back. None when nothing shows one exists."""
+    pv = running.param_values or {}
+    if pv.get(slot.name):
+        return pv[slot.name], f"the seed recipe's value for `{slot.name}`"
+    if "mail" in slot.name.lower():
+        return None
+    spec = getattr(running, "cross_user", None)
+    creds = running.credentials or {}
+    for key, login in (getattr(spec, "accounts", None) or {}).items():
+        if login and creds.get(key):
+            return login, (f"account {login}, created by the seed recipe; the target's own "
+                           "command printed its API key, so it exists")
+    return None
+
+
+def _shaped_like(value: str) -> str:
+    """A random identifier with the same length and character classes as `value`, so a
+    handler whose work depends on input length or shape times it the same way."""
+    out = []
+    for ch in value:
+        r = os.urandom(1)[0]
+        out.append(chr(ord("0") + r % 10) if ch.isdigit()
+                   else chr(ord("a") + r % 26) if ch.isalpha() else ch)
+    s = "".join(out)
+    return s if s != value else _shaped_like(value)
+
+
+def _timing_samples(exec_fn, urls: tuple[str, str, str],
+                    samples: int) -> tuple[list, list, list]:
+    """`samples` rounds of the three URLs, interleaved with the order rotated each round,
+    in curl runs of _TIMING_ROUNDS_PER_RUN rounds plus a discarded warm-up."""
+    got: tuple[list, list, list] = ([], [], [])
+    done = 0
+    while done < samples:
+        n = min(_TIMING_ROUNDS_PER_RUN, samples - done)
+        order = [(i + j) % 3 for i in range(done, done + n) for j in range(3)]
+        rows = _timed(exec_fn, [urls[0]] + [urls[c] for c in order])
+        for c, row in zip(order, rows[1:]):
+            got[c].append(row)
+        done += n
+    return got
+
+
 def probe_auth_timing_oracle(running: RunningTarget, candidate: Candidate,
                              routes: list, exec_fn, *, samples: int = 15) -> ProbeEvidence:
     """Measure whether an auth endpoint's response time separates a present identifier
-    from an absent one, which leaks account existence. Statistical: many bounded samples
-    per class, compared by median against the measured noise. GET-only, non-destructive.
-
-    The two identifiers are supplied as a query parameter, a first approximation; a
-    target whose auth takes a body is where request-shape knowledge sharpens this."""
+    from absent ones, which leaks account existence, against an A/A control of two absent
+    identifiers. Statistical; thresholds and their reasons are above. GET only, with the
+    identifier in a declared parameter or the query; no password is sent, so no lockout
+    counter moves. A target whose auth takes a body is where request-shape knowledge
+    sharpens this."""
     own_routes = [r for r in _own(routes, candidate) if _readable(r)]
     own = bool(own_routes)
     auth = own_routes[0] if own else next(
@@ -857,52 +970,93 @@ def probe_auth_timing_oracle(running: RunningTarget, candidate: Candidate,
     if auth is None:
         return ProbeEvidence(reproduced=False, determinism="unknown",
                              summary="no auth-like route in the finding's file to time")
-    base = running.base_url.rstrip("/") + _concrete(running, auth.path)
-    sep = "&" if "?" in base else "?"
-    present = f"{base}{sep}username=admin"
-    absent = f"{base}{sep}username=zzqq-no-such-user-000"
-
-    sa = [x for x in (_timing(exec_fn, present) for _ in range(samples)) if x is not None]
-    sb = [x for x in (_timing(exec_fn, absent) for _ in range(samples)) if x is not None]
-    if len(sa) < 5 or len(sb) < 5:
-        return ProbeEvidence(reproduced=False, determinism="unknown",
-                             summary="could not collect enough timing samples")
-    codes = sorted({c for c, _ in sa} | {c for c, _ in sb})
-    if not set(codes) <= _REAL:
+    slot = _id_slot(auth)
+    known = _known_identifier(running, slot)
+    present = known[0] if known else ("admin@quarry.test" if "mail" in slot.name.lower()
+                                      else "admin")
+    urls = (_url(running, auth, slot, present),
+            _url(running, auth, slot, _shaped_like(present)),
+            _url(running, auth, slot, _shaped_like(present)))
+    request = f"GET {urls[0]}  vs  GET {urls[1]}  vs  GET {urls[2]}"
+    got = _timing_samples(exec_fn, urls, samples)
+    codes = [sorted({c or "none" for c, _ in g}) for g in got]
+    every = sorted(set(codes[0]) | set(codes[1]) | set(codes[2]))
+    if not set(every) <= _REAL:
         # A 404 or 405 to both identifiers times the router, not the auth check, so
         # equal medians say nothing about the finding. This was a rejection, and the
         # rejection carried forward to every later run.
         return ProbeEvidence(
-            reproduced=False, determinism="unknown", handled=False,
-            summary=f"{auth.path} answered {codes} to GET; no auth handler was timed",
-            request=f"GET {present}  vs  GET {absent}", observed=f"HTTP {codes}")
-    ta, tb = [t for _, t in sa], [t for _, t in sb]
-
-    ma, mb = statistics.median(ta), statistics.median(tb)
-    # Noise is the within-class spread, not the combined spread: the whole point is to
-    # tell the between-class signal apart from each class's own jitter.
-    noise = (statistics.pstdev(ta) + statistics.pstdev(tb)) / 2 or 1e-6
-    delta = abs(ma - mb)
-    # Separated when the medians differ by more than 10ms AND beyond twice the noise.
-    if delta > 0.010 and delta > 2 * noise:
+            reproduced=False, determinism="unknown", handled=False, request=request,
+            summary=f"{auth.path} answered {every} to GET; no auth handler was timed",
+            observed=f"HTTP {every}")
+    tp, ta, tb = ([s for _, s in g if s is not None] for g in got)
+    if min(len(tp), len(ta), len(tb)) < 5:
+        return ProbeEvidence(reproduced=False, determinism="unknown", request=request,
+                             summary="could not collect enough timing samples "
+                                     f"({len(tp)}/{len(ta)}/{len(tb)} of {samples})")
+    if not codes[0] == codes[1] == codes[2]:
         return ProbeEvidence(
-            reproduced=True, determinism="statistical",
-            summary=f"response time separates by {delta * 1000:.1f}ms between a present and "
-                    f"absent identifier on {auth.path} "
-                    f"(median {ma * 1000:.1f} vs {mb * 1000:.1f}ms, n={len(ta)}/{len(tb)})",
-            request=f"GET {present}  vs  GET {absent}",
-            observed=f"Δmedian={delta * 1000:.1f}ms (noise≈{noise * 1000:.1f}ms)")
-    # The absent identifier is the control: the present one behaved like it.
-    return _ev(own, auth, candidate,
-               reproduced=False, determinism="statistical", handled=True,
-               summary=f"no timing separation on {auth.path}: Δmedian {delta * 1000:.1f}ms "
-                       f"within noise (≈{noise * 1000:.1f}ms) over {len(ta)}/{len(tb)} "
-                       "samples",
-               request=f"GET {present}  vs  GET {absent}",
-               observed=f"median {ma * 1000:.1f}ms, HTTP {sorted({c for c, _ in sa})}",
-               baseline=f"absent identifier: median {mb * 1000:.1f}ms, "
-                        f"HTTP {sorted({c for c, _ in sb})}",
-               differs_from_baseline=False)
+            reproduced=False, determinism="unknown", handled=True, request=request,
+            observed=f"present: HTTP {codes[0]}; absent: HTTP {codes[1]} and {codes[2]}",
+            summary=f"{auth.path} answered the identifiers with different statuses, so "
+                    "the timing compares different code paths. A status that separates a "
+                    "present identifier from an absent one is an existence oracle of its "
+                    "own, which this probe leaves for review")
+
+    mp, ma, mb = (statistics.median(t) for t in (tp, ta, tb))
+    spread = sum(statistics.pstdev(t) for t in (tp, ta, tb)) / 3
+    control = abs(ma - mb)
+    dp = (mp - ma, mp - mb)
+    same_side = dp[0] * dp[1] > 0
+    signal = min(abs(dp[0]), abs(dp[1])) if same_side else 0.0
+    widest = max(abs(dp[0]), abs(dp[1]))
+
+    def ms(x: float) -> str:
+        return f"{x * 1000:.1f} ms"
+    who = f"`{present}` ({known[1]})" if known else f"`{present}` (guessed)"
+    # Recorded on every outcome below, so a held or undecided result still shows what
+    # was measured against what.
+    measured = dict(handled=True, request=request,
+                    baseline=(f"two absent identifiers shaped like the present one: "
+                              f"median {ms(ma)} and {ms(mb)}, A/A difference "
+                              f"{ms(control)}, HTTP {codes[1]}"),
+                    observed=(f"present identifier {who}: median {ms(mp)}, HTTP "
+                              f"{codes[0]}; separation {ms(signal)} from both absent ones; "
+                              f"within-class spread {ms(spread)}; "
+                              f"n={len(tp)}/{len(ta)}/{len(tb)}, interleaved"))
+    if (signal >= _TIMING_FLOOR and signal > _TIMING_OVER_SPREAD * spread
+            and signal >= _TIMING_OVER_CONTROL * control):
+        return _ev(own, auth, candidate, reproduced=True, determinism="statistical",
+                   differs_from_baseline=True, **measured,
+                   summary=f"response time on `{slot.name}` of GET {auth.path} separates "
+                           f"a present identifier from two absent ones by {ms(signal)} "
+                           f"(median {ms(mp)} against {ms(ma)} and {ms(mb)}), at least "
+                           f"{_TIMING_OVER_CONTROL:g} times the {ms(control)} the two "
+                           f"absent ones differ by and more than {_TIMING_OVER_SPREAD:g} "
+                           f"times the {ms(spread)} spread")
+    precise = _TIMING_OVER_SPREAD * spread < _TIMING_FLOOR
+    if widest < _TIMING_FLOOR and control < _TIMING_FLOOR and precise:
+        if known is None or not slot.declared:
+            why = ("the present identifier is a guess that may not exist, so both sides "
+                   "may be absent" if known is None else
+                   f"`{slot.name}` is a guessed parameter the handler may not read")
+            return ProbeEvidence(
+                reproduced=False, determinism="statistical", **measured,
+                summary=f"no timing separation on GET {auth.path} (widest "
+                        f"{ms(widest)}), but {why}; this does not reject")
+        return _ev(own, auth, candidate, reproduced=False, determinism="statistical",
+                   differs_from_baseline=False, **measured,
+                   summary=f"no timing separation on `{slot.name}` of GET {auth.path}: "
+                           f"the present identifier came within {ms(widest)} of both "
+                           f"absent ones, at a {ms(spread)} spread. A separation of "
+                           f"{ms(_TIMING_FLOOR)} or more is excluded for this request "
+                           "shape; a smaller one, or one on a POST body, is not")
+    return ProbeEvidence(
+        reproduced=False, determinism="unknown", **measured,
+        summary=f"timing on GET {auth.path} neither separates nor rules a separation out: "
+                f"separation {ms(signal)}, A/A difference {ms(control)}, spread "
+                f"{ms(spread)}" + ("" if precise else
+                                   f"; too noisy to exclude {ms(_TIMING_FLOOR)}"))
 
 
 # ------------------------------------------------------------------ injection
@@ -1004,12 +1158,39 @@ def _xss(running, cand, pool, own, exec_fn) -> ProbeEvidence:
                 "this probe cannot see the sink (stored or DOM XSS is not tested)")
 
 
+# Inputs that put a SQL metacharacter into a parameter without being able to change
+# data: an unbalanced quote of either kind or parenthesis breaks the statement, and
+# `AND 1=2` can only narrow it to nothing. No tautology such as `OR 1=1`: in an UPDATE
+# or DELETE that a handler runs on a GET, it would widen the statement to every row.
+_SQL_META = ("1'", '1"', "1)", "1 AND 1=2")
+_SQL_SLOTS = 6               # declared parameters tried per route of the finding's own
+
+
 def _sqli(running, cand, pool, own, exec_fn) -> ProbeEvidence:
-    """A single quote against the plain value `1` on the same parameter. Never rejects: no
-    error on a quote is not proof of parameterisation, since blind SQLi exists."""
+    """A single quote against the plain value `1` on the same parameter confirms when it
+    raises a SQL error the plain value did not.
+
+    No error on a quote is not a rejection, since blind SQL injection exists. A
+    rejection needs the bar the command-injection and traversal probes use: on the
+    finding's own route, every declared parameter refused every metacharacter input as
+    input (400, 403 or 422, with no SQL error) while the plain value on the same
+    parameter was handled and not refused. That is a handler validating the value, a
+    typed id for example, before it can reach a query. A guessed parameter, a route
+    with more parameters than were tried, or one parameter that accepted a
+    metacharacter leaves it for review."""
     exercised = False
-    for r in pool[:3]:
-        for s in _slots(r)[:3]:
+    refused: list = []
+    accepted: list[str] = []
+    routes = pool[:3]
+    if own and len(pool) > len(routes):
+        accepted.append(f"{len(pool) - len(routes)} more route(s) of the handler, untried")
+    for r in routes:
+        all_slots = _slots(r)
+        slots = all_slots[:_SQL_SLOTS] if own else all_slots[:3]
+        if own and len(all_slots) > len(slots):
+            accepted.append(f"{len(all_slots) - len(slots)} parameter(s) of {r.path}, "
+                            "untried")
+        for s in slots:
             pu, qu = _url(running, r, s, "1"), _url(running, r, s, "1'")
             p, q = _fetch(exec_fn, pu), _fetch(exec_fn, qu)
             exercised = exercised or bool(p.body or q.body)
@@ -1024,13 +1205,41 @@ def _sqli(running, cand, pool, own, exec_fn) -> ProbeEvidence:
                            baseline=(f"GET {pu} -> {len(p.body)} bytes, no SQL error "
                                      "signature") if p.body else "",
                            differs_from_baseline=True if p.body else None)
+            control_held = (p.reached and p.status not in _REFUSE
+                            and not _has_sql_error(p.body))
+            if not (own and s.declared and control_held and q.status in _REFUSE):
+                accepted.append(f"`{s.name}`")
+                continue
+            sent = [(qu, q)] + [(u, _fetch(exec_fn, u))
+                                for u in (_url(running, r, s, v) for v in _SQL_META[1:])]
+            if all(x.status in _REFUSE and not _has_sql_error(x.body) for _, x in sent):
+                refused.append((r, s, pu, p, sent))
+            else:
+                accepted.append(f"`{s.name}`")
+    if refused and not accepted:
+        r, s, pu, p, sent = refused[0]
+        names = ", ".join(f"`{x[1].name}`" for x in refused)
+        answers = [resp for hit in refused for _, resp in hit[4]]
+        return _ev(own, r, cand, reproduced=False, determinism="deterministic",
+                   handled=True, differs_from_baseline=False,
+                   request="; ".join(f"GET {u}" for u, _ in sent),
+                   baseline=f"control GET {pu} -> {p.describe()}, no SQL error signature",
+                   observed=(f"HTTP {sorted({x.status for x in answers})} to all "
+                             f"{len(answers)} metacharacter inputs, no SQL error signature"),
+                   summary=f"{r.method} {r.path} refused every SQL metacharacter input "
+                           f"on every declared parameter ({names}) as input, and handled "
+                           f"the plain value ({p.status}): the handler validates these "
+                           "values before they can reach a query. Input from a body, a "
+                           "header or a cookie was not tested")
     if not exercised:
         return ProbeEvidence(reproduced=False, determinism="unknown",
                              summary="the candidate route(s) returned nothing to inject into")
+    held = (f"; not refused, or not decidable: {', '.join(accepted[:6])}"
+            if refused and accepted else "")
     return ProbeEvidence(
         reproduced=False, determinism="unknown",
         summary="no SQL error on a single quote; blind SQL injection was not tested, so "
-                "this does not reject")
+                "this does not reject" + held)
 
 
 def _cmdi(running, cand, pool, own, exec_fn) -> ProbeEvidence:

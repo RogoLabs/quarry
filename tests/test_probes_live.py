@@ -21,8 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from quarry.dynamic import runtime_docker as rt                               # noqa: E402
 from quarry.dynamic.probes import (                                           # noqa: E402
-    probe_cross_user, probe_injection_observable, probe_missing_rate_limit,
-    probe_path_traversal_ssrf)
+    probe_auth_timing_oracle, probe_cross_user, probe_injection_observable,
+    probe_missing_rate_limit, probe_path_traversal_ssrf)
 from quarry.dynamic.routes import Route                                       # noqa: E402
 from quarry.dynamic.seed import CrossUser, OwnedResource                      # noqa: E402
 from quarry.dynamic.validate import Candidate, adjudicate                     # noqa: E402
@@ -30,7 +30,7 @@ from quarry.dynamic.validate import Candidate, adjudicate                     # 
 docker = pytest.mark.skipif(not rt.docker_available(), reason="docker daemon not available")
 
 APP = r'''
-import html, json, os, re, subprocess, urllib.parse, urllib.request
+import html, json, os, re, sqlite3, subprocess, time, urllib.parse, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 os.makedirs("/srv/files", exist_ok=True)
@@ -109,6 +109,26 @@ class H(BaseHTTPRequestHandler):
                 return self.send(403, "internal addresses are not allowed", "text/plain")
             return self.fetch(q.get("url", ""))
         if path == "/login":                                  # no rate limit
+            return self.send(401, '{"error": "bad credentials"}', "application/json")
+        if path in ("/item", "/item_typed"):                  # SQL injection
+            v = q.get("id", "")
+            if path == "/item_typed" and not v.isdigit():
+                return self.send(422, "id must be an integer", "text/plain")
+            con = sqlite3.connect(":memory:")
+            con.execute("CREATE TABLE t (id INTEGER, name TEXT)")
+            con.execute("INSERT INTO t VALUES (1, 'one')")
+            try:
+                rows = (con.execute("SELECT name FROM t WHERE id = " + v).fetchall()
+                        if path == "/item" else
+                        con.execute("SELECT name FROM t WHERE id = ?", (int(v),)).fetchall())
+            except sqlite3.Error as e:
+                return self.send(500, f"sqlite3.{type(e).__name__}: {e}", "text/plain")
+            return self.send(200, json.dumps(rows), "application/json")
+        if path == "/whoami":                                 # account timing oracle
+            if q.get("username") == "quarry_user":
+                time.sleep(0.08)               # a hash compared only for a real account
+            return self.send(401, '{"error": "bad credentials"}', "application/json")
+        if path == "/whoami_flat":
             return self.send(401, '{"error": "bad credentials"}', "application/json")
         if path == "/login_limited":
             HITS["n"] += 1
@@ -203,10 +223,11 @@ def target(tmp_path_factory):
 @pytest.mark.parametrize("path, cwe, verdict", [
     ("/echo", "CWE-79", "confirmed"), ("/safe", "CWE-79", "rejected"),
     ("/ping", "CWE-78", "confirmed"), ("/ping_safe", "CWE-78", "rejected"),
+    ("/item", "CWE-89", "confirmed"), ("/item_typed", "CWE-89", "rejected"),
 ])
 def test_injection_controls_decide_against_a_live_target(target, path, cwe, verdict):
     running, exec_fn = target
-    query = ("term",) if cwe == "CWE-79" else ("host",)
+    query = {"CWE-79": ("term",), "CWE-89": ("id",)}.get(cwe, ("host",))
     ev = probe_injection_observable(running, _cand(cwe), _route("GET", path, query=query),
                                     exec_fn)
     assert adjudicate(ev) == verdict, ev
@@ -233,6 +254,25 @@ def test_rate_limit_decides_against_a_live_target(target, path, verdict):
     running, exec_fn = target
     ev = probe_missing_rate_limit(running, _cand("CWE-307"), _route("GET", path), exec_fn)
     assert adjudicate(ev) == verdict, ev
+
+
+@docker
+def test_timing_decides_against_a_live_target(target):
+    """The real curl's time_pretransfer and time_starttransfer, over the sidecar. An
+    80 ms delay for the one existing account confirms. The flat handler must never
+    confirm; it rejects when the measured spread is small enough to have seen 10 ms,
+    and is held for review when this machine's load makes it noisier than that."""
+    running, exec_fn = target
+    seeded = dataclasses.replace(running, param_values={"username": "quarry_user"})
+    ev = probe_auth_timing_oracle(seeded, _cand("CWE-208"),
+                                  _route("GET", "/whoami", query=("username",)), exec_fn)
+    assert adjudicate(ev) == "confirmed", ev
+    ev = probe_auth_timing_oracle(seeded, _cand("CWE-208"),
+                                  _route("GET", "/whoami_flat", query=("username",)),
+                                  exec_fn)
+    verdict = adjudicate(ev)
+    assert verdict == "rejected" or (verdict == "needs-review"
+                                     and "too noisy" in ev.summary), ev
 
 
 @docker
