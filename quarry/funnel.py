@@ -734,7 +734,18 @@ def _controlled_rejection(v) -> bool:
     """A kill that outlives its run needs the strongest rejection Layer 3 makes: a
     deterministic probe whose handled request behaved like a recorded control. A
     statistical miss, or a rejection written before probes recorded controls, stays a
-    verdict on its own run and is not carried forward."""
+    verdict on its own run and is not carried forward.
+
+    Nor is a rejection of a missing defence (`reproduces_when: same`, today only the
+    rate-limit probe, which rejects when a throttle shows). Decided 2026-11-06 under
+    item 18's identity rule, which reopens a carried rejection only when the probe's
+    source or the finding's evidence window changes: a rate limit almost never lives in
+    that window. It is an app-wide limiter, a middleware, a reverse proxy in the compose
+    file or a gateway, and its settings come from the environment, so removing it would
+    leave the finding killed on a measurement that no longer holds. One branch is also
+    weaker than the other probes' rejections: a RateLimit-Remaining header on the lone
+    request shows a limiter exists, not that its budget stops guessing. Not carrying it
+    costs one lone request and a 20-request burst per later run."""
     import json as _json
     if v["seat"] != "dynamic" or v["reason"] != "deterministic":
         return False
@@ -742,8 +753,10 @@ def _controlled_rejection(v) -> bool:
         ev = _json.loads(v["rationale"] or "{}")
     except (ValueError, TypeError):
         return False
-    return (isinstance(ev, dict) and bool(ev.get("baseline"))
-            and ev.get("differs_from_baseline") is False and ev.get("handled") is True)
+    if not isinstance(ev, dict) or ev.get("reproduces_when", "differs") != "differs":
+        return False
+    return (bool(ev.get("baseline")) and ev.get("differs_from_baseline") is False
+            and ev.get("handled") is True)
 
 
 # -- 9 -------------------------------------------------------------------------
