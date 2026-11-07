@@ -2081,7 +2081,8 @@ names, three call a dependency risky for existing, four are about operator shell
 scripts an attacker would need the filesystem to touch, one is "prototype pollution" in
 a JSON data file of a Python service, four are about public data reached without
 authorization (sightings and KEV entries, which the public API already returns), and
-the rest are internal methods or regexes with nothing to backtrack. Several `survives`
+the other eight are internal methods, operator configuration, or regexes with
+nothing to backtrack. Several `survives`
 answers argue against the claim in their own text (#153 calls the pattern
 fixed-length, #915 says no attacker reaches a test) and still say `survives`; 22 of the
 24 came from granite. So decision N's "defended first" puts noise at the top of this
