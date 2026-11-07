@@ -462,8 +462,7 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
     almost every call. MEASURED on cve-services: that ordering reloaded a model ~3400
     times and crawled at minutes per finding, which would have taken days for 1708
     findings. Loading each model once and refuting every finding it is eligible for does
-    the same work in a few hours. Within a model, quote-verified findings go first, so a
-    deadline that cuts the pass short still spends the model on the strongest findings.
+    the same work in a few hours. Only quote-verified findings are refuted (see below).
     Each finding's row is written the moment a refuter answers (the connection is in
     autocommit), so an interrupted pass resumes at the (finding, model) pair rather than
     restarting the whole run.
@@ -486,9 +485,15 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
             priors[vid] = (verdicts.prior_context(d, r["prior_match"] or "matched")
                            if d and d["verdict"] == "intended" else "")
         return priors[vid]
+    # Only findings whose quote verified are refuted. The funnel's Layer 2 gate kills a
+    # finding whose quote is not in the source before it reads a single refutation
+    # (funnel._layer2_gate), and KEPT_SQL needs a verified quote, so no answer on such a
+    # finding changes any outcome. They used to sit at the back of every model's queue
+    # all the same: on 2026-11-07 granite owed 497 answers on VulnLookup, 411 of them on
+    # unverified findings, at about 38 s a call.
     pending = con.execute(
-        "SELECT COUNT(*) FROM research_findings WHERE research_id=? AND refutations='[]'",
-        (rid,)).fetchone()[0]
+        "SELECT COUNT(*) FROM research_findings WHERE research_id=? AND refutations='[]'"
+        " AND quote_verified=1", (rid,)).fetchone()[0]
     if pending:
         progress(f"refuting {pending} finding(s) cross-family")
     for m in models:
@@ -502,8 +507,8 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
         # (an underscore) from matching the wrong rows.
         rows = con.execute(
             """SELECT * FROM research_findings
-               WHERE research_id=? AND family != ?
-               ORDER BY quote_verified DESC, subsystem, id""", (rid, mfam)).fetchall()
+               WHERE research_id=? AND family != ? AND quote_verified = 1
+               ORDER BY subsystem, id""", (rid, mfam)).fetchall()
         # An error is not an answer: a model whose only record on a finding is a failed
         # call is asked again (IMPROVEMENT-PLAN item 5). Before this, --resume skipped
         # it forever and the finding stayed deferred at the Layer 2 gate; 14 candidates
@@ -514,9 +519,16 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
         if not rows:
             continue
         progress(f"  {m}: refuting {len(rows)} finding(s)")
+        # A line every 25 answers. The pass can run for hours on one model, and with
+        # nothing after the line above, a log and a unit count that did not move looked
+        # like a hung run (2026-11-07, granite at about a minute an answer).
+        t_model, answered = time.time(), 0
         for r in rows:
             if deadline and datetime.now() >= deadline:
                 break
+            if answered and answered % 25 == 0:
+                each = (time.time() - t_model) / answered
+                progress(f"    {m}: {answered}/{len(rows)} answered, {each:.0f} s each")
             sub = subs.get(r["subsystem"])
             if sub is None:
                 continue
@@ -562,6 +574,7 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
                    refuter_errors=?, n_unsupported=? WHERE id=?""",
                 (json.dumps(f.refutations, default=str), f.refuted, f.survived,
                  f.refuter_errors, f.unsupported, r["id"]))
+            answered += 1
     totals = con.execute(
         """SELECT COALESCE(SUM(n_refuted), 0) AS refuted,
                   COALESCE(SUM(n_survived), 0) AS survived,

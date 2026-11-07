@@ -22,6 +22,7 @@ from typing import Any
 
 from .. import db, dismissals
 from ..research import verdicts as deep_verdicts
+from ..research.ensemble import family as model_family
 
 BANDS =("known-good", "unmeasured", "known-bad")
 
@@ -1018,6 +1019,12 @@ def research_detail(con: sqlite3.Connection, rid: int) -> dict[str, Any] | None:
            ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'error' THEN 1
                                 WHEN 'pending' THEN 2 ELSE 3 END,
                     updated_at DESC LIMIT ?""", (rid, UNITS_SHOWN))]
+    head["refute"] = refute_status(con, rid, head["models"])
+    # Alive with no unit running and answers owed: the refute pass, during which the
+    # units count stands still. Said on the page because it once looked like a hang.
+    head["refuting"] = (head.get("status") == "running"
+                        and not any(u["status"] == "running" for u in head["running"])
+                        and any(x["owed"] for x in head["refute"]))
     # Each candidate carries where its occurrence stands, so the card can link to it:
     # into triage when it is there, otherwise to its evidence and ledger, which say
     # what the funnel did with it.
@@ -1041,6 +1048,30 @@ def research_detail(con: sqlite3.Connection, rid: int) -> dict[str, Any] | None:
         f["human"] = deep_verdicts.standing(con, f["id"])
     head["survivors"] = research_survivors(con, head["run_id"], rid)
     return head
+
+
+def refute_status(con: sqlite3.Connection, rid: int,
+                  models: list[str]) -> list[dict[str, Any]]:
+    """Per refuter, the answers it has given and still owes on what the refute pass asks
+    it: quote-verified findings of another family (runner._refute_pass). An error is not
+    an answer, as there. The pass can hold one model for hours while the units count
+    stands still, so this is the progress a watcher sees during it."""
+    rows = []
+    for r in con.execute(
+            "SELECT family, refutations FROM research_findings "
+            "WHERE research_id=? AND quote_verified=1", (rid,)):
+        try:
+            refs = json.loads(r["refutations"] or "[]")
+        except ValueError:
+            refs = []
+        rows.append((r["family"], {x.get("model") for x in refs
+                                   if isinstance(x, dict) and x.get("verdict") != "error"}))
+    out = []
+    for m in models:
+        eligible = [have for fam, have in rows if fam != model_family(m)]
+        answered = sum(1 for have in eligible if m in have)
+        out.append({"model": m, "answered": answered, "owed": len(eligible) - answered})
+    return out
 
 
 def research_survivors(con: sqlite3.Connection, run_id: int,

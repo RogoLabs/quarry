@@ -974,6 +974,30 @@ def test_a_failed_htmx_request_is_shown_not_swallowed(seeded):
     assert r.status_code == 404 and "No such occurrence." in r.text
 
 
+def test_a_run_in_its_refute_pass_says_so_instead_of_looking_hung(seeded, worker):
+    """2026-11-07: a day run spent hours refuting with the units count frozen at 724 and
+    nothing else on the page, and it looked hung. The panel now shows each refuter's
+    answered and owed counts, and says when the refute pass is what is running."""
+    client, con = seeded
+    _stopped_research(con)
+    con.execute("UPDATE research_units SET status='done' WHERE research_id=1")
+    con.execute("UPDATE research_runs SET status='running', pid=?, heartbeat=? WHERE id=1",
+                (worker.pid, _utc_now()))
+    con.execute(
+        "INSERT INTO research_findings (research_id,subsystem,lens,model,family,title,"
+        "file,quote,quote_verified,refutations) "
+        "VALUES (1,'src','x','a:1b','a','t','f.py','q',1,'[]')")
+    con.commit()
+    panel = client.get("/research/1/progress").text
+    assert "Refutation" in panel and "The refute pass is running" in panel
+    row = panel.split("c:2d</th>", 1)[1].split("</tr>", 1)[0]
+    assert [c.split(">")[-1] for c in row.split("</td>")[:2]] == ["0", "1"]   # owes 1
+
+    con.execute("UPDATE research_units SET status='running' WHERE research_id=1")
+    con.commit()
+    assert "The refute pass is running" not in client.get("/research/1/progress").text
+
+
 def test_a_stopped_research_run_does_not_refetch_on_click(seeded, worker):
     """A div with hx-get and no hx-trigger fires on click, so a stopped run's panel
     refetched itself on every click inside it."""

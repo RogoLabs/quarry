@@ -85,6 +85,32 @@
         ends {{ r.deadline|local(with_date=False) }}{% endif %}</div></div>
   </div>
 
+  {#  The refute pass can hold one model for hours with no unit running, so the units
+      count above stands still through it. Without this table a run in that pass
+      looked hung (2026-11-07). #}
+  {% if r.refute and (r.refute|sum(attribute='answered') + r.refute|sum(attribute='owed')) %}
+    <h2 class="h-sec mt-4">Refutation</h2>
+    {% if r.refuting %}
+      <p class="note"><span class="pill">refuting</span> The refute pass is running, so
+        the units count stands still until it ends.</p>
+    {% endif %}
+    <div class="tbl">
+      <table>
+        <caption class="sr-only">Cross-family answers per refuter on quote-verified
+          findings</caption>
+        <thead><tr><th scope="col">Refuter</th><th scope="col" class="r">Answered</th>
+          <th scope="col" class="r">Owed</th></tr></thead>
+        <tbody>{% for x in r.refute %}
+          <tr><th scope="row" class="mono sm">{{ x.model }}</th>
+            <td class="num r">{{ x.answered }}</td>
+            <td class="num r">{{ x.owed }}</td></tr>
+        {% endfor %}</tbody>
+      </table>
+    </div>
+    <p class="note">Only findings whose quote verified are refuted: the funnel drops the
+      rest without reading a refutation.</p>
+  {% endif %}
+
   <div class="two mt-4">
     <div>
       <h2 class="h-sec">By lens</h2>

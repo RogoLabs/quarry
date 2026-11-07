@@ -32,7 +32,7 @@ four bugs fixed after it, and `REFUTE_SHARE` raised to 0.5. At 15:44 a second re
 archived the test run's data (archive `20261106-154449`) so the real work starts from an
 empty database on e6239cf; Layer 1 ran on the three targets, and at 16:06 the launchd
 job started the deep review of VulnLookup (run 3), recorded at the end of item 29.
-Open: decision J (its default is taken) and decision N under item 29. The suite collects 1189 and passes 1186, with 3 skipped because
+Open: decision J (its default is taken) and decision N under item 29. The suite collects 1193 and passes 1190, with 3 skipped because
 setuptools is absent.
 
 Every item says where its evidence came from:
