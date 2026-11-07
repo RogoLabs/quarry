@@ -40,7 +40,9 @@ REFUTE_NUM_PREDICT = 700
 #: (413 calls, 134 of them grounding retries, in 2,455 s), about 4,380 s, so keeping
 #: pace takes about 0.48 of the window. In that 2-hour run the hunt finished every unit
 #: with 2,434 s left, more than 0.3 of it, and the refute pass still left 219 of the 498
-#: answers owed when the deadline came.
+#: answers owed when the deadline came. That 8.8 s is mostly qwen3-coder, which gave 247
+#: of the 279 answers; granite on VulnLookup took about 61 s an answer (item 30), so the
+#: share understates what a granite-heavy backlog needs.
 REFUTE_SHARE = 0.5
 
 

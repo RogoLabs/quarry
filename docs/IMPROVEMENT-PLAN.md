@@ -31,8 +31,10 @@ after it from 11:26 to 13:43, every step exit 0; item 29 records what it found, 
 four bugs fixed after it, and `REFUTE_SHARE` raised to 0.5. At 15:44 a second reset
 archived the test run's data (archive `20261106-154449`) so the real work starts from an
 empty database on e6239cf; Layer 1 ran on the three targets, and at 16:06 the launchd
-job started the deep review of VulnLookup (run 3), recorded at the end of item 29.
-Open: decision J (its default is taken) and decision N under item 29. The suite collects 1193 and passes 1190, with 3 skipped because
+job started the deep review of VulnLookup (run 3), recorded at the end of item 29. On
+2026-11-07 a day run looked hung in its refute pass; item 30 records why, the fix
+(02c91fc) and decision O. Open: decision J (its default is taken), decision N under
+item 29 and decision O under item 30. The suite collects 1193 and passes 1190, with 3 skipped because
 setuptools is absent.
 
 Every item says where its evidence came from:
@@ -1974,3 +1976,55 @@ in `<data root>/logs/clean-start-20261106-154511/`; every step exited 0.
   36 units each; the same shape as ML-Gateway, where devstral wrote 188 of 249 and
   refutation took down 113 of its 188. Validate on VulnLookup waits for the review, so the cross-user probe has
   authorization findings to test.
+
+
+### 30. The refute pass on VulnLookup: slow, and asked what could not matter [measured]
+
+The first night (2026-11-06 16:06 to 06:00) hunted 724 of 1,656 units, wrote 979
+findings (931 from devstral in its 244 units), and split its time almost evenly:
+25,025 s hunting, 24,957 s refuting. At 07:24 on 2026-11-07 a day run was started from
+the dashboard (`--resume 1 --hours 8`). By 11:27 it looked hung: the log's last line was
+"granite4.2:30b: refuting 737 finding(s)", the unit count stood at 724, and the process
+showed no CPU. It was working. The run opens with a refute pass for what earlier nights
+left unasked, that pass may run to the deadline, the unit count only moves in the hunt,
+and the model runs inside Ollama, not the worker.
+
+- **granite answered about one finding a minute.** It went from owing 737 to owing 499
+  in about 14,600 s, about 61 s an answer. Generation is the cost: about 7 tokens a
+  second with a prompt of about 48,000 tokens, 18 to 52 s a call. The prompt cache
+  works (each call evaluated a few hundred new tokens against about 47,990 cached). The
+  8.8 s an answer that `REFUTE_SHARE` was set from was mostly qwen3-coder (247 of the 279
+  answers in the test run).
+- **Almost every granite answer took two calls.** Decision F asks a refuter again when
+  its refutation of a verified finding cites no evidence on the claim's path. granite
+  needed that on 426 of its 454 answers. The second call changed the outcome on 41: 20
+  became evidence-backed refutations, 21 turned into `survives`; 384 stayed ungrounded.
+- **Most of what was left could not change anything.** Of the 497 answers granite still
+  owed, 411 were on findings whose quote did not verify. The funnel's Layer 2 gate kills
+  those before it reads a refutation, and `KEPT_SQL` needs a verified quote, so no answer
+  on them changes an outcome. They sat at the back of every model's queue anyway.
+
+Fixed in 02c91fc: the refute pass asks only about findings whose quote verified, logs a
+line every 25 answers with the time per answer, and the research page shows each
+refuter's answered and owed counts and says when the refute pass is running. The day run
+was stopped at 11:38 (at most one granite call in flight lost) and restarted on the fix with its
+15:24 deadline; it then owed granite 81 answers and devstral 32 instead of about 500.
+Tests: `tests/test_refute_progress.py` (3) and one in `tests/test_web_dashboard.py`.
+
+A correction to item 29: the whole first night averaged 34.6 s a unit (25,021 s for 724
+units; devstral 73.4 s, granite 23.1 s, qwen3-coder 6.6 s), so the full hunt is about
+16 hours, not the 24 that item 29 drew from the first 114 units at about 53 s.
+
+What is left on this review, at these rates: the 932 pending units (308 devstral, 312
+each for the others) are about 8.9 hours of hunting. If devstral keeps writing about 3.8
+findings a unit and 57% of them verify (554 of 979 so far), its 308 units leave about
+670 verified findings for granite at about 61 s, about 11 hours, plus qwen3-coder's
+answers, which are faster. About 20 hours in all: today's run and two or three nights.
+
+**Decision O: decision F's second call for granite.** It costs about half of granite's
+time on verified findings and changed 41 outcomes in 426. Without it, the 20 refutations
+it found would go to a human as "not rebutted", and the 21 `survives` would be
+"not rebutted" too, losing the rank decision N's default gives them. My default: keep
+it. A refutation with evidence and a refuter that concedes are the two strongest
+signals Layer 2 makes, and the human review list (386 after the funnel) is the
+bottleneck, not machine time. Revisit if the remaining nights run past a week.
