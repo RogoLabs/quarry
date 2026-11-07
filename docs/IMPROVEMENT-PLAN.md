@@ -2073,3 +2073,17 @@ the runner writes the deadline every time, NULL for none. An untimed run hunts e
 unit and then refutes; the 21:00 job's resume is refused while it holds the run
 (item 26). The run was restarted untimed at 14:39 with 822 units left. Tests: one in
 `tests/test_web_dashboard.py`, one in `tests/test_reach.py`.
+
+**What "defended" meant on VulnLookup, read by hand (2026-11-07, about 15:00).** All 24
+findings with a `survives` answer were read, with the code behind the four that looked
+plausible. None holds as the model stated it: four are ReDoS claims about test-function
+names, three call a dependency risky for existing, four are about operator shell
+scripts an attacker would need the filesystem to touch, one is "prototype pollution" in
+a JSON data file of a Python service, four are about public data reached without
+authorization (sightings and KEV entries, which the public API already returns), and
+the rest are internal methods or regexes with nothing to backtrack. Several `survives`
+answers argue against the claim in their own text (#153 calls the pattern
+fixed-length, #915 says no attacker reaches a test) and still say `survives`; 22 of the
+24 came from granite. So decision N's "defended first" puts noise at the top of this
+list, and a `survives` from granite is weak evidence. Not changed yet; it argues for
+checking a `survives` the way decision F checks a `refuted`.
