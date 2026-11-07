@@ -143,6 +143,20 @@ def test_the_runner_ranks_each_finding_as_it_lands(tmp_path, monkeypatch):
     assert got == {"lib/helper.js": reach.IMPORTED, "tools/cli.js": reach.NONE}
 
 
+def test_an_untimed_resume_clears_an_earlier_deadline(tmp_path, monkeypatch):
+    """2026-11-07: a run resumed with no deadline kept the one an earlier call set, so
+    the dashboard counted down to a stop that was never coming. (Here rather than in a
+    file of its own because this harness already drives `execute`.)"""
+    con, rid, src = _planned(tmp_path)
+    _hunt_finds_two(monkeypatch)
+    con.execute("UPDATE research_runs SET deadline='2026-11-07T15:24:57' WHERE id=?", (rid,))
+
+    runner.execute(con, rid, src, deadline=None, progress=lambda *_: None)
+
+    assert con.execute("SELECT deadline FROM research_runs WHERE id=?",
+                       (rid,)).fetchone()[0] is None
+
+
 def test_a_reach_failure_leaves_the_list_unranked_and_the_review_running(tmp_path,
                                                                          monkeypatch):
     con, rid, src = _planned(tmp_path)

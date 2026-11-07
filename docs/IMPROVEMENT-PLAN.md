@@ -34,7 +34,7 @@ empty database on e6239cf; Layer 1 ran on the three targets, and at 16:06 the la
 job started the deep review of VulnLookup (run 3), recorded at the end of item 29. On
 2026-11-07 a day run looked hung in its refute pass; item 30 records why, the fix
 (02c91fc) and decision O (taken 2026-11-07: keep the second call); decision N was taken and built the same day (13eb37d). Open: decision J, whose default
-is taken. The suite collects 1198 and passes 1195, with 3 skipped because
+is taken. The suite collects 1200 and passes 1197, with 3 skipped because
 setuptools is absent.
 
 Every item says where its evidence came from:
@@ -2061,3 +2061,15 @@ it found would go to a human as "not rebutted", and the 21 `survives` would be
 it. A refutation with evidence and a refuter that concedes are the two strongest
 signals Layer 2 makes, and the human review list (386 after the funnel) is the
 bottleneck, not machine time. Revisit if the remaining nights run past a week. Taken 2026-11-07: Jerry kept it; nothing changes in the code.
+
+**The day run was never meant to stop at 15:24.** The dashboard's Resume buttons sent a
+hidden `hours=8`, so a review resumed by hand always got an eight-hour deadline and the
+page offered no other choice; restarting it on the fix at 11:38 kept that deadline. And
+`runner.execute` wrote a deadline only when it had one, so an untimed resume of a timed
+run kept the old one and the dashboard counted down to it. Both fixed: Resume on the
+research page has a visible hours field where 0, the default, means no limit (the
+compact button on the list says "Resume, no time limit"), the route defaults to 0, and
+the runner writes the deadline every time, NULL for none. An untimed run hunts every
+unit and then refutes; the 21:00 job's resume is refused while it holds the run
+(item 26). The run was restarted untimed at 14:39 with 822 units left. Tests: one in
+`tests/test_web_dashboard.py`, one in `tests/test_reach.py`.

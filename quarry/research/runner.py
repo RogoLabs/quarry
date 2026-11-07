@@ -198,9 +198,11 @@ def execute(con: sqlite3.Connection, rid: int, src: Path, *,
     with db.tx(con):
         db.update_manifest(con, row["run_id"],
                            lambda m: m.setdefault("deep", {}).__setitem__(str(rid), prov))
-    if deadline:
-        con.execute("UPDATE research_runs SET deadline=? WHERE id=?",
-                    (deadline.isoformat(timespec="seconds"), rid))
+    # Written every time, NULL for no deadline: an untimed resume of a run an earlier
+    # call timed kept the old deadline, so the dashboard counted down to a stop that was
+    # never coming (2026-11-07).
+    con.execute("UPDATE research_runs SET deadline=? WHERE id=?",
+                (deadline.isoformat(timespec="seconds") if deadline else None, rid))
 
     stats = {"hunted": 0, "findings": 0, "verified": 0, "refuted": 0,
              "survived": 0, "errors": 0, "skipped_deadline": 0}

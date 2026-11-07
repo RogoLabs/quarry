@@ -74,9 +74,12 @@ def research_start(request: Request, run_id: int = Form(...),
 
 
 @router.post("/research/{rid}/resume")
-def research_resume(request: Request, rid: int, hours: float = Form(8.0)):
+def research_resume(request: Request, rid: int, hours: float = Form(0.0)):
     """Pick a dead or stopped run back up. Completed units are skipped, so this
-    continues rather than restarts.
+    continues rather than restarts. `hours` 0, the default, sets no deadline: the run
+    goes until every unit is hunted and refuted, and the 21:00 job is refused while it
+    holds the run. It was a hidden 8, so a resume by hand always stopped after eight
+    hours (2026-11-07).
 
     The run is claimed in the database BEFORE the worker is spawned. The check
     used to read the status, then spawn, with nothing held in between, so two

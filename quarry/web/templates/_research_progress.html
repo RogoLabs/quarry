@@ -45,9 +45,15 @@
         </form>
       {% endif %}
       {% if r.resumable %}
-        <form method="post" action="/research/{{ r.id }}/resume">
+        {#  The hours used to be a hidden 8, so a resume by hand always stopped after
+            eight hours with no way to say otherwise (2026-11-07). 0 runs until every
+            unit is done and refuted; the 21:00 job is refused while it runs. #}
+        <form method="post" action="/research/{{ r.id }}/resume" class="row">
           <input type="hidden" name="csrf" value="{{ csrf_token }}">
-          <input type="hidden" name="hours" value="8">
+          <label for="resume-hours-{{ r.id }}" class="sm">Stop after (hours, 0 for no
+            limit)</label>
+          <input type="number" name="hours" id="resume-hours-{{ r.id }}" value="0" min="0"
+                 step="0.5" class="xs">
           <button type="submit">Resume (completed units are skipped)</button>
         </form>
       {% endif %}

@@ -699,6 +699,34 @@ def test_a_second_resume_is_refused_while_the_first_is_starting(seeded, monkeypa
     assert "/research/1/resume" not in page, "no Resume is offered while it starts"
 
 
+def test_a_resume_sets_no_deadline_unless_hours_are_given(seeded, monkeypatch, worker):
+    """2026-11-07: the Resume button sent a hidden hours=8, so a review resumed by hand
+    stopped after eight hours, and nothing on the page said so or offered otherwise."""
+    import subprocess
+    client, con = seeded
+    _stopped_research(con)
+    page = client.get("/research/1").text
+    form = page.split('action="/research/1/resume"', 1)[1].split("</form>", 1)[0]
+    assert 'type="number" name="hours"' in form and 'value="0"' in form
+    assert "0 for no" in form and 'type="hidden" name="hours"' not in form
+    argvs = []
+    real = subprocess.Popen
+
+    def popen(argv, *a, **k):
+        if "quarry.cli" not in argv:
+            return real(argv, *a, **k)
+        argvs.append(list(argv))
+        return worker
+    monkeypatch.setattr(subprocess, "Popen", popen)
+
+    assert _post(client, "/research/1/resume", {"hours": "0"}).status_code == 303
+    assert "--hours" not in argvs[-1]
+    con.execute("UPDATE research_runs SET status='stopped', pid=NULL WHERE id=1")
+    con.commit()
+    assert _post(client, "/research/1/resume", {"hours": "2.5"}).status_code == 303
+    assert argvs[-1][argvs[-1].index("--hours") + 1] == "2.5"
+
+
 def test_a_claim_with_no_worker_lapses_and_the_run_is_resumable_again(seeded, bystander):
     _, con = seeded
     _stopped_research(con)
