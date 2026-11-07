@@ -33,8 +33,8 @@ archived the test run's data (archive `20261106-154449`) so the real work starts
 empty database on e6239cf; Layer 1 ran on the three targets, and at 16:06 the launchd
 job started the deep review of VulnLookup (run 3), recorded at the end of item 29. On
 2026-11-07 a day run looked hung in its refute pass; item 30 records why, the fix
-(02c91fc) and decision O (taken 2026-11-07: keep the second call). Open: decision J (its default is taken) and decision N under
-item 29. The suite collects 1198 and passes 1195, with 3 skipped because
+(02c91fc) and decision O (taken 2026-11-07: keep the second call); decision N was taken and built the same day (13eb37d). Open: decision J, whose default
+is taken. The suite collects 1198 and passes 1195, with 3 skipped because
 setuptools is absent.
 
 Every item says where its evidence came from:
@@ -875,7 +875,7 @@ told from a genuine one; after the hard reset no such record exists.
   owed answered before the deadline) that meant 106 of 249 findings kept for review,
   and M was the reason in only 16 of the 123 failed refutations on them; F's checks
   account for the other 107.
-- **N. Reachability is not a refutation.** Open. On ML-Gateway (item 29) 53 of the 123
+- **N. Reachability is not a refutation. Done 2026-11-07 (13eb37d).** On ML-Gateway (item 29) 53 of the 123
   refutations that failed grounding on kept findings argued, by a keyword match rather
   than a reading of each, that the claimed code is out of the attacker's reach: a Typer
   CLI command, a store method no route calls, a dump file from a trusted feed. F asks
@@ -908,6 +908,20 @@ told from a genuine one; after the hard reset no such record exists.
   routed file, then the rest; and drop (2) rather than wait on the corpus, since HTTP
   reachability is the wrong boundary for code that reads other people's data. The size
   of the kept pile comes from what devstral claims, which (1) orders and does not shrink.
+  **Taken 2026-11-07 as revised, and built (13eb37d).** `research.reach` gives each
+  finding a reach, `route`, `imported` or `none`, from the probes' route map and an
+  import graph (Python by module path, an exact match or a unique suffix; JavaScript and
+  TypeScript by relative specifier), stored as `research_findings.reach` (migration
+  v11). The runner ranks findings from earlier nights when it starts and each new one as
+  its unit lands; a classifier failure is logged and leaves the list unranked. The
+  survivors list (`quarry deep-survivors`, the dashboard) and the digest sort defended
+  first, then by reach, and show each finding's reach; the dashboard's candidate cards
+  sort the same way within kept and refuted. Nothing is killed on reach, and option (2)
+  is dropped. On VulnLookup it classified 179 files in 1.1 s and ranked all 979
+  findings; of the 428 kept at the time, 23 defended (8 imported, 15 none), then 207
+  imported, then 198 none, and none in a routed file yet, since the `website/web`
+  subsystems were not hunted. Triage's own ranking is unchanged. Tests:
+  `tests/test_reach.py` (5).
 - **L. `uncertain` deferred a claim for good. Done 2026-11-05.** An `uncertain`
   answer counted as a refuter error, and `--resume` re-asks only failed calls, so a
   claim whose refuters were all uncertain stayed deferred at the gate with nothing to
