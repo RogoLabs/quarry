@@ -889,6 +889,25 @@ told from a genuine one; after the hard reset no such record exists.
   route and no file that serves one imports it, which kills, and would lose a plant
   reached through an import that the replay corpus does not yet contain. My default:
   (1) now, and (2) only once the corpus has a plant reached through an import.
+  **Measured on VulnLookup, 2026-11-07, mid-review** (724 of 1,656 units hunted, the
+  `website/web` subsystems not yet reached): 429 findings kept, 23 with a `survives`
+  answer. By the same kind of keyword match, 127 of the 429 carry a refutation arguing
+  reach or provenance. An approximate Python import graph (module names matched to files)
+  puts none of the 429 in a file that serves a route, 212 in files a routed file imports
+  directly or through others, and 217 in neither; 72 of those 217 are in
+  `vulnerabilitylookup/feeders/`, the code that downloads and parses third-party feeds.
+  Option (2) would kill the 73 in that last group that carry such a refutation, 26 of
+  them in feeders. Four of those 26, read: all four claims are wrong (a callback parameter
+  called attacker input; a feeder name taken from `Path(__file__).stem` called a path
+  injection), and the refutations are right. But one of them dismisses its claim because
+  the URL comes from "a known, whitelisted source", the provider's own index listing,
+  which is third-party data. For an aggregator, what the feeders parse is the attack
+  surface, and "no route reaches it" is not "no attacker controls it".
+  Revised default: (1), ranking by reach through imports rather than "serves a route"
+  (which ranks nothing here), so `survives` first, then findings in or imported by a
+  routed file, then the rest; and drop (2) rather than wait on the corpus, since HTTP
+  reachability is the wrong boundary for code that reads other people's data. The size
+  of the kept pile comes from what devstral claims, which (1) orders and does not shrink.
 - **L. `uncertain` deferred a claim for good. Done 2026-11-05.** An `uncertain`
   answer counted as a refuter error, and `--resume` re-asks only failed calls, so a
   claim whose refuters were all uncertain stayed deferred at the gate with nothing to
