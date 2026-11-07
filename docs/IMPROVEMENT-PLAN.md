@@ -33,8 +33,8 @@ archived the test run's data (archive `20261106-154449`) so the real work starts
 empty database on e6239cf; Layer 1 ran on the three targets, and at 16:06 the launchd
 job started the deep review of VulnLookup (run 3), recorded at the end of item 29. On
 2026-11-07 a day run looked hung in its refute pass; item 30 records why, the fix
-(02c91fc) and decision O. Open: decision J (its default is taken), decision N under
-item 29 and decision O under item 30. The suite collects 1193 and passes 1190, with 3 skipped because
+(02c91fc) and decision O (taken 2026-11-07: keep the second call). Open: decision J (its default is taken) and decision N under
+item 29. The suite collects 1193 and passes 1190, with 3 skipped because
 setuptools is absent.
 
 Every item says where its evidence came from:
@@ -2027,4 +2027,4 @@ it found would go to a human as "not rebutted", and the 21 `survives` would be
 "not rebutted" too, losing the rank decision N's default gives them. My default: keep
 it. A refutation with evidence and a refuter that concedes are the two strongest
 signals Layer 2 makes, and the human review list (386 after the funnel) is the
-bottleneck, not machine time. Revisit if the remaining nights run past a week.
+bottleneck, not machine time. Revisit if the remaining nights run past a week. Taken 2026-11-07: Jerry kept it; nothing changes in the code.
