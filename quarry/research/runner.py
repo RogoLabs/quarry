@@ -20,6 +20,7 @@ from .. import db, taint
 from . import ensemble as E
 from . import grounding
 from . import intent as intent_mod
+from . import reach
 from . import verdicts
 from .pack import Subsystem, pack_subsystems
 from .profile import profile_repo
@@ -177,7 +178,18 @@ def execute(con: sqlite3.Connection, rid: int, src: Path, *,
     imap = intent_mod.build(src) if route_intent else None
     if imap is not None and imap.error:
         progress(f"  [intent] route intent unavailable: {imap.error}")
+    # Reach orders the review list (decision N, research.reach). It is a ranking aid, so
+    # a failure here is reported and the review goes on with the findings unranked.
+    try:
+        reach_map: dict[str, str] | None = reach.classify(src)
+    except Exception as e:                              # noqa: BLE001
+        reach_map = None
+        progress(f"  [reach] unavailable, review list left unranked: {e}")
     _claim(con, rid)
+    if reach_map is not None:
+        n = reach.fill(con, rid, reach_map)             # findings from earlier nights
+        if n:
+            progress(f"  [reach] ranked {n} earlier finding(s)")
     # What answered, so a run can be reproduced: the Ollama version and each model's
     # digest. A tag like qwen3-coder:30b is mutable; the digest is not.
     prov = E.model_provenance(models)
@@ -198,7 +210,7 @@ def execute(con: sqlite3.Connection, rid: int, src: Path, *,
     # twice).
     unit_args = dict(row=row, subs=subs, lens_by_key=lens_by_key, imap=imap, src=src,
                      stats=stats, progress=progress, num_ctx=num_ctx, attempted=set(),
-                     rendered={})
+                     rendered={}, reach_map=reach_map)
 
     def refute_until(until):
         t0 = time.time()
@@ -248,7 +260,8 @@ def execute(con: sqlite3.Connection, rid: int, src: Path, *,
 
 def _hunt(con: sqlite3.Connection, rid: int, *, until, row, subs: dict, lens_by_key: dict,
           imap, src: Path, stats: dict, progress: Progress, num_ctx: int,
-          attempted: set[int], rendered: dict[str, tuple[str, str]]) -> None:
+          attempted: set[int], rendered: dict[str, tuple[str, str]],
+          reach_map: dict[str, str] | None = None) -> None:
     """Run pending units until `until` (None: all of them).
 
     Units run subsystem by subsystem (most security-relevant first), and within one,
@@ -312,6 +325,8 @@ def _hunt(con: sqlite3.Connection, rid: int, *, until, row, subs: dict, lens_by_
                 f.quote_verified = E.verify_quote(f, src)
             secs = time.time() - t0
             _persist(con, rid, row["run_id"], u, found, src)
+            if reach_map is not None:
+                reach.fill(con, rid, reach_map)
             con.execute(
                 """UPDATE research_units SET status='done', seconds=?, n_findings=?,
                    tokens_in=?, error=NULL, updated_at=datetime('now') WHERE id=?""",

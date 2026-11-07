@@ -229,4 +229,6 @@ WHERE NOT EXISTS (
 --       .prior_verdict_id, .prior_match (the earlier verdict a later run matched)
 --   v10 research_findings.n_unsupported (answers that did not rebut: an ungrounded
 --       refutation, or uncertain)
+--   v11 research_findings.reach (route | imported | none: how near a route the file
+--       sits, which orders the review list and kills nothing; NULL until classified)
 -- v4 also redefines live_occurrences above to treat defer and merge like kill.

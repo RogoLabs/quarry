@@ -39,6 +39,8 @@ from .. import db
 from ..cwe import probe_class
 from ..research import verdicts
 from ..research.ensemble import KEPT_SQL
+from ..research.reach import RANK_SQL as REACH_RANK
+from ..research.reach import label as reach_label
 from ..taint import TaintError, safe_relpath, scrub_text
 
 CWE_TITLE = {
@@ -1041,6 +1043,7 @@ def _render_research_finding(d: dict[str, Any]) -> str:
         f"- Subsystem: {_code(d['subsystem'])}",
         f"- Lens: {_code(d['lens'])}",
         f"- Location: {where}",
+        f"- Reach (orders this list, kills nothing): {reach_label(d.get('reach'))}",
         f"- Found by: {_code(d['model'])} (family {_code(d['family'])})",
         f"- Severity (model-claimed, not computed): {_text(d['severity'] or 'unstated')}",
         f"- Cross-family vote: {int(d['n_survived'])} defended, "
@@ -1094,7 +1097,8 @@ def draft_research_digest(con: sqlite3.Connection, run_id: int, *,
     cross-family model still defended after being told to kill it (`n_survived > 0`), or
     that every refuter tried to kill without quoting code on the claim's path that defeats
     it (decision F: "not rebutted"). The bar is `ensemble.KEPT_SQL`, shared with the funnel
-    gate and the dashboard, and the order is the dashboard's, defended first.
+    gate and the dashboard, and the order is the dashboard's: defended first, then
+    nearer a route (decision N, `research.reach`).
 
     These are model-found candidates for human triage. They were NOT confirmed dynamically:
     no probe stood the target up and reproduced them, which is what the advisory drafts in
@@ -1104,13 +1108,14 @@ def draft_research_digest(con: sqlite3.Connection, run_id: int, *,
         f"""SELECT rf.id, rf.subsystem, rf.lens, rf.model, rf.family, rf.title,
                   rf.file, rf.quote, rf.severity, rf.reasoning,
                   rf.attacker_control, rf.self_critique, rf.refutations,
-                  rf.n_refuted, rf.n_survived, rf.n_unsupported, r.target
+                  rf.n_refuted, rf.n_survived, rf.n_unsupported, rf.reach, r.target
              FROM research_findings rf
              JOIN research_runs rr ON rr.id = rf.research_id
              JOIN runs r          ON r.id = rr.run_id
             WHERE rr.run_id = ? AND {KEPT_SQL}
-            ORDER BY rf.quote_verified DESC, rf.n_survived DESC, rf.n_refuted ASC,
-                     rf.subsystem, rf.id""", (run_id,)).fetchall()
+            ORDER BY rf.quote_verified DESC, (rf.n_survived > 0) DESC, {REACH_RANK},
+                     rf.n_survived DESC, rf.n_refuted ASC, rf.subsystem, rf.id""",
+        (run_id,)).fetchall()
     if not rows:
         return None
 
@@ -1131,6 +1136,9 @@ def draft_research_digest(con: sqlite3.Connection, run_id: int, *,
         "",
         f"- Target: {_code(target)}",
         f"- Survivors: {len(rows)}",
+        "- Order: defended first, then by reach: in a file that declares a route, "
+        "then in one imported by such a file, then the rest. Reach orders the list "
+        "and removes nothing.",
         "",
         "---",
         "",

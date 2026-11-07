@@ -23,6 +23,8 @@ from typing import Any
 from .. import db, dismissals
 from ..research import verdicts as deep_verdicts
 from ..research.ensemble import family as model_family
+from ..research.reach import RANK_SQL as REACH_RANK
+from ..research.reach import label as reach_label
 
 BANDS =("known-good", "unmeasured", "known-bad")
 
@@ -1038,7 +1040,9 @@ def research_detail(con: sqlite3.Connection, rid: int) -> dict[str, Any] | None:
             FROM research_findings rf
             LEFT JOIN occurrences o ON o.id = rf.occurrence_id
             WHERE rf.research_id=?
-            ORDER BY rf.quote_verified DESC, rf.n_survived DESC, rf.n_refuted ASC, rf.id
+            ORDER BY rf.quote_verified DESC, (rf.n_survived > 0) DESC,
+                     (rf.n_refuted = 0) DESC, {REACH_RANK}, rf.n_survived DESC,
+                     rf.n_refuted ASC, rf.id
             LIMIT ?""", (rid, FINDINGS_SHOWN))]
     for f in head["findings"]:
         try:
@@ -1083,6 +1087,7 @@ def research_survivors(con: sqlite3.Connection, run_id: int,
     rows = [s for s in deep_verdicts.survivors(con, run_id) if s["research_id"] == rid]
     for s in rows:
         s["human"] = deep_verdicts.standing(con, s["id"])
+        s["reach_label"] = reach_label(s.get("reach"))
     return {"rows": rows,
             "new": sum(1 for s in rows if not s["prior_verdict"]),
             "prior_intended": sum(1 for s in rows if s["prior_verdict"] == "intended"),

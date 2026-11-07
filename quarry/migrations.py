@@ -285,9 +285,19 @@ def _v10_unsupported_refutations(con: sqlite3.Connection) -> None:
                     "n_unsupported INTEGER NOT NULL DEFAULT 0")
 
 
+def _v11_finding_reach(con: sqlite3.Connection) -> None:
+    """How near a Layer 2 finding's file sits to a route: `route`, `imported` or `none`
+    (`research.reach`). It orders the review list, decision N, and kills nothing. NULL
+    until a deep run on the target classifies it; NULL sorts with `none`."""
+    cols = {r[1] for r in con.execute("PRAGMA table_info(research_findings)")}
+    if "reach" not in cols:
+        con.execute("ALTER TABLE research_findings ADD COLUMN reach TEXT")
+
+
 MIGRATIONS = (_v1_funnel_actions, _v2_rank_view, _v3_issue_membership,
               _v4_repair_views, _v5_targets, _v6_research, _v7_research_liveness,
-              _v8_advisories, _v9_deep_verdicts, _v10_unsupported_refutations)
+              _v8_advisories, _v9_deep_verdicts, _v10_unsupported_refutations,
+              _v11_finding_reach)
 
 
 def migrate(con: sqlite3.Connection) -> int:

@@ -295,7 +295,8 @@ def deep_survivors(run_id: int = typer.Argument(..., help="a run with a deep rev
     another family defended it, or every refuter tried to refute it without quoting code
     on the claim's path ("not rebutted"). Survivors that matched an earlier human verdict are
     listed apart from new ones, so a finding already judged intended is not presented as
-    new."""
+    new. Within each group, defended findings come first, then by reach: in a file that
+    declares a route, imported by one, or neither (decision N; it removes nothing)."""
     from .research import verdicts
     _, connection = _open()
     rows = verdicts.survivors(connection, run_id)
@@ -311,11 +312,12 @@ def deep_survivors(run_id: int = typer.Argument(..., help="a run with a deep rev
         if not group:
             continue
         t = Table(title=f"{len(group)} {label}", show_header=True, header_style="bold")
-        for c in ("id", "lens", "file", "title", "vote", "verdict", "prior"):
+        for c in ("id", "lens", "file", "reach", "title", "vote", "verdict", "prior"):
             t.add_column(c)
         for r in group:
             prior = f"{r['prior_verdict']} (#{r['prior_rf']})" if r["prior_verdict"] else "-"
-            t.add_row(str(r["id"]), _e(r["lens"]), _e(r["file"]), _e(r["title"]),
+            t.add_row(str(r["id"]), _e(r["lens"]), _e(r["file"]), _e(r["reach"] or "-"),
+                      _e(r["title"]),
                       f"{r['n_survived']} defended / {r['n_refuted']} refuted"
                       + (f" / {r['n_unsupported']} not rebutted"
                          if r.get("n_unsupported") else ""),

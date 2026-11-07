@@ -49,7 +49,8 @@
     cross-family model or rebutted by none. Matched to an earlier human verdict:
     {{ sv.prior_intended }} intended, {{ sv.prior_other }} real or unclear;
     {{ sv.new }} new. {{ sv.judged }} of {{ sv.rows|length }} carry a verdict of their
-    own.</p>
+    own. Defended first, then by reach: in a file that declares a route, imported by
+    one, or neither. Reach orders this list and removes nothing.</p>
   <div class="tbl">
     <table>
       <caption class="sr-only">Layer 2 survivors of deep review {{ r.id }} with their human verdicts</caption>
@@ -61,7 +62,8 @@
         <tr>
           <th scope="row" class="mono sm"><a href="#cand-{{ s.id }}">#{{ s.id }}</a>
             <div class="dim wrap-normal">{{ s.title|visible }}</div></th>
-          <td class="mono sm">{{ s.lens|visible }}<div class="dim">{{ s.file|visible }}</div></td>
+          <td class="mono sm">{{ s.lens|visible }}<div class="dim">{{ s.file|visible }}</div>
+            <div class="dim">reach: {{ s.reach_label }}</div></td>
           <td class="sm nowrap">{{ s.n_survived }} defended, {{ s.n_refuted }} refuted
             {%- if s.n_unsupported %}, {{ s.n_unsupported }} not rebutted{% endif %}</td>
           <td class="sm">{% if h.own %}{{ m.deep_verdict_pill(h.own.verdict) }}
