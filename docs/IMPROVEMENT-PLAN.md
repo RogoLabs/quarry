@@ -2138,3 +2138,11 @@ drafts, and `quarry runs` and `quarry status 3` say the same. Tests:
 Side finding, not fixed: a resumed research run keeps its old `finished_at` (research
 run 1 reads 2026-11-07 12:00:19 while running), because `runner._claim` sets
 `status='running'` without clearing it. Nothing on the dashboard reads that column.
+
+Second side finding, not fixed (2026-11-09): a stopped deep review reads as `died`. The
+dashboard's Stop sends SIGTERM and records nothing, and the worker does not catch the
+signal, so its row keeps `status='running'` and the dead pid, and `live_status` reports
+`died`, which `run_progress` shows as failed. Run 3 was stopped this way at 09:23 local
+to save battery, with 374 refutation answers owed, and its row was set to `stopped` by
+hand. The fix is a SIGTERM handler in the worker that calls `_finish(con, rid,
+"stopped")`, or the Stop route writing `stopped` once the process is gone.
