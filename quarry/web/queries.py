@@ -1105,7 +1105,12 @@ def deep_state(con: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
     elif status == "done":
         phase = f"{units:,} units"
     else:
-        phase = f"{done:,} of {units:,} units"
+        # Stopped with every unit hunted is a refute pass left unfinished, which
+        # "1,566 of 1,566 units" hid.
+        owed = sum(x["owed"] for x in refute_status(
+            con, r["id"], json.loads(r["models"] or "[]"))) if done + r["errored"] >= units else 0
+        phase = (f"all {units:,} units hunted, {owed:,} answer{'' if owed == 1 else 's'} owed"
+                 if owed else f"{done:,} of {units:,} units")
     return {"rid": r["id"], "status": status, "phase": phase,
             "findings": r["findings"], "href": f"/research/{r['id']}"}
 
@@ -1527,24 +1532,168 @@ def run_stages(con: sqlite3.Connection, run: dict[str, Any],
                 "href": f"/research/{rr['latest']}" if rr["n"] else "/research"})
 
     vc = verdict_counts(con, rid)
-    out.append({"stage": "Validate", "status": "done" if vc["total"] else "not run",
+    vs = stage_state(con, rid, "validate", m)
+    out.append({"stage": "Validate", "status": vs["status"], "short": vs["short"],
+                "why": vs["note"],
                 "detail": (f"{vc['total']} latest verdict(s): {vc['confirmed']} confirmed, "
-                           f"{vc['needs-review']} needs review, {vc['rejected']} rejected"),
+                           f"{vc['needs-review']} needs review, {vc['rejected']} rejected"
+                           + (f"; last attempt: {vs['note']}" if vs["note"] else "")),
                 "cmd": shell("quarry", "validate", rid, "--dry-run"),
                 "note": "plans the probes; run it again without --dry-run to probe"})
 
     n_adv = advisory_count(con, rid)
     dg = digest(con, rid, reports_root)
+    rs = stage_state(con, rid, "report", m, has_digest=dg is not None)
     need = vc["confirmed"] and not n_adv
     out.append({"stage": "Report",
-                "status": "behind" if need else ("done" if n_adv or dg else "not run"),
+                "status": "behind" if need and rs["status"] != "running" else rs["status"],
+                "short": rs["short"], "why": rs["note"],
                 "detail": (f"{n_adv} advisory draft(s)"
                            + ("; a deep-review digest" if dg else "")
                            + (f"; {vc['confirmed']} confirmed verdict(s) with no draft"
-                              if need else "")),
+                              if need else "")
+                           + (f"; last attempt: {rs['note']}" if rs["note"] else "")),
                 "cmd": shell("quarry", "report", rid),
                 "note": "writes drafts to read before anything is sent"})
     return out
+
+
+def _stage_argv(argv: list[str], stage: str, run_id: Any) -> bool:
+    """Is this command line `quarry <stage> <run_id> ...`?"""
+    is_quarry = any(t == "quarry.cli" or t == "quarry" or t.endswith("/quarry")
+                    for t in argv)
+    if not is_quarry or stage not in argv:
+        return False
+    i = argv.index(stage)
+    return i + 1 < len(argv) and argv[i + 1] == str(run_id)
+
+
+def stage_state(con: sqlite3.Connection, run_id: int, stage: str,
+                m: dict[str, Any] | None = None, *, has_digest: bool = False
+                ) -> dict[str, Any]:
+    """Validate's or report's latest attempt on a run, read now, never trusted from the
+    writer -> {"status", "short", "note", "last"}.
+
+    `status` is "not run", "running", "died" (a start with no end whose process is gone
+    or is now something else), "error" or "done". `short` is the few words a cell shows
+    beside the count, empty when the count says it all; `note` is the longer reason.
+    A run from before attempts were recorded (`db.stage_started`) counts as run when it
+    left something behind: a verdict for validate, a draft or a digest for report.
+    """
+    m = db.read_manifest(con, run_id) if m is None else m
+    d = m.get(stage) if isinstance(m.get(stage), dict) else {}
+    last = d.get("last") if isinstance(d.get("last"), dict) else None
+    if last is None:
+        if stage == "validate":
+            left = verdict_counts(con, run_id)["total"] > 0
+        else:
+            left = advisory_count(con, run_id) > 0 or has_digest
+        return {"status": "done" if left else "not run", "short": "", "note": "",
+                "last": None}
+    if last.get("ended_at") is None:
+        pid = last.get("pid")
+        info = _ps(pid) if pid and _pid_alive(pid) else None
+        if info is not None and _stage_argv(info["argv"], stage, run_id):
+            return {"status": "running", "short": "running", "note": "running now",
+                    "last": last}
+        return {"status": "died", "short": "last attempt died",
+                "note": f"started {last.get('started_at')} UTC and never finished",
+                "last": last}
+    outcome = str(last.get("outcome") or "done")
+    if outcome == "error":
+        return {"status": "error", "short": "last attempt failed",
+                "note": str(last.get("note") or "error"), "last": last}
+    # "probed" and "drafted" are what the count already says.
+    quiet = outcome in ("probed", "drafted", "done")
+    return {"status": "done", "short": "" if quiet else outcome,
+            "note": "" if quiet else outcome, "last": last}
+
+
+#: The run's one word on the Runs list and the run page, and the pill each wears.
+PROGRESS_STATES = ("running", "waiting", "stopped", "failed", "cancelled", "done")
+
+
+def run_progress(con: sqlite3.Connection, run: dict[str, Any],
+                 reports_root: "Path | None" = None,
+                 stages: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Where a run is in the whole pipeline -> {"state", "label", "href", "stage"}.
+
+    `runs.status` is ingest's alone and reads `done` three seconds into a run, so the
+    Runs list said `done` beside 0 verdicts and 0 drafts while the deep review had a
+    day to go (2026-11-09). This reads every stage (`run_stages`, the run page's
+    terminal table) and names the first thing the run is doing or waiting on:
+
+    * **running**: a stage is working now (the deep review, validate, report);
+    * **waiting**: the next stage needs its command: scan, funnel, validate, or report
+      when a confirmed verdict has no draft or a finished deep review has no digest;
+    * **stopped**: the deep review was stopped partway;
+    * **failed**: ingest failed, a deep review died or stalled, or validate's or
+      report's last attempt failed or died;
+    * **done**: nothing is owed. A deep review never started does not hold a run
+      back: it is an optional, hours-long step chosen per target.
+    """
+    rid = run["id"]
+    page = f"/runs/{rid}"
+    stages = run_stages(con, run, reports_root) if stages is None else stages
+    by = {s["stage"]: s for s in stages}
+
+    def out(state: str, label: str, stage: str, href: str = f"{page}#terminal"):
+        return {"state": state, "label": label, "href": href, "stage": stage}
+
+    if run["status"] in ("failed", "cancelled"):
+        return out(run["status"], f"ingest {run['status']}", "Ingest")
+    if run["status"] == "running":
+        return out("running", "ingest: cloning the target", "Ingest")
+    deep, val, rep = by["Deep review"], by["Validate"], by["Report"]
+
+    working = []
+    if deep["status"] in LIVE_STATUSES:
+        ds = deep_state(con, rid)
+        working.append(("Deep review", f"deep review: {ds['phase'] if ds else deep['status']}",
+                        deep["href"]))
+    if val["status"] == "running":
+        working.append(("Validate", "validate: probing", f"{page}/validation"))
+    if rep["status"] == "running":
+        working.append(("Report", "report: drafting", f"{page}/advisories"))
+    if working:
+        return out("running", "; ".join(w[1] for w in working), working[0][0],
+                   working[0][2])
+
+    if by["Scan"]["status"] == "not run":
+        return out("waiting", "next: scan", "Scan")
+    if deep["status"] == "stopped":
+        ds = deep_state(con, rid)
+        return out("stopped", f"deep review stopped, {ds['phase']}" if ds
+                   else "deep review stopped", "Deep review", deep["href"])
+    if deep["status"] in ("died", "stalled", "unknown"):
+        return out("failed", f"deep review {deep['status']}; resume it from its page",
+                   "Deep review", deep["href"])
+    if by["Funnel"]["status"] == "not run":
+        return out("waiting", "next: funnel", "Funnel")
+    if by["Funnel"]["status"] == "behind":
+        n = arrived_total(con, rid)
+        return out("waiting", f"next: funnel, {n:,} occurrence{'' if n == 1 else 's'} "
+                   "not funnelled yet", "Funnel")
+    for s, name in ((val, "validate"), (rep, "report")):
+        if s is rep and s["status"] == "behind":
+            n = verdict_counts(con, rid)["confirmed"]
+            return out("waiting", f"next: report, {n:,} confirmed verdict"
+                       f"{'' if n == 1 else 's'} with no draft", "Report")
+        if s is val and s["status"] == "not run":
+            return out("waiting", "next: validate", "Validate")
+        if s["status"] == "died":
+            return out("failed", f"{name} stopped before it finished; run it again",
+                       s["stage"])
+        if s["status"] == "error":
+            return out("failed", f"{name} failed: {_short(s['why'])}", s["stage"])
+    if deep["status"] == "done" and rep["status"] == "not run":
+        return out("waiting", "next: report, for the deep review's digest", "Report")
+    return out("done", "every stage has run", "Report")
+
+
+def _short(text: str, n: int = 90) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= n else text[: n - 1].rstrip() + "…"
 
 
 def environment(con: sqlite3.Connection, root: Path, db_path: Path) -> dict[str, Any]:
@@ -1668,6 +1817,24 @@ def pipeline(con: sqlite3.Connection, run: dict[str, Any],
     deep_stage = ([{"name": "Deep review", "n": deep["findings"],
                     "unit": f"candidates; {deep['status']}, {deep['phase']}",
                     "href": deep["href"], "page": "research"}] if deep else [])
+    # A stage that has never run shows that, not a 0 that reads as "ran, found nothing".
+    m = db.read_manifest(con, rid)
+    vs = stage_state(con, rid, "validate", m)
+    n_adv, dg = advisory_count(con, rid), digest(con, rid, reports_root)
+    rs = stage_state(con, rid, "report", m, has_digest=dg is not None)
+    if vs["status"] in ("not run", "running"):
+        v_n, v_unit = vs["status"], ("validate has not run on this run"
+                                     if vs["status"] == "not run"
+                                     else f"probing; {vc['total']} verdict(s) so far")
+    else:
+        v_n, v_unit = vc["total"], f"verdicts, {vc['confirmed']} confirmed" + (
+            f"; {vs['short']}" if vs["short"] else "")
+    if rs["status"] in ("not run", "running"):
+        r_n, r_unit = rs["status"], ("report has not run on this run"
+                                     if rs["status"] == "not run" else "drafting")
+    else:
+        r_n, r_unit = n_adv, "drafts" + ("; deep-review digest" if dg else "") + (
+            f"; {rs['short']}" if rs["short"] else "")
     return [
         {"name": "Ingest", "n": quarantined, "unit": "quarantined",
          "href": f"{u['run']}#quarantine", "page": "run"},
@@ -1678,10 +1845,8 @@ def pipeline(con: sqlite3.Connection, run: dict[str, Any],
         *deep_stage,
         {"name": "Funnel", "n": run["live"], "unit": "live",
          "href": u["triage"], "page": "triage"},
-        {"name": "Validate", "n": vc["total"], "unit": f"verdicts, {vc['confirmed']} confirmed",
+        {"name": "Validate", "n": v_n, "unit": v_unit,
          "href": u["validation"], "page": "validation"},
-        {"name": "Report", "n": advisory_count(con, rid),
-         "unit": "drafts" + ("; deep-review digest" if digest(con, rid, reports_root)
-                             else ""),
+        {"name": "Report", "n": r_n, "unit": r_unit,
          "href": u["advisories"], "page": "advisories"},
     ]

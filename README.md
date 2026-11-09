@@ -128,7 +128,7 @@ keys and a GitHub token.
   a probe addresses a record that exists. A seed step that fails is recorded on the run,
   not fatal, and the probes stay read-only. `vulnlookup` is the first recipe.
 
-The test suite (1201 tests) asserts these against a hostile fixture repo and real
+The test suite (1215 tests) asserts these against a hostile fixture repo and real
 `sandbox-exec`. A profile with no test is a comment.
 
 ## Requirements

@@ -102,6 +102,16 @@
 {%- else %}<span class="pill inert">{{ status }}</span>{% endif %}
 {%- endmacro %}
 
+{#  Where a run is in the whole pipeline, as `queries.run_progress` reads it. Not
+    `runs.status`, which is ingest's alone and reads done three seconds in. #}
+{% macro progress_pill(state) -%}
+{% if state == 'done' %}<span class="pill verified">done</span>
+{%- elif state == 'running' %}<span class="pill accent">running</span>
+{%- elif state == 'waiting' %}<span class="pill unmeasured">waiting</span>
+{%- elif state == 'failed' %}<span class="pill alarm">failed</span>
+{%- else %}<span class="pill inert">{{ state }}</span>{% endif %}
+{%- endmacro %}
+
 {#  A deep-review run, as `queries.live_status` reads it, never the stored column. #}
 {% macro research_pill(status) -%}
 {% if status == 'done' %}<span class="pill verified">done</span>
@@ -136,7 +146,7 @@
 {% macro stage_pill(status) -%}
 {% if status == 'done' %}<span class="pill verified">done</span>
 {%- elif status in ('behind', 'stopped') %}<span class="pill incomplete">{{ status }}</span>
-{%- elif status in ('failed', 'died', 'stalled') %}<span class="pill alarm">{{ status }}</span>
+{%- elif status in ('failed', 'died', 'stalled', 'error') %}<span class="pill alarm">{{ status }}</span>
 {%- elif status in ('running', 'starting') %}<span class="pill accent">{{ status }}</span>
 {%- elif status == 'not run' %}<span class="pill unmeasured">not run</span>
 {%- else %}<span class="pill inert">{{ status }}</span>{% endif %}

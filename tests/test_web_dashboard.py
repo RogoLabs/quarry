@@ -1046,7 +1046,7 @@ def test_the_runs_list_and_the_pipeline_show_a_deep_review_still_working(seeded,
     con.commit()
     assert q.deep_state(con, 1)["phase"] == "refuting, 1 answer owed"
     runs = client.get("/runs").text
-    assert 'href="/research/1">deep review</a>' in runs and "refuting, 1 answer owed" in runs
+    assert 'href="/research/1">deep review: refuting, 1 answer owed</a>' in runs
     stage = [st for st in q.pipeline(con, q.run_summary(con, 1)) if st["name"] == "Deep review"]
     assert stage == [{"name": "Deep review", "n": 1, "href": "/research/1", "page": "research",
                       "unit": "candidates; running, refuting, 1 answer owed"}]

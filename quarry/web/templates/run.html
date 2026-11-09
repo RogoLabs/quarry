@@ -10,6 +10,9 @@
     {{ run.license_spdx or 'no license' }}{% if not run.license_osi %}
       <span class="pill incomplete">not OSI, CodeQL gated off</span>{% endif %}
     · {{ run.started_at|local }}</p>
+  {#  The whole pipeline's state (queries.run_progress), the same words as the Runs list. #}
+  <p class="mt-1">{{ m.progress_pill(progress.state) }}
+    <a href="{{ progress.href }}">{{ progress.label }}</a></p>
 
   {#  Ways a tool can lose its output while the run still says "done". Each check
       exists because it happened: Checkov's paths cost every one of its findings. #}

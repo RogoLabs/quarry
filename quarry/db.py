@@ -105,6 +105,57 @@ def update_manifest(con: sqlite3.Connection, run_id: int,
     return m
 
 
+#: The stages that record their own start and end on the run (`stage_started`).
+#: Ingest has `runs.status`, scan its per-tool records, the funnel its ledger and the
+#: deep review its own table; these two left nothing when they found nothing.
+RECORDED_STAGES = ("validate", "report")
+
+
+def _utc_stamp() -> str:
+    """The same shape as SQLite's datetime('now'), which the dashboard's `local` reads."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _stage_record(m: dict[str, Any], stage: str) -> dict[str, Any]:
+    d = m.get(stage)
+    if not isinstance(d, dict):
+        d = m[stage] = {}
+    return d
+
+
+def stage_started(con: sqlite3.Connection, run_id: int, stage: str) -> None:
+    """Put on the run that `stage` started, and which process is doing it.
+
+    The Runs page said `done` with 0 verdicts and 0 drafts for a run validate had
+    never touched, because validate recorded nothing unless a target booted and
+    report recorded only its digest: "not run" and "ran, found nothing" looked the
+    same. `manifest[stage]["last"]` now holds the latest attempt, from start to end,
+    and a start with no end and no live process reads as died."""
+    import os
+    assert stage in RECORDED_STAGES, stage
+    rec = {"started_at": _utc_stamp(), "ended_at": None, "pid": os.getpid(),
+           "outcome": "running"}
+    with tx(con):
+        update_manifest(con, run_id, lambda m: _stage_record(m, stage).update(last=rec))
+
+
+def stage_ended(con: sqlite3.Connection, run_id: int, stage: str, outcome: str,
+                **facts: Any) -> None:
+    """Close the record `stage_started` opened: how it ended, and what it produced.
+    `outcome` is a short phrase the dashboard shows as is ("probed", "no candidates",
+    "error"); `facts` are counts and a `note`."""
+    assert stage in RECORDED_STAGES, stage
+
+    def change(m: dict[str, Any]) -> None:
+        d = _stage_record(m, stage)
+        last = d.get("last") if isinstance(d.get("last"), dict) else {}
+        last.update(ended_at=_utc_stamp(), pid=None, outcome=outcome, **facts)
+        d["last"] = last
+    with tx(con):
+        update_manifest(con, run_id, change)
+
+
 def set_health(con: sqlite3.Connection, run_id: int, source: str,
                by_tool: dict[str, list[str]]) -> None:
     """Replace the health warnings `source` holds for each tool in `by_tool`. A tool

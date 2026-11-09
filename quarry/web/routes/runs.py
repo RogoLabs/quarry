@@ -36,7 +36,11 @@ def runs_list(request: Request):
         runs = q.all_runs(c)
         for r in runs:
             r["has_digest"] = q.digest(c, r["id"], w.reports_root) is not None
-            r["deep"] = q.deep_state(c, r["id"])
+            # The Status cell is the whole pipeline's, not ingest's `runs.status`, and
+            # the Verdicts and Drafts cells say "not run" until their stage has.
+            stages = q.run_stages(c, r, w.reports_root)
+            r["stage"] = {s["stage"]: s for s in stages}
+            r["progress"] = q.run_progress(c, r, stages=stages)
         return w.render(request, "runs.html", {"runs": runs}, c)
 
 
@@ -63,6 +67,7 @@ def run_detail(request: Request, run_id: int, stage: str | None = None,
             total = summary["total"] - summary["live"]
         else:
             rows, total = [], 0
+        cli_stages = q.run_stages(c, summary, w.reports_root)
         return w.render(request, "run.html", {
             "run": summary,
             "stages": q.funnel_stages(c, run_id),
@@ -77,7 +82,8 @@ def run_detail(request: Request, run_id: int, stage: str | None = None,
             "pipeline": q.pipeline(c, summary, w.reports_root),
             "vc": q.verdict_counts(c, run_id),
             "dismissals": q.dismissals_for_run(c, run_id),
-            "cli_stages": q.run_stages(c, summary, w.reports_root),
+            "cli_stages": cli_stages,
+            "progress": q.run_progress(c, summary, stages=cli_stages),
         }, c)
 
 

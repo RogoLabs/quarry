@@ -445,6 +445,9 @@ class ValidationResult:
     rejected: int = 0
     needs_review: int = 0
     verdicts: list[tuple[str, str, str]] = field(default_factory=list)  # finding, lens, verdict
+    #: How the run ended, as the Runs page shows it: "probed", or why nothing was.
+    outcome: str = ""
+    candidates: int = 0
 
 
 def _record_provisioning(con: sqlite3.Connection, run_id: int, runtime) -> None:
@@ -523,7 +526,27 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
     """The end-to-end loop: profile the target, select candidates and the probe lenses the
     codebase supports, stand the target up under containment, optionally seed it to a
     testable state with the target's own commands, probe each candidate against its routes,
-    and record a verdict. Every target is torn down even on error."""
+    and record a verdict. Every target is torn down even on error.
+
+    The attempt itself goes on the run, start and end (`db.stage_started`), so the
+    Runs page can say "not run", "running" or how it ended, including the exits that
+    write no verdict: no candidates, no probe for them, nothing to boot, an error."""
+    db.stage_started(con, run_id, "validate")
+    try:
+        res = _run_validation(con, run_id, rundir, runtime, limit=limit, enrich=enrich,
+                              seed=seed)
+    except Exception as e:
+        db.stage_ended(con, run_id, "validate", "error",
+                       note=f"{type(e).__name__}: {e}"[:300])
+        raise
+    db.stage_ended(con, run_id, "validate", res.outcome or "probed",
+                   candidates=res.candidates, verdicts=len(res.verdicts),
+                   confirmed=res.confirmed)
+    return res
+
+
+def _run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, *,
+                    limit: int, enrich: bool, seed) -> ValidationResult:
     from ..research.profile import profile_repo
     from .lenses import select_probe_lenses
     from .routes import (build_route_map, committed_specs, crawl_routes,
@@ -535,13 +558,20 @@ def run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime, 
     res = ValidationResult(run_id)
     rmap = build_route_map(src)
     cands = select_candidates(con, run_id, limit=limit, routed=rmap.for_finding)
+    res.candidates = len(cands)
+    if not cands:
+        res.outcome = "no candidates"
+        return res
     prof = profile_repo(src)
     selected, _ = select_probe_lenses(prof, cands)
     if not selected:
+        res.outcome = "no probe fits these findings"
         return res
     spec = runtime.detect(src)
     if spec is None:
+        res.outcome = "nothing to boot"
         return res
+    res.outcome = "probed"
 
     spec = dataclasses.replace(spec, ready_paths=readiness_paths(rmap))
     try:

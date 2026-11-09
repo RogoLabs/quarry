@@ -779,6 +779,11 @@ def validate(run_id: int = typer.Argument(..., help="a scanned + funnelled run")
                 else "provisioning gap")
         con_out.print(f"[red]{kind}[/]: {_e(str(e)[:1200])}")
         raise typer.Exit(1)
+    if not res.verdicts:
+        # "0 confirmed, 0 rejected" read as a probe run that found nothing.
+        con_out.print(f"[bold]validation of run {run_id}[/]: {_e(res.outcome)}, "
+                      f"no verdicts ({res.candidates} candidate(s))")
+        return
     con_out.print(f"[bold]validation of run {run_id}[/]: "
                   f"[green]{res.confirmed} confirmed[/], {res.rejected} rejected, "
                   f"{res.needs_review} needs-review")
@@ -802,11 +807,27 @@ def report(run_id: int = typer.Argument(..., help="a validated run"),
     project's security contact, or paste it into GitHub's Report a vulnerability (GHSA) form."""
     from pathlib import Path
     from .ingest import RunVolume
-    from .disclosure import draft_reports, draft_research_digest, record_digest
 
     paths, connection = _open()
     vol = RunVolume.attach_existing(run_id, paths.runs)
     out_dir = Path(out) if out else Path(paths.runs).parent / "reports" / str(run_id)
+    # Start and end go on the run, so the Runs page can tell "not run" from "ran and
+    # had nothing to draft" (db.stage_started).
+    db.stage_started(connection, run_id, "report")
+    try:
+        n_drafts, wrote_digest = _report(connection, run_id, vol, out_dir, check_head)
+    except Exception as e:
+        db.stage_ended(connection, run_id, "report", "error",
+                       note=f"{type(e).__name__}: {e}"[:300])
+        raise
+    db.stage_ended(connection, run_id, "report",
+                   "drafted" if n_drafts or wrote_digest else "nothing to report",
+                   drafts=n_drafts, digest=wrote_digest)
+
+
+def _report(connection, run_id: int, vol, out_dir, check_head: bool) -> tuple[int, bool]:
+    """`quarry report`'s work -> (advisory drafts written, whether a digest was)."""
+    from .disclosure import draft_reports, draft_research_digest, record_digest
     heads: list = []
 
     def head_check():
@@ -827,7 +848,7 @@ def report(run_id: int = typer.Argument(..., help="a validated run"),
     if not drafts and digest is None:
         con_out.print("[yellow]no confirmed verdicts and no deep-review survivors to "
                       "report for this run[/]")
-        return
+        return 0, False
     # One row per confirmed-verdict file, so the dashboard can list the drafts and tell
     # when a file on disk no longer matches what was written.
     with db.tx(connection):
@@ -849,21 +870,24 @@ def report(run_id: int = typer.Argument(..., help="a validated run"),
         con_out.print(f"[bold]{digest.n_findings} deep-review candidate(s)[/] (Layer 2, "
                       f"not dynamically confirmed): {_e(digest.path.name)}")
     con_out.print("[dim]review before sending (review-before-send); these are drafts.[/]")
+    return len(drafts), digest is not None
 
 
 @app.command()
 def runs() -> None:
-    """List runs."""
+    """List runs, each with where it is in the whole pipeline (the Runs page's status)."""
+    from .web import queries as q
     _, connection = _open()
     t = Table(show_header=True, header_style="bold")
-    for c in ("id", "target", "sha", "license", "status", "started"):
+    for c in ("id", "target", "sha", "license", "status", "where", "started"):
         t.add_column(c)
     for r in connection.execute(
-            "SELECT id,target,git_sha,license_spdx,license_osi,status,started_at "
-            "FROM runs ORDER BY id DESC LIMIT 50"):
+            "SELECT * FROM runs ORDER BY id DESC LIMIT 50").fetchall():
+        r = dict(r)
         lic = f"{r['license_spdx'] or '-'}{'' if r['license_osi'] else ' (not OSI)'}"
+        p = q.run_progress(connection, r)
         t.add_row(str(r["id"]), _e(r["target"]), _e((r["git_sha"] or "")[:10]), _e(lic),
-                  _e(r["status"]), _e(r["started_at"]))
+                  _e(p["state"]), _e(p["label"]), _e(r["started_at"]))
     con_out.print(t)
 
 
@@ -879,8 +903,13 @@ def run_status(con, run_id: int) -> dict | None:
     run = q.run_summary(con, run_id)
     if run is None:
         return None
-    header = {k: run.get(k) for k in ("id", "target", "git_sha", "status", "started_at",
+    header = {k: run.get(k) for k in ("id", "target", "git_sha", "started_at",
                                        "finished_at", "license_spdx", "license_osi")}
+    # `status` is the whole pipeline's, as the Runs page shows it; ingest's own column
+    # (which reads done three seconds in) is `ingest`, and `finished_at` is ingest's.
+    progress = q.run_progress(con, run)
+    header.update(status=progress["state"], progress=progress["label"],
+                  ingest=run.get("status"))
     header.update(occurrences=run["total"], live=run["live"],
                   suppressed=run["total"] - run["live"], producers=run["producers"])
     stages = []
@@ -944,6 +973,8 @@ def status_lines(s: dict) -> list[str]:
            f"run.target: {_line(r['target'])}",
            f"run.git_sha: {_line(r['git_sha'])}",
            f"run.status: {_line(r['status'])}",
+           f"run.progress: {_line(r['progress'])}",
+           f"run.ingest: {_line(r['ingest'])}",
            f"run.started_at: {_line(r['started_at'])}",
            f"run.finished_at: {_line(r['finished_at'])}",
            f"run.license: {_line(r['license_spdx'])} "

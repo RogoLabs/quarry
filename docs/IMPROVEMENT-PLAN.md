@@ -33,9 +33,11 @@ archived the test run's data (archive `20261106-154449`) so the real work starts
 empty database on e6239cf; Layer 1 ran on the three targets, and at 16:06 the launchd
 job started the deep review of VulnLookup (run 3), recorded at the end of item 29. On
 2026-11-07 a day run looked hung in its refute pass; item 30 records why, the fix
-(02c91fc) and decision O (taken 2026-11-07: keep the second call); decision N was taken and built the same day (13eb37d). Open: decision J, whose default
-is taken. The suite collects 1201; the last full run passed 1179 and skipped 22,
-19 because the Docker daemon was down and 3 because setuptools is absent.
+(02c91fc) and decision O (taken 2026-11-07: keep the second call); decision N was taken and built the same day (13eb37d). On 2026-11-09 item 31 gave each
+run one status read from every stage, so the Runs page stops calling a run done while
+its deep review works. Open: decision J, whose default is taken. The suite collects
+1215; the last full run passed 1193 and skipped 22, 19 because the Docker daemon was
+down and 3 because setuptools is absent.
 
 Every item says where its evidence came from:
 
@@ -2088,3 +2090,51 @@ fixed-length, #915 says no attacker reaches a test) and still say `survives`; 22
 24 came from granite. So decision N's "defended first" puts noise at the top of this
 list, and a `survives` from granite is weak evidence. Not changed yet; it argues for
 checking a `survives` the way decision F checks a `refuted`.
+
+### 31. The Runs page called a run done while its deep review worked [code]
+
+On 2026-11-09 the Runs list showed run 3 as `done`, with 0 verdicts and 0 drafts, while
+its deep review owed 469 refutation answers. `done` was `runs.status`, which only ingest
+writes: run 3's was set at 21:47:00 UTC on 2026-11-06, three seconds after the run
+started, and no later stage touches it. The zeros were what the page showed for a stage
+that had never run, the same as for one that ran and found nothing, because validate
+recorded nothing unless a target booted and report recorded only its digest. The
+deep-review line added on 2026-11-08 (94729ac) sat under the same green `done` pill and
+did not change how the row read.
+
+- **Done (2026-11-09).** `queries.run_progress` reads every stage through `run_stages`
+  (the run page's terminal table) and names the first thing the run is doing or waiting
+  on: *running* (a deep review, validate or report at work), *waiting* (the next stage
+  needs its command), *stopped* (a deep review stopped partway), *failed* (ingest
+  failed, a deep review died or stalled, or validate's or report's last attempt failed
+  or died) or *done*. Done needs the funnel caught up, any deep review finished,
+  validate run, a draft for every confirmed verdict, and a finished deep review's digest
+  written. A deep review never started does not hold a run back: it is an optional,
+  hours-long step chosen per target. Jerry approved that definition; the digest case
+  was added while building it, because report is the step that turns a finished review
+  into something a person reads.
+- `quarry validate` and `quarry report` record each attempt on the run
+  (`manifest.validate.last`, `manifest.report.last`, written by `db.stage_started` and
+  `db.stage_ended`): the start with its pid, then the outcome (`probed`,
+  `no candidates`, `no probe fits these findings`, `nothing to boot`, `drafted`,
+  `nothing to report`, or `error` with its note) and counts. A start with no end reads
+  as running while that pid is still `quarry <stage> <run>`, and as died otherwise.
+  Runs from before count as run when they left a verdict, a draft or a digest.
+- The Runs list's Status cell is that state and its phrase. Verdicts and Drafts say
+  "not run" or "running" until their stage has run, and say why a run produced nothing
+  ("no candidates"). The run page shows the same line under its title, and its Validate
+  and Report cards say "not run". `quarry runs` has a `where` column; `quarry status`
+  prints `run.status` as the pipeline's state, with `run.progress` and `run.ingest`
+  (ingest's own value) beside it. `quarry validate` prints its outcome when it wrote no
+  verdict, instead of "0 confirmed, 0 rejected, 0 needs-review".
+- A stopped deep review with every unit hunted read "1,566 of 1,566 units"; it now
+  names the answers owed.
+
+Checked live on 2026-11-09: run 3 reads "running, deep review: refuting, 457 answers
+owed", runs 1 and 2 "waiting, next: validate", each with "not run" for verdicts and
+drafts, and `quarry runs` and `quarry status 3` say the same. Tests:
+`tests/test_run_progress.py` (14).
+
+Side finding, not fixed: a resumed research run keeps its old `finished_at` (research
+run 1 reads 2026-11-07 12:00:19 while running), because `runner._claim` sets
+`status='running'` without clearing it. Nothing on the dashboard reads that column.
