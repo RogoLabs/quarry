@@ -1026,6 +1026,37 @@ def test_a_run_in_its_refute_pass_says_so_instead_of_looking_hung(seeded, worker
     assert "The refute pass is running" not in client.get("/research/1/progress").text
 
 
+def test_the_runs_list_and_the_pipeline_show_a_deep_review_still_working(seeded, worker):
+    """2026-11-08: run 3 read `done` with 0 verdicts and 0 drafts while its deep review
+    was refuting, and it looked finished with nothing found. The run's status covers
+    ingest and the scan; the deep review now has its own line and pipeline stage."""
+    client, con = seeded
+    assert all(st["name"] != "Deep review" for st in q.pipeline(con, q.run_summary(con, 1)))
+    _stopped_research(con)
+    stopped = q.deep_state(con, 1)
+    assert stopped["status"] == "stopped" and stopped["phase"] == "0 of 1 units"
+
+    con.execute("UPDATE research_units SET status='done' WHERE research_id=1")
+    con.execute("UPDATE research_runs SET status='running', pid=?, heartbeat=? WHERE id=1",
+                (worker.pid, _utc_now()))
+    con.execute(
+        "INSERT INTO research_findings (research_id,subsystem,lens,model,family,title,"
+        "file,quote,quote_verified,refutations) "
+        "VALUES (1,'src','x','a:1b','a','t','f.py','q',1,'[]')")
+    con.commit()
+    assert q.deep_state(con, 1)["phase"] == "refuting, 1 answer owed"
+    runs = client.get("/runs").text
+    assert 'href="/research/1">deep review</a>' in runs and "refuting, 1 answer owed" in runs
+    stage = [st for st in q.pipeline(con, q.run_summary(con, 1)) if st["name"] == "Deep review"]
+    assert stage == [{"name": "Deep review", "n": 1, "href": "/research/1", "page": "research",
+                      "unit": "candidates; running, refuting, 1 answer owed"}]
+    assert "candidates; running, refuting, 1 answer owed" in client.get("/runs/1").text
+
+    con.execute("UPDATE research_units SET status='running' WHERE research_id=1")
+    con.commit()
+    assert q.deep_state(con, 1)["phase"] == "hunting, 0 of 1 units"
+
+
 def test_a_stopped_research_run_does_not_refetch_on_click(seeded, worker):
     """A div with hx-get and no hx-trigger fires on click, so a stopped run's panel
     refetched itself on every click inside it."""

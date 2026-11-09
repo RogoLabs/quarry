@@ -2,7 +2,7 @@
 
 Plan: [`PLAN.md`](PLAN.md) · Research: [`RESEARCH.md`](RESEARCH.md) · Panel: [`panel/`](panel/)
 
-**1200 tests collected; 1197 pass, 3 skip.** `quarry doctor · db sync · targets score · ingest · scan · funnel · killed · validate · report · serve`
+**1201 tests collected.** Last full run (2026-11-08): 1179 pass, 22 skip, 19 of them because the Docker daemon was down and 3 because setuptools is absent. `quarry doctor · db sync · targets score · ingest · scan · funnel · killed · validate · report · serve`
 
 ---
 

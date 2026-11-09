@@ -1078,6 +1078,38 @@ def refute_status(con: sqlite3.Connection, rid: int,
     return out
 
 
+def deep_state(con: sqlite3.Connection, run_id: int) -> dict[str, Any] | None:
+    """The newest deep review of an ingest run, as the Runs list and the run page show it.
+
+    A run's own status covers ingest and the scan, so it read `done`, beside 0 verdicts
+    and 0 drafts, while its deep review was still refuting, and on 2026-11-08 that read
+    as a finished run that found nothing. `phase` says what a live review is doing, by
+    the rule the progress panel uses: a unit running is the hunt, answers owed with none
+    running is the refute pass."""
+    rows = research_runs(con, run_id=run_id)
+    if not rows:
+        return None
+    r = rows[0]
+    status, done, units = r["status"], r["done"], r["units"]
+    if status in LIVE_STATUSES:
+        busy = con.execute("SELECT 1 FROM research_units WHERE research_id=? "
+                           "AND status='running' LIMIT 1", (r["id"],)).fetchone()
+        owed = 0 if busy else sum(
+            x["owed"] for x in refute_status(con, r["id"], json.loads(r["models"] or "[]")))
+        if busy or (not owed and done + r["errored"] < units):
+            phase = f"hunting, {done:,} of {units:,} units"
+        elif owed:
+            phase = f"refuting, {owed:,} answer{'' if owed == 1 else 's'} owed"
+        else:
+            phase = "finishing"
+    elif status == "done":
+        phase = f"{units:,} units"
+    else:
+        phase = f"{done:,} of {units:,} units"
+    return {"rid": r["id"], "status": status, "phase": phase,
+            "findings": r["findings"], "href": f"/research/{r['id']}"}
+
+
 def research_survivors(con: sqlite3.Connection, run_id: int,
                        rid: int) -> dict[str, Any]:
     """One research run's Layer 2 survivors with their human verdicts: the list
@@ -1630,6 +1662,12 @@ def pipeline(con: sqlite3.Connection, run: dict[str, Any],
         (rid,)).fetchone()
     n_deep = run["total"] - scan["n"]
     vc = verdict_counts(con, rid)
+    deep = deep_state(con, rid)
+    # The deep review's own stage, when the run has one, so a review still refuting is
+    # not hidden behind a Scan card that reads finished.
+    deep_stage = ([{"name": "Deep review", "n": deep["findings"],
+                    "unit": f"candidates; {deep['status']}, {deep['phase']}",
+                    "href": deep["href"], "page": "research"}] if deep else [])
     return [
         {"name": "Ingest", "n": quarantined, "unit": "quarantined",
          "href": f"{u['run']}#quarantine", "page": "run"},
@@ -1637,6 +1675,7 @@ def pipeline(con: sqlite3.Connection, run: dict[str, Any],
          "unit": f"raw, {scan['tools']} scanner(s)"
                  + (f"; {n_deep} more from deep review" if n_deep else ""),
          "href": f"{u['run']}#funnel", "page": "run"},
+        *deep_stage,
         {"name": "Funnel", "n": run["live"], "unit": "live",
          "href": u["triage"], "page": "triage"},
         {"name": "Validate", "n": vc["total"], "unit": f"verdicts, {vc['confirmed']} confirmed",

@@ -24,7 +24,12 @@
           <td class="mono sm">{{ (r.git_sha or '')[:10] }}</td>
           <td>{{ r.license_spdx or 'none' }}{% if r.license_spdx and not r.license_osi %}
               <span class="pill incomplete">not OSI</span>{% endif %}</td>
-          <td>{{ m.run_pill(r.status) }}</td>
+          <td>{{ m.run_pill(r.status) }}
+            {#  The run's status covers ingest and the scan only. A deep review still
+                working beside it read as a finished run that found nothing. #}
+            {% if r.deep %}<div class="sm mt-1"><a href="{{ r.deep.href }}">deep review</a>
+              {{ m.research_pill(r.deep.status) }}
+              <span class="dim">{{ r.deep.phase }}</span></div>{% endif %}</td>
           <td class="num r"><a class="plain" href="/runs/{{ r.id }}#funnel">{{ r.total }}</a></td>
           <td class="num r"><a class="plain" href="/runs/{{ r.id }}/triage">{{ r.live }}</a></td>
           <td class="num r"><a class="plain" href="/runs/{{ r.id }}/validation">{{ r.n_verdicts }}</a>{% if r.n_confirmed %}

@@ -36,6 +36,7 @@ def runs_list(request: Request):
         runs = q.all_runs(c)
         for r in runs:
             r["has_digest"] = q.digest(c, r["id"], w.reports_root) is not None
+            r["deep"] = q.deep_state(c, r["id"])
         return w.render(request, "runs.html", {"runs": runs}, c)
 
 

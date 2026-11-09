@@ -34,8 +34,8 @@ empty database on e6239cf; Layer 1 ran on the three targets, and at 16:06 the la
 job started the deep review of VulnLookup (run 3), recorded at the end of item 29. On
 2026-11-07 a day run looked hung in its refute pass; item 30 records why, the fix
 (02c91fc) and decision O (taken 2026-11-07: keep the second call); decision N was taken and built the same day (13eb37d). Open: decision J, whose default
-is taken. The suite collects 1200 and passes 1197, with 3 skipped because
-setuptools is absent.
+is taken. The suite collects 1201; the last full run passed 1179 and skipped 22,
+19 because the Docker daemon was down and 3 because setuptools is absent.
 
 Every item says where its evidence came from:
 
