@@ -76,8 +76,8 @@ def _server(served: dict):
 
 
 def test_confirms_a_check_that_fails_open_on_a_missing_credential():
-    # The VulnLookup auth_func shape, wrong: a present key is checked, an absent one is
-    # waved through. The invalid key's 401 is the control the anonymous 200 departs from.
+    # A check that fails open: a present key is checked, an absent one is waved through.
+    # The invalid key's 401 is the control the anonymous 200 departs from.
     routes = _own(routes_from_openapi(OPENAPI))
     fake = _server({"/secret": {"none": 200, "invalid": 401, "valid": 200}})
     ev = probe_broken_authz(KEYED, CAND, routes, fake)

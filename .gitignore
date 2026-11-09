@@ -7,8 +7,4 @@ work/
 .DS_Store
 .claude/worktrees/
 *.egg-info/
-
-# Internal working notes that name an unreported third-party finding: never commit.
-REVIEW-PLAN.md
-AIL-ADVISORY-DRAFT.md
 build/
