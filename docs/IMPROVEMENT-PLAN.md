@@ -37,8 +37,9 @@ job started the deep review of VulnLookup (run 3), recorded at the end of item 2
 run one status read from every stage, so the Runs page stops calling a run done while
 its deep review works. On 2026-11-10 item 32 let the nightly job finish a refute pass
 and run only on AC power, and made a stopped review read as stopped. Open: decision J,
-whose default is taken. The suite collects 1225; the last full run passed 1203 and
-skipped 22, 19 because the Docker daemon was down and 3 because setuptools is absent.
+whose default is taken. Item 33 (2026-11-10) brought the deep review's findings into
+Layer 3. The suite collects 1233; the last full run passed 1230 and skipped 3, all
+because setuptools is absent.
 
 Every item says where its evidence came from:
 
@@ -2209,3 +2210,52 @@ a model call that hangs past the morning. It is not: `ExitTimeOut` is how long l
 waits between SIGTERM and SIGKILL when it stops the job, and nothing stops the job on a
 clock. The deadline inside quarry is checked between units and answers, so one hung
 call can still run past 06:00.
+
+### 33. The deep review's findings never reached Layer 3 [DB]
+
+`quarry validate` picks candidates by the producer's CWE. A deep-review finding's
+producer is its lens (`deep:broken-authz-idor`), with no CWE, so none was ever a
+candidate: on run 3 that left out all 1,143 live deep-review occurrences. A full
+validate of run 3 on 2026-11-10 probed the 437 scanner candidates (375 Opengrep, 62
+Bandit) and returned 0 confirmed, 0 rejected and 437 needs-review; 371 of the 437 had
+no GET route in the finding's file. The deep findings also rarely carried a line, and a
+probe decides only on the handler enclosing the finding's line: of the live occurrences
+in the three lenses below, 116 of 139, 129 of 139 and 77 of 86 had none.
+
+- **Done (2026-11-10).** `validate.DEEP_LENS_CWE` maps three lenses to the probe class
+  that covers them: `broken-authz-idor` to CWE-639 and `multi-tenancy-isolation` to
+  CWE-863 (both the authz probe), `filesystem-and-path` to CWE-22 (the traversal
+  probe). The injection lens is not mapped: it spans XSS, SQL, command injection and
+  SSRF, and which check to send would be a guess. The other eight lenses have no probe.
+- A deep candidate with no line takes the line its verified quote starts on, read
+  through quote verification's path checks; in Python a quote on a decorator moves to
+  the def it decorates. A quote found only in a same-named stand-in file gives no line.
+- A CWE taken from a lens never rejects (`INFERRED_CWE`): the probe measured a class the
+  finding was only assumed to be in. A confirmation on the finding's own handler still
+  counts. The verdict's rationale records `cwe_from`.
+
+On run 3, before probing: 363 deep candidates (138, 139 and 86 by lens), every one with
+a line; 148 in a file that serves a route, and 126 inside a route's handler, the ones a
+probe can decide on. Tests: `tests/test_validate_deep.py` (8).
+
+Probed the same day (`--limit 1000`, 4 minutes): 800 candidates, 0 confirmed, 0
+rejected, 800 needs-review. Of the 363 deep candidates:
+
+| Lens | Outcome | Candidates |
+|---|---|---|
+| broken-authz-idor, multi-tenancy-isolation | no route in the file declared protected by its own operation | 264 |
+| broken-authz-idor, multi-tenancy-isolation | cross-user check could not create its canaries | 13 |
+| filesystem-and-path | no GET route in the file | 64 |
+| filesystem-and-path | no passwd line and no explicit refusal | 22 |
+
+The anonymous authz check needs a route declared protected: VulnLookup's served spec
+has only a spec-wide security requirement, which also covers its public reads, so it
+cannot tell a protected route from a public one. That leaves the cross-user check, and
+this was its first run against a live VulnLookup. It never got started: all 13 times,
+the canary create (`POST /api/bundle/`, `/api/comment/` or `/api/sighting/`) with a
+seeded account's API key returned 401, though the seed reported capturing all three
+keys.
+
+Open: why the seeded keys are refused. One suspect, not checked: the seed's capture
+pattern, `([0-9A-Za-z]{16,})`, takes the first long alphanumeric run in the command's
+output, whatever it is.

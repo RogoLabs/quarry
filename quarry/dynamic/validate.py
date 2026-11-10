@@ -56,6 +56,20 @@ DYNAMICALLY_TESTABLE = frozenset({
     "CWE-400",   # uncontrolled resource consumption
 })
 
+# Deep-review lenses a probe class covers, and the CWE that selects that class. A deep
+# finding's producer is its lens, with no CWE, so until this map none of them reached
+# Layer 3: on run 3 every deep-review finding was left out of `quarry validate`. A lens
+# is a kind of question, not a CWE, so a probe that does not reproduce the model's
+# claim cannot reject it (`INFERRED_CWE`); a confirmation on the finding's own handler
+# still counts, and its verdict records where the CWE came from. The injection lens is
+# not mapped: it spans XSS, SQL, command injection and SSRF, and which check to send
+# would be a guess.
+DEEP_LENS_CWE = {
+    "broken-authz-idor": "CWE-639",
+    "multi-tenancy-isolation": "CWE-863",
+    "filesystem-and-path": "CWE-22",
+}
+
 
 @dataclass(frozen=True)
 class Candidate:
@@ -69,6 +83,9 @@ class Candidate:
     producer_id: str
     cwe: str | None
     message: str
+    # Where `cwe` came from when the producer has none: "deep lens <key>". Empty for a
+    # scanner's own CWE. A candidate with one is never rejected (`final_verdict`).
+    cwe_from: str = ""
 
 
 @dataclass(frozen=True)
@@ -116,6 +133,8 @@ NO_BASELINE = "no baseline comparison recorded"
 NO_CONTROL = "no control comparison recorded"
 # The reason a confirmation is held back when replaying it did not give the same result.
 DID_NOT_REPLAY = "did not replay"
+# The reason a rejection is held back when the candidate's CWE was inferred from a lens.
+INFERRED_CWE = "CWE inferred from a deep-review lens, so not reproducing it rejects nothing"
 
 
 class TargetRuntime(Protocol):
@@ -201,6 +220,35 @@ def _cwe_of(row: dict[str, Any]) -> str | None:
     return normalise_cwe(row.get("cwe"))
 
 
+def _deep_quote_line(con: sqlite3.Connection, src: Path, occurrence_id: int,
+                     path: str) -> int | None:
+    """The 1-based line a deep finding's quote starts on in `path`, or None.
+
+    Read through quote verification's path checks (`grounding._read`). A same-named
+    file standing in for a missing path gives no line, since a route matches the
+    finding by its own path. In Python, a quote on a decorator belongs to the def it
+    decorates (`intent._past_decorators`), which is where a handler's lines start."""
+    import json as _json
+    from ..research import grounding, intent
+    row = con.execute("SELECT raw_result FROM occurrences WHERE id=?",
+                      (occurrence_id,)).fetchone()
+    try:
+        quote = str((_json.loads(row["raw_result"] or "{}") if row else {}).get("quote")
+                    or "")
+    except ValueError:
+        return None
+    got = grounding._read(src, path) if quote.strip() else None
+    if not got or got[0] != path:
+        return None
+    lines = got[1]
+    idx = intent.quote_line(lines, quote)
+    if idx is None:
+        return None
+    if path.endswith(".py"):
+        idx = intent._past_decorators(lines, idx)
+    return idx + 1
+
+
 def _interleave(cands: list[Candidate]) -> list[Candidate]:
     """Probe classes take turns, each keeping its own order, so one plentiful class
     cannot fill the budget before another class gets a probe."""
@@ -216,7 +264,8 @@ def _interleave(cands: list[Candidate]) -> list[Candidate]:
 
 
 def select_candidates(con: sqlite3.Connection, run_id: int, *, limit: int = 50,
-                      routed: Callable[[str], Any] | None = None) -> list[Candidate]:
+                      routed: Callable[[str], Any] | None = None,
+                      src: Path | None = None) -> list[Candidate]:
     """Live findings worth probing, best first.
 
     Only occurrences that survive the funnel (live_occurrences) are eligible, and only
@@ -233,7 +282,11 @@ def select_candidates(con: sqlite3.Connection, run_id: int, *, limit: int = 50,
     route ahead of the rest, since a probe needs a route to address, and lets the probe
     classes take turns inside each group. On the 2026-11-06 test run 38 of VulnLookup's
     50 slots went to findings in files with no route (selection by occurrence id, every
-    rule's precision still 0), while 65 of its 448 eligible findings had one."""
+    rule's precision still 0), while 65 of its 448 eligible findings had one.
+
+    A deep-review finding takes its CWE from `DEEP_LENS_CWE`. The model rarely gives a
+    line, and a probe decides only on the handler enclosing the finding's line, so with
+    `src` the line is recovered from the finding's verified quote (`_quote_line`)."""
     rows = con.execute(
         """SELECT o.id AS occurrence_id, o.finding_id, o.path, o.start_line,
                   o.message, o.producer_id, f.target, p.cwe, p.tool, p.rule_id,
@@ -252,16 +305,22 @@ def select_candidates(con: sqlite3.Connection, run_id: int, *, limit: int = 50,
         row = dict(r)
         if independence_class(row["tool"], row["rule_id"]) == "sca-db":
             continue
-        cwe = _cwe_of(row)
+        cwe, cwe_from = _cwe_of(row), ""
+        if cwe is None and row["tool"] == "deep" and row["rule_id"] in DEEP_LENS_CWE:
+            cwe, cwe_from = DEEP_LENS_CWE[row["rule_id"]], f"deep lens {row['rule_id']}"
         if probe_class(cwe) not in DYNAMICALLY_TESTABLE:
             continue
         if (row["finding_id"], row["path"]) in seen:
             continue
         seen.add((row["finding_id"], row["path"]))
+        line = row["start_line"]
+        if cwe_from and not line and src is not None:
+            line = _deep_quote_line(con, src, row["occurrence_id"], row["path"])
         out.append(Candidate(
             finding_id=row["finding_id"], occurrence_id=row["occurrence_id"],
-            target=row["target"], path=row["path"], start_line=row["start_line"],
-            producer_id=row["producer_id"], cwe=cwe, message=row["message"] or ""))
+            target=row["target"], path=row["path"], start_line=line,
+            producer_id=row["producer_id"], cwe=cwe, message=row["message"] or "",
+            cwe_from=cwe_from))
         if routed is None and len(out) >= limit:
             break
     if routed is None:
@@ -272,14 +331,18 @@ def select_candidates(con: sqlite3.Connection, run_id: int, *, limit: int = 50,
     return (first + rest)[:limit]
 
 
-def final_verdict(evidence: ProbeEvidence, replay: dict | None = None) -> tuple[str, str]:
+def final_verdict(evidence: ProbeEvidence, replay: dict | None = None, *,
+                  may_reject: bool = True) -> tuple[str, str]:
     """adjudicate_with_reason, then the replay rule: a confirmation whose replay did not
     hold is needs-review with DID_NOT_REPLAY. No replay record leaves the verdict as
     measured once (IMPROVEMENT-PLAN item 17); the advisory then says it was not
-    replayed."""
+    replayed. `may_reject` False holds a rejection back as INFERRED_CWE: the probe
+    measured a class the finding was only assumed to be in."""
     v, reason = adjudicate_with_reason(evidence)
     if v == "confirmed" and replay is not None and not replay.get("held"):
         return "needs-review", DID_NOT_REPLAY
+    if v == "rejected" and not may_reject:
+        return "needs-review", INFERRED_CWE
     return v, reason
 
 
@@ -416,7 +479,8 @@ def plan_validation(con: sqlite3.Connection, run_id: int, src: Path, *,
     from .routes import build_route_map
 
     rmap = build_route_map(src)
-    cands = select_candidates(con, run_id, limit=limit, routed=rmap.for_finding)
+    cands = select_candidates(con, run_id, limit=limit, routed=rmap.for_finding,
+                              src=src)
     prof = profile_repo(src)
     selected_raw, skipped = select_probe_lenses(prof, cands)
     routed = sum(1 for c in cands if rmap.for_finding(c.path))
@@ -557,7 +621,8 @@ def _run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime,
     src = rundir / "src"
     res = ValidationResult(run_id)
     rmap = build_route_map(src)
-    cands = select_candidates(con, run_id, limit=limit, routed=rmap.for_finding)
+    cands = select_candidates(con, run_id, limit=limit, routed=rmap.for_finding,
+                              src=src)
     res.candidates = len(cands)
     if not cands:
         res.outcome = "no candidates"
@@ -644,7 +709,8 @@ def _run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime,
                     record_verdict(con, cand, run_id, evidence, model=lens.key,
                                    replay=replay, probe=probe_identity(lens, evidence),
                                    conditions=conditions)
-                v = final_verdict(evidence, replay)[0]
+                v = final_verdict(evidence, replay,
+                                  may_reject=not cand.cwe_from)[0]
                 res.verdicts.append((cand.finding_id, lens.key, v))
                 res.confirmed += v == "confirmed"
                 res.rejected += v == "rejected"
@@ -670,7 +736,7 @@ def record_verdict(con: sqlite3.Connection, candidate: Candidate, run_id: int,
     ran and did not decide. The full evidence, baseline included, is stored as JSON in
     `rationale` so a disclosure report is reproducible from the DB."""
     import json
-    v, reason = final_verdict(evidence, replay)
+    v, reason = final_verdict(evidence, replay, may_reject=not candidate.cwe_from)
     executed = 100 if v == "confirmed" else (
         50 if v == "rejected" or evidence.reproduced else 0)
     body = {
@@ -681,6 +747,8 @@ def record_verdict(con: sqlite3.Connection, candidate: Candidate, run_id: int,
         "handled": evidence.handled,
         "reproduces_when": evidence.reproduces_when,
     }
+    if candidate.cwe_from:
+        body["cwe_from"] = candidate.cwe_from
     if probe is not None:
         # The evidence window the finding was flagged in. A later run carries this
         # verdict forward only while the window, not just the flagged line, is the same.
