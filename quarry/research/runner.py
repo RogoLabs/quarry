@@ -162,7 +162,25 @@ def execute(con: sqlite3.Connection, rid: int, src: Path, *,
 
     `route_intent` gives the authorization lens and the refuter each route's declared
     access (research.intent). Off reproduces the prompts as they were before item 20,
-    which is what a replay compares against."""
+    which is what a replay compares against.
+
+    An interrupt records the run as `stopped` and is raised again. That is Ctrl-C, or
+    SIGTERM from the dashboard's Stop or the nightly script's power check, which
+    `quarry deep` turns into one. Before this nothing caught either, so the row kept
+    `running` and the dead pid and read as `died`, as if the worker had crashed."""
+    try:
+        return _execute(con, rid, src, deadline=deadline, progress=progress,
+                        refute=refute, num_ctx=num_ctx, route_intent=route_intent)
+    except KeyboardInterrupt:
+        if con.in_transaction:          # a raw BEGIN that db.tx did not open
+            con.execute("ROLLBACK")
+        _finish(con, rid, "stopped")
+        raise
+
+
+def _execute(con: sqlite3.Connection, rid: int, src: Path, *,
+             deadline: datetime | None, progress: Progress, refute: bool,
+             num_ctx: int, route_intent: bool) -> dict:
     row = con.execute("SELECT * FROM research_runs WHERE id=?", (rid,)).fetchone()
     if row is None:
         raise RuntimeError(f"no research run {rid}")
@@ -256,7 +274,13 @@ def execute(con: sqlite3.Connection, rid: int, src: Path, *,
 
     remaining = con.execute("SELECT COUNT(*) c FROM research_units WHERE research_id=? "
                             "AND status='pending'", (rid,)).fetchone()["c"]
-    _finish(con, rid, "done" if not remaining else "stopped")
+    # Answers owed count as work left. A night whose deadline cut the refute pass short
+    # with every unit hunted used to finish `done`, so the dashboard showed a finished
+    # review with answers still owed, and the nightly job, which resumed only for units,
+    # never asked them.
+    owed = sum(len(_owed_rows(con, rid, m, subs)) for m in models) if refute else 0
+    stats["owed"] = owed
+    _finish(con, rid, "done" if not remaining and not owed else "stopped")
     return stats
 
 
@@ -468,6 +492,32 @@ def _refute_once(m: str, text: str, f: E.Finding, tag: str, declared: str, prior
     return rec
 
 
+def _owed_rows(con, rid: int, m: str, subs: dict) -> list[sqlite3.Row]:
+    """The findings refuter `m` still owes an answer on, in the order it asks them.
+
+    A finding is owed when its quote verified, its family is not `m`'s, its subsystem
+    is one this pack still has (an answer needs the subsystem's text), and `m` has no
+    record on it but failed calls. The refute pass asks these, and `execute` counts
+    them to tell a finished run from one the deadline cut off, so the two cannot
+    disagree about what is left.
+
+    A finding partway through the pass carries the other family's verdict in its
+    refutations, so the "already answered by m" filter is on the model's presence
+    there. Done in Python to keep a model name with a SQL-LIKE wildcard (an
+    underscore) from matching the wrong rows. An error is not an answer: a model whose
+    only record on a finding is a failed call is asked again (IMPROVEMENT-PLAN item 5).
+    Before that, --resume skipped it forever and the finding stayed deferred at the
+    Layer 2 gate; 14 candidates on runs 1 and 2 were stuck that way."""
+    rows = con.execute(
+        """SELECT * FROM research_findings
+           WHERE research_id=? AND family != ? AND quote_verified = 1
+           ORDER BY subsystem, id""", (rid, E.family(m))).fetchall()
+    return [r for r in rows
+            if r["subsystem"] in subs
+            and not any(x.get("model") == m and x.get("verdict") != "error"
+                        for x in json.loads(r["refutations"]))]
+
+
 def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
                  deadline, progress: Progress, *,
                  intent: intent_mod.IntentMap | None = None) -> dict:
@@ -518,23 +568,7 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
     for m in models:
         if deadline and datetime.now() >= deadline:
             break
-        mfam = E.family(m)
-        # Findings this model may refute: a different family, and not one it has already
-        # answered. A finding partway through the pass carries the other family's verdict
-        # in its refutations, so the "already answered by m" filter is on the model's
-        # presence there. Done in Python to keep a model name with a SQL-LIKE wildcard
-        # (an underscore) from matching the wrong rows.
-        rows = con.execute(
-            """SELECT * FROM research_findings
-               WHERE research_id=? AND family != ? AND quote_verified = 1
-               ORDER BY subsystem, id""", (rid, mfam)).fetchall()
-        # An error is not an answer: a model whose only record on a finding is a failed
-        # call is asked again (IMPROVEMENT-PLAN item 5). Before this, --resume skipped
-        # it forever and the finding stayed deferred at the Layer 2 gate; 14 candidates
-        # on runs 1 and 2 were stuck that way.
-        rows = [r for r in rows
-                if not any(x.get("model") == m and x.get("verdict") != "error"
-                           for x in json.loads(r["refutations"]))]
+        rows = _owed_rows(con, rid, m, subs)
         if not rows:
             continue
         progress(f"  {m}: refuting {len(rows)} finding(s)")
@@ -548,9 +582,7 @@ def _refute_pass(con, rid: int, src: Path, subs: dict, models: list[str],
             if answered and answered % 25 == 0:
                 each = (time.time() - t_model) / answered
                 progress(f"    {m}: {answered}/{len(rows)} answered, {each:.0f} s each")
-            sub = subs.get(r["subsystem"])
-            if sub is None:
-                continue
+            sub = subs[r["subsystem"]]
             f = E.Finding(lens=r["lens"], model=r["model"], title=r["title"],
                           file=r["file"] or "", quote=r["quote"] or "",
                           severity=r["severity"] or "info", reasoning=r["reasoning"] or "",

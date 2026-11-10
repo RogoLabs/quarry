@@ -58,7 +58,10 @@
         </form>
       {% endif %}
     </div>
-    {% if r.resumable %}
+    {% if r.resumable and r.owed %}
+      <p class="note">All {{ '{:,}'.format(r.units) }} units ran; the refute pass still
+        owes {{ '{:,}'.format(r.owed) }} answer{{ '' if r.owed == 1 else 's' }}.</p>
+    {% elif r.resumable %}
       <p class="note">{{ r.units - r.done - r.errored }} of {{ r.units }} units never ran.</p>
     {% endif %}
   </div>

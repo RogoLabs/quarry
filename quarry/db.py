@@ -58,7 +58,10 @@ def tx(con: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     con.execute("BEGIN IMMEDIATE")
     try:
         yield con
-    except Exception:
+    except BaseException:
+        # BaseException, not Exception: a KeyboardInterrupt (Ctrl-C, or the SIGTERM
+        # `quarry deep` turns into one) left the transaction open, and every write
+        # after it, the run's own `stopped`, went down with it when the process exited.
         con.execute("ROLLBACK")
         raise
     con.execute("COMMIT")

@@ -104,7 +104,8 @@ def research_resume(request: Request, rid: int, hours: float = Form(0.0)):
                                          "starting worker; stop it before resuming.")
             if not row["resumable"]:
                 raise HTTPException(409, f"Research run {rid} is {row['status']} "
-                                         "with no unit left to run; nothing to resume.")
+                                         "with no unit left to run and no answer "
+                                         "owed; nothing to resume.")
             prior = q.research_claim_state(c, rid)
             writes.claim_research_run(c, rid)
         argv = ["-m", "quarry.cli", "deep", str(row["run_id"]),

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import typer
@@ -183,6 +184,31 @@ def targets_list(limit: int = typer.Option(25), stratum: str = typer.Option(""))
 DEFAULT_DEEP_MODELS = "qwen3-coder:30b,granite4.2:30b,devstral:24b"
 
 
+@contextmanager
+def _term_as_interrupt():
+    """While the deep review runs, SIGTERM raises KeyboardInterrupt, as Ctrl-C does, so
+    `runner.execute` records the run as `stopped` before the process ends.
+
+    The dashboard's Stop and the nightly script's power check both send SIGTERM. Its
+    default action ended the process on the spot, the row kept `running` and the dead
+    pid, and the run read as `died`. Only the main thread may set a handler; anywhere
+    else this changes nothing. The old handler comes back afterwards, so a SIGTERM
+    during the funnel pass that follows still ends the process at once."""
+    import signal
+
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt(f"signal {signum}")
+    try:
+        prev = signal.signal(signal.SIGTERM, interrupt)
+    except ValueError:                  # not the main thread
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, prev)
+
+
 @app.command()
 def deep(run_id: int = typer.Argument(..., help="an ingested run"),
          models: str = typer.Option(DEFAULT_DEEP_MODELS,
@@ -241,8 +267,15 @@ def deep(run_id: int = typer.Argument(..., help="an ingested run"),
         con_out.print(f"  deadline: {deadline:%H:%M} "
                       f"({(deadline - datetime.now()).total_seconds()/3600:.1f}h)")
 
-    stats = runner.execute(connection, rid, src, deadline=deadline,
-                           progress=lambda m: con_out.print(_e(m)), refute=not no_refute)
+    try:
+        with _term_as_interrupt():
+            stats = runner.execute(connection, rid, src, deadline=deadline,
+                                   progress=lambda m: con_out.print(_e(m)),
+                                   refute=not no_refute)
+    except KeyboardInterrupt:
+        con_out.print(f"[yellow]stopped:[/] research run {rid} is recorded as stopped; "
+                      f"quarry deep {run_id} --resume {rid} continues it")
+        raise typer.Exit(130)
     t = Table(show_header=False, box=None)
     for k, v in stats.items():
         t.add_row(_e(k.replace("_", " ")), _e(v))

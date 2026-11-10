@@ -972,8 +972,16 @@ def research_runs(con: sqlite3.Connection, run_id: int | None = None,
     for r in con.execute(sql, args):
         d = dict(r)
         d["status"], d["status_why"] = live_status(d)
-        d["resumable"] = d["status"] in ("died", "stalled", "stopped", "unknown") \
-            and d["done"] + d["errored"] < d["units"]
+        # Resumable with units left, or with every unit hunted and answers owed: a
+        # refute pass stopped partway had no Resume, though `deep --resume` finishes it.
+        # The answers are counted only in that second case, so a polled live run never
+        # pays for it.
+        idle = d["status"] in ("died", "stalled", "stopped", "unknown")
+        units_left = d["done"] + d["errored"] < d["units"]
+        d["owed"] = (sum(x["owed"] for x in refute_status(
+            con, d["id"], json.loads(d["models"] or "[]")))
+            if idle and not units_left else None)
+        d["resumable"] = idle and (units_left or bool(d["owed"]))
         out.append(d)
     return out
 

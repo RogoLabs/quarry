@@ -35,9 +35,10 @@ job started the deep review of VulnLookup (run 3), recorded at the end of item 2
 2026-11-07 a day run looked hung in its refute pass; item 30 records why, the fix
 (02c91fc) and decision O (taken 2026-11-07: keep the second call); decision N was taken and built the same day (13eb37d). On 2026-11-09 item 31 gave each
 run one status read from every stage, so the Runs page stops calling a run done while
-its deep review works. Open: decision J, whose default is taken. The suite collects
-1215; the last full run passed 1193 and skipped 22, 19 because the Docker daemon was
-down and 3 because setuptools is absent.
+its deep review works. On 2026-11-10 item 32 let the nightly job finish a refute pass
+and run only on AC power, and made a stopped review read as stopped. Open: decision J,
+whose default is taken. The suite collects 1225; the last full run passed 1203 and
+skipped 22, 19 because the Docker daemon was down and 3 because setuptools is absent.
 
 Every item says where its evidence came from:
 
@@ -2145,4 +2146,66 @@ signal, so its row keeps `status='running'` and the dead pid, and `live_status` 
 `died`, which `run_progress` shows as failed. Run 3 was stopped this way at 09:23 local
 to save battery, with 374 refutation answers owed, and its row was set to `stopped` by
 hand. The fix is a SIGTERM handler in the worker that calls `_finish(con, rid,
-"stopped")`, or the Stop route writing `stopped` once the process is gone.
+"stopped")`, or the Stop route writing `stopped` once the process is gone. Fixed in item
+32 (the handler).
+
+### 32. The nightly job could not finish a refute pass, and ran on battery [code]
+
+`nightly-deep.sh` resumed a research run only while it had a unit pending, errored or
+running. With every unit hunted and the refute pass unfinished, it printed
+`decision: DONE` and "all units complete; nothing to do", which it did at 21:00 on
+2026-11-08 and again on 2026-11-09, while research run 1 (run 3) still owed refutation
+answers (469 on 2026-11-09, item 31). The review was resumed by hand at 17:06 on
+2026-11-09, untimed, and finished at 22:19 with every answer in. The same day it had
+been stopped at 09:23 because it was running down the battery: the job held the Mac
+awake with `caffeinate -is` and never looked at the power source.
+
+Three things in quarry made this worse:
+
+- A night whose deadline cut the refute pass short, with every unit hunted, finished
+  `done` (`_finish` counted only pending units), so the dashboard showed a finished
+  review with answers owed.
+- SIGTERM, the dashboard's Stop, ended the worker without recording anything, so the
+  run read as `died` (item 31's second side finding). Ctrl-C did the same.
+- The dashboard offered Resume only with units left, so a stopped refute pass had no
+  button, though `quarry deep --resume` finishes one.
+
+- **Done (2026-11-10).** A run finishes `done` only when no unit is pending and no
+  answer is owed. `runner._owed_rows` says what a refuter still owes; the refute pass
+  uses it to pick what to ask and `execute` to count what is left, so the two agree.
+  An answer owed on a subsystem the pack no longer has is not counted, since nothing
+  can ask it, and would otherwise hold the run open for good. `stats["owed"]` reports
+  the count.
+- `quarry deep` turns SIGTERM into KeyboardInterrupt while the review runs
+  (`cli._term_as_interrupt`); `runner.execute` records `stopped` on it and raises it
+  again, and the command says how to resume and exits 130. `db.tx` now rolls back on
+  any BaseException: a KeyboardInterrupt inside a transaction left it open, and the
+  `stopped` written after it would have been lost when the process exited.
+- `queries.research_runs` counts the answers owed for an idle run with every unit
+  hunted, and such a run is resumable when any are. The progress card says "All N
+  units ran; the refute pass still owes K answers".
+- `nightly-deep.sh` (under Application Support, not in this repo; the old version is in
+  the Trash as `nightly-deep.sh.2026-11-10-before`):
+  - resumes the newest research run with a unit left or a status other than `done`,
+    and starts nothing while a worker holds one (`BUSY`);
+  - runs only on AC power: on battery it waits, checking each minute, until the Mac is
+    plugged in or 06:00; while the review runs it keeps checking, stops the worker with
+    SIGTERM when the cable comes out, and resumes if it goes back in before 06:00;
+  - passes `--hours` to 06:00 rather than `--until 06:00`, which rolls a time already
+    past to the next day, so a worker started just after 06:00 would have run a day;
+  - starts nothing with under 15 minutes left, and exits with its own status, so a
+    failed decision is no longer exit 0.
+
+Tested: `tests/test_deep_stop.py` (10), including SIGTERM sent to a worker process
+blocked in a model call. The script was run against a copy of the live database with a
+fake `pmset` and a fake worker: nothing left (DONE, no worker), a stopped refute pass
+owing 1 answer while on battery (waited, then started on AC), unplugged mid-run
+(SIGTERM, exit 130, waited, resumed on AC), a live worker (BUSY), under 15 minutes to
+06:00 on AC and on battery (nothing started), the preflight sentinel, and a runtime
+that cannot import quarry (exit 1).
+
+Side finding, not fixed: the plist's comment calls `ExitTimeOut` (36000) a backstop for
+a model call that hangs past the morning. It is not: `ExitTimeOut` is how long launchd
+waits between SIGTERM and SIGKILL when it stops the job, and nothing stops the job on a
+clock. The deadline inside quarry is checked between units and answers, so one hung
+call can still run past 06:00.
