@@ -39,7 +39,8 @@ its deep review works. On 2026-11-10 item 32 let the nightly job finish a refute
 and run only on AC power, and made a stopped review read as stopped. Open: decision J,
 whose default is taken. Item 33 (2026-11-10) brought the deep review's findings into
 Layer 3, and item 34 split out the verdicts no probe could exercise. On 2026-11-11
-item 33's bundle canary was fixed, so the cross-user bundle checks run. The suite
+item 33's bundle canary was fixed, so the cross-user bundle checks run, and the comment
+and sighting checks were read: none decided, seven of them on a misread 500. The suite
 collects 1241; the last full run passed 1238 and skipped 3, all because setuptools is
 absent.
 
@@ -2288,6 +2289,26 @@ keys.
   bundles served to anonymous clients, so whether they should be private is a design
   question. None could be rejected: a CWE inferred from a lens rejects nothing, and the
   two change checks addressed a handler that does not enclose the finding's line.
+- **Checked (2026-11-11): what the comment and sighting checks did** on that re-probe.
+  Every canary create worked (comment 3 of 3, sighting 16 of 16, all 201), and none of
+  the nine checks reached a decision. All nine are on deep-review findings, so none
+  could have been rejected.
+  - The one comment check, a change, found no baseline: the owner's read-back of its
+    own comment answered 404, since a commenter's new comment awaits moderation and GET
+    serves only published ones, as the recipe notes. quarry_user2's change was refused
+    (403), and the owner deleted both canaries (204).
+  - Seven sighting delete checks stopped at the baseline because the owner's DELETE of
+    its own sighting answered 500. The probe read that as a failed delete, which is
+    wrong. In all seven, a repeat DELETE of the same record answered 404, and
+    VulnLookup's handler reaches its 500 only after it has found the record and passed
+    the permission check. So each 500 deleted its record, and in each check
+    quarry_user2's DELETE was refused (403) while the record survived until the owner's
+    request. I did not find what raises after the commit in VulnLookup's source, and
+    the target's logs were not kept.
+  - The eighth sighting check, a read, found sightings served to anonymous clients, a
+    design question. Its cleanup DELETEs answered 500 and its note says both canaries
+    remain; going by the seven delete checks they were most likely removed, but nothing
+    was sent afterwards to confirm it.
 
 ### 34. Needs-review counted findings no probe could exercise [DB]
 
