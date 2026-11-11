@@ -2,7 +2,7 @@
 
 Plan: [`PLAN.md`](PLAN.md) · Research: [`RESEARCH.md`](RESEARCH.md) · Panel: [`panel/`](panel/)
 
-**1241 tests collected.** Last full run (2026-11-11): 1238 pass, 3 skip, all 3 because setuptools is absent. `quarry doctor · db sync · targets score · ingest · scan · funnel · killed · validate · report · serve`
+**1245 tests collected.** Last full run (2026-11-11): 1242 pass, 3 skip, all 3 because setuptools is absent. `quarry doctor · db sync · targets score · ingest · scan · funnel · killed · validate · report · serve`
 
 ---
 

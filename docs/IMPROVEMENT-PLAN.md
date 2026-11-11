@@ -40,9 +40,9 @@ and run only on AC power, and made a stopped review read as stopped. Open: decis
 whose default is taken. Item 33 (2026-11-10) brought the deep review's findings into
 Layer 3, and item 34 split out the verdicts no probe could exercise. On 2026-11-11
 item 33's bundle canary was fixed, so the cross-user bundle checks run, and the comment
-and sighting checks were read: none decided, seven of them on a misread 500. The suite
-collects 1241; the last full run passed 1238 and skipped 3, all because setuptools is
-absent.
+and sighting checks were read: none decided, seven of them on a misread 500, which is
+now fixed. The suite collects 1245; the last full run passed 1242 and skipped 3, all
+because setuptools is absent.
 
 Every item says where its evidence came from:
 
@@ -2309,6 +2309,22 @@ keys.
     design question. Its cleanup DELETEs answered 500 and its note says both canaries
     remain; going by the seven delete checks they were most likely removed, but nothing
     was sent afterwards to confirm it.
+- **Fixed (2026-11-11): the misread 500.** `_CrossUser.delete` sends a DELETE and, on a
+  5xx, one repeat. A 404 to the repeat counts the first as done: it shows the target
+  answers a missing record with 404, so the first request found the record. The delete
+  check uses it for the owner's baseline and effect-check deletes, and cleanup uses it
+  for every canary. A 5xx to the other account's DELETE followed by the owner's 404
+  counts as that account deleting the record. Tests: four in
+  `tests/test_probes_cross_user.py`, against a fake that answers 500 after deleting or
+  instead of deleting; all four fail on the old probe, the 500-instead case only on its
+  wording.
+- Re-probed 2026-11-11: 0 confirmed, 0 rejected, 98 needs-review, 702 untested, the
+  same counts as before. The seven sighting delete checks now record what they
+  measured: quarry_user2 was refused (403) like the anonymous control (401), and the
+  record survived until its owner's DELETE, which answered 500 and was shown by a 404
+  to its repeat to have deleted it. They stay needs-review, held because the DELETE
+  handler does not enclose the finding's line. The read check's cleanup confirmed both
+  canaries gone, so its note no longer says they remain.
 
 ### 34. Needs-review counted findings no probe could exercise [DB]
 

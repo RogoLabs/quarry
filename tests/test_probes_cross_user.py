@@ -57,14 +57,18 @@ def _routes(method, path="/api/sighting/<uuid:sighting_uuid>", line=5):
 
 class VL:
     """A VulnLookup-shaped store. `delete_any`, `modify_any`: any authenticated account
-    may delete or update any record (the bug). `public`: GET needs no key."""
+    may delete or update any record (the bug). `public`: GET needs no key.
+    `delete_error`: an allowed DELETE answers 500, "after" deleting the record (what
+    VulnLookup's sighting DELETE did on 2026-11-11) or "instead" of deleting it."""
 
     def __init__(self, *, delete_any=False, modify_any=False, public=True,
-                 anon_delete=False, check_after_write=False, owner_cannot_delete=False):
+                 anon_delete=False, check_after_write=False, owner_cannot_delete=False,
+                 delete_error=""):
         self.records: dict[str, dict] = {}
         self.delete_any, self.modify_any, self.public = delete_any, modify_any, public
         self.anon_delete, self.check_after_write = anon_delete, check_after_write
         self.owner_cannot_delete = owner_cannot_delete
+        self.delete_error = delete_error
         self.fake = curl(self.handle)
 
     def who(self, req):
@@ -108,7 +112,13 @@ class VL:
                 if login is not None and (self.owner_cannot_delete
                                           or not self.may(req, rec, self.delete_any)):
                     return Reply(403, '{"message": "no"}', "application/json")
+                failed = Reply(500, '{"message": "Sighting deletion failed."}',
+                               "application/json")
+                if self.delete_error == "instead":
+                    return failed
                 del self.records[rid]
+                if self.delete_error == "after":
+                    return failed
                 return Reply(200, '{"message": "Sighting deleted successfully."}',
                              "application/json")
         return Reply(404, "{}", "application/json")
@@ -170,6 +180,58 @@ def test_no_baseline_when_the_owner_cannot_delete_its_own_record():
     ev = probe_cross_user(_running(), _cand(), _routes("DELETE"), vl.fake)
     assert adjudicate(ev) == "needs-review" and "could not delete its own" in ev.summary
     assert "could not be deleted and remains" in ev.summary    # said, not hidden
+
+
+# A 500 that deleted the record. Seven sighting checks on 2026-11-11 read the owner's 500
+# as a failed delete and stopped, though a later DELETE of the record answered 404.
+
+def _deletes(vl):
+    return [(r.method, r.headers.get("x-api-key", "")) for r in vl.fake.requests
+            if r.method == "DELETE"]
+
+
+def test_a_500_that_deleted_the_record_still_gives_the_baseline():
+    vl = VL(delete_error="after")
+    ev = probe_cross_user(_running(), _cand(), _routes("DELETE"), vl.fake)
+    assert adjudicate(ev) == "rejected", ev.summary
+    assert "quarry_user2 was refused" in ev.summary and "403" in ev.summary
+    assert "answered 500 though it removed the record" in ev.summary
+    assert "500, then 404 to a repeat DELETE: deleted" in ev.baseline
+    assert "500, then 404 to a repeat DELETE: deleted" in ev.observed
+    # anonymous, owner + repeat, other, owner + repeat; nothing left for cleanup
+    assert len(_deletes(vl)) == 6
+    assert "could not be deleted" not in ev.summary
+    _only_canaries(vl, ev)
+    _no_secret(ev)
+
+
+def test_a_500_that_deleted_nothing_is_still_no_baseline():
+    vl = VL(delete_error="instead")
+    ev = probe_cross_user(_running(), _cand(), _routes("DELETE"), vl.fake)
+    assert adjudicate(ev) == "needs-review"
+    assert "could not delete its own sighting (500, then 500 to a repeat DELETE)" \
+        in ev.summary
+    assert "could not be deleted and remains" in ev.summary
+    assert len(vl.records) == 2
+
+
+def test_another_accounts_500_that_deleted_the_record_is_a_confirmation():
+    """The other account's DELETE answers 500 and the owner then gets 404: the record was
+    there for that request, since a missing one answers 404, and gone after it."""
+    vl = VL(delete_any=True, delete_error="after")
+    ev = probe_cross_user(_running(), _cand(), _routes("DELETE"), vl.fake)
+    assert ev.reproduced is True and adjudicate(ev) == "confirmed", ev.summary
+    assert "quarry_user2 deleted quarry_user's sighting (500; the owner then got 404)" \
+        in ev.summary
+    _only_canaries(vl, ev)
+
+
+def test_cleanup_counts_a_500_that_deleted_the_record():
+    vl = VL(public=True, delete_error="after")
+    ev = probe_cross_user(_running(), _cand(), _routes("GET"), vl.fake)
+    assert vl.records == {}
+    assert "could not be deleted" not in ev.summary
+    assert len(_deletes(vl)) == 4                      # two canaries, each with a repeat
 
 
 # ---- read ----

@@ -491,6 +491,22 @@ class _CrossUser:
                 self.made.append(i)
         return len(self.made) == 2
 
+    def delete(self, who: str, i: str) -> tuple[_Resp, bool, str]:
+        """DELETE canary `i` as `who`: the response, whether that request removed the
+        record, and its status as the evidence should read it.
+
+        A 5xx gets one repeat. On 2026-11-11 VulnLookup's sighting DELETE answered 500
+        after deleting the record, and seven checks read that as the owner failing to
+        delete its own. A 404 to the repeat shows the target answers a missing record
+        with 404, so the first request found the record, and it is gone."""
+        d = self.call(who, "DELETE", self.item(i))
+        if d.status[:1] != "5":
+            return d, d.ok, d.status or "no response"
+        again = self.call(who, "DELETE", self.item(i))
+        if again.status == "404":
+            return d, True, f"{d.status}, then 404 to a repeat DELETE: deleted"
+        return d, False, f"{d.status}, then {again.status or 'no response'} to a repeat DELETE"
+
     def cleanup(self, gone: tuple[str, ...] = ()) -> str:
         """Delete, as the owner, every canary this run made that is not already gone.
         Returns a note for the verdict naming any that could not be removed."""
@@ -498,8 +514,8 @@ class _CrossUser:
         for i in self.made:
             if i in gone:
                 continue
-            d = self.call(self.res.owner, "DELETE", self.item(i))
-            if not (d.ok or d.status == "404"):
+            d, done, _ = self.delete(self.res.owner, i)
+            if not (done or d.status == "404"):
                 left.append(i)
         return (f"; canary {', '.join(left)} could not be deleted and remains in the "
                 "throwaway instance" if left else "")
@@ -597,29 +613,37 @@ def _xu_read(xu: _CrossUser, route, cand, own) -> ProbeEvidence:
 def _xu_delete(xu: _CrossUser, route, cand, own) -> ProbeEvidence:
     o, a = xu.ids
     d_n = xu.call("anonymous", "DELETE", xu.item(o))
-    d_o = xu.call(xu.res.owner, "DELETE", xu.item(o))       # baseline, and removes o
+    d_o, o_done, o_said = xu.delete(xu.res.owner, o)        # baseline, and removes o
     d_x = xu.call(xu.res.other, "DELETE", xu.item(a))
-    d_after = xu.call(xu.res.owner, "DELETE", xu.item(a))   # effect check, and removes a
-    gone = tuple(i for i, d in ((o, d_o), (a, d_after)) if d.ok or d.status == "404")
+    d_after, a_done, a_said = xu.delete(xu.res.owner, a)    # effect check, and removes a
+    # The other account's 5xx then the owner's 404: the record was there for the other
+    # account's request (a missing one answers 404) and gone after it.
+    x_done = d_x.ok or (d_x.status[:1] == "5" and d_after.status == "404")
+    gone = tuple(i for i, d, done in ((o, d_o, o_done), (a, d_after, a_done))
+                 if done or d.status == "404")
     note = xu.cleanup(gone=gone)
-    baseline = (f"{xu.owner} deleting its own baseline canary: {d_o.status or 'no response'}"
+    baseline = (f"{xu.owner} deleting its own baseline canary: {o_said}"
                 f"; anonymous deleting it first: {d_n.status or 'no response'}")
     observed = (f"{xu.other} deleting {xu.owner}'s probe canary: "
                 f"{d_x.status or 'no response'}; {xu.owner} deleting it afterwards: "
-                f"{d_after.status or 'no response'} (404 means it was already gone)")
+                f"{a_said} (404 means it was already gone)")
     common = dict(observed=observed, baseline=baseline, note=note)
+    errored = sorted({d.status for d in (d_o, d_after) if d.status[:1] == "5"})
+    errored_note = (f"; the owner's DELETE answered {' and '.join(errored)} though it "
+                    "removed the record, which a repeat DELETE answering 404 showed"
+                    if errored else "")
     if d_n.ok:
         return _xu_evidence(xu, route, cand, own, reproduced=True, **common,
                             summary=f"an anonymous DELETE removed {xu.owner}'s "
                                     f"{xu.res.name}: the route deletes without "
                                     "authentication. Held for review because the anonymous "
                                     "request is this probe's negative control")
-    if not d_o.ok:
+    if not o_done:
         return _xu_evidence(xu, route, cand, own, reproduced=False, determinism="unknown",
                             handled=d_o.reached or None, **common,
                             summary=f"{xu.owner} could not delete its own {xu.res.name} "
-                                    f"({d_o.status or 'no response'}), so a refusal to "
-                                    f"{xu.other} would mean nothing")
+                                    f"({o_said}), so a refusal to {xu.other} would mean "
+                                    "nothing")
     # d_o worked, so the baseline canary existed through the anonymous attempt: a 404
     # to the anonymous client hid an existing record, which is a refusal.
     if not (d_n.refused or d_n.status == "404"):
@@ -627,24 +651,25 @@ def _xu_delete(xu: _CrossUser, route, cand, own) -> ProbeEvidence:
                             **common,
                             summary=f"the anonymous control answered {d_n.status}, neither "
                                     "a deletion nor a refusal; inconclusive")
-    if d_x.ok and d_after.status == "404":
+    if x_done and d_after.status == "404":
         return _xu_evidence(xu, route, cand, own, reproduced=True,
                             differs_from_baseline=True, handled=True, **common,
                             summary=f"{xu.other} deleted {xu.owner}'s {xu.res.name} "
                                     f"({d_x.status}; the owner then got 404), while the "
-                                    f"anonymous control was refused ({d_n.status})")
-    if (d_x.refused or d_x.status == "404") and d_after.ok:
+                                    f"anonymous control was refused ({d_n.status})"
+                                    f"{errored_note}")
+    if (d_x.refused or d_x.status == "404") and a_done:
         return _xu_evidence(xu, route, cand, own, reproduced=False,
                             differs_from_baseline=False, handled=True, **common,
                             summary=f"{xu.other} was refused deletion of {xu.owner}'s "
                                     f"{xu.res.name} ({d_x.status}) like the anonymous "
                                     f"control ({d_n.status}); the record survived and its "
-                                    "owner deleted it")
+                                    f"owner deleted it{errored_note}")
     return _xu_evidence(xu, route, cand, own, reproduced=False, determinism="unknown",
                         **common,
                         summary=f"{xu.other}'s DELETE answered {d_x.status or 'nothing'} "
-                                f"and the record then answered {d_after.status or 'nothing'}"
-                                " to its owner; status and effect disagree, inconclusive")
+                                f"and the record then answered {a_said} to its owner; "
+                                "status and effect disagree, inconclusive")
 
 
 def _xu_modify(xu: _CrossUser, route, cand, own) -> ProbeEvidence:
