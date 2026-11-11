@@ -38,7 +38,7 @@ run one status read from every stage, so the Runs page stops calling a run done 
 its deep review works. On 2026-11-10 item 32 let the nightly job finish a refute pass
 and run only on AC power, and made a stopped review read as stopped. Open: decision J,
 whose default is taken. Item 33 (2026-11-10) brought the deep review's findings into
-Layer 3. The suite collects 1233; the last full run passed 1230 and skipped 3, all
+Layer 3. The suite collects 1235; the last full run passed 1232 and skipped 3, all
 because setuptools is absent.
 
 Every item says where its evidence came from:
@@ -2256,6 +2256,12 @@ the canary create (`POST /api/bundle/`, `/api/comment/` or `/api/sighting/`) wit
 seeded account's API key returned 401, though the seed reported capturing all three
 keys.
 
-Open: why the seeded keys are refused. One suspect, not checked: the seed's capture
-pattern, `([0-9A-Za-z]{16,})`, takes the first long alphanumeric run in the command's
-output, whatever it is.
+- **Fixed (2026-11-10): why the seeded keys were refused.** VulnLookup makes an API key
+  with `secrets.token_urlsafe(64)`: 86 characters of letters, digits, `-` and `_`. The
+  seed captured it with `([0-9A-Za-z]{16,})`, which stops at the first `-` or `_`, so it
+  kept a fragment, and the target found no user with that key. `seed.VL_KEY_CAPTURE` now
+  takes the whole line the command prints. Tests: two in `tests/test_seed.py`; the first
+  fails on the old pattern. A re-probe of run 3 the same evening gave 0 confirmed, 0
+  rejected and 800 needs-review. The bundle create (`POST /api/bundle/` as the admin) now
+  answers 400 instead of 401: the key is accepted and the request body is not. Not yet
+  checked: what the comment and sighting checks did on that run.

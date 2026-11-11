@@ -189,9 +189,17 @@ def _vl_user(login: str, admin: bool = False) -> SeedStep:
         describe=f"create {'admin' if admin else 'user'} account {login}")
 
 
+# `user_get_api_key` prints `user.apikey` on a line of its own. VulnLookup makes it with
+# `secrets.token_urlsafe(64)` (website/models/user.py), 86 characters of letters, digits,
+# `-` and `_`, and validates a length of 30 to 100. The capture takes that whole line.
+# It used to be `([0-9A-Za-z]{16,})`, which stopped at the first `-` or `_` and captured
+# a fragment of the key, so every authenticated probe was answered 401 (2026-11-10).
+VL_KEY_CAPTURE = r"(?m)^([A-Za-z0-9_-]{30,100})\s*$"
+
+
 def _vl_key(login: str, key: str) -> SeedStep:
     return SeedStep(argv=_VL + ("user_get_api_key", "--login", login),
-                    capture=r"([0-9A-Za-z]{16,})", capture_as=key,
+                    capture=VL_KEY_CAPTURE, capture_as=key,
                     describe=f"read {login} API key")
 
 

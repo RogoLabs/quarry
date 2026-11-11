@@ -96,6 +96,33 @@ def test_the_vulnlookup_recipe_uses_the_projects_own_commands():
     assert all("{password}" in a or "user_get_api_key" in a for a in cmds)
 
 
+# A key shaped like VulnLookup's, `secrets.token_urlsafe(64)`: 86 characters, with `-`
+# and `_` in it. The old capture, `([0-9A-Za-z]{16,})`, took the first run of letters
+# and digits only, a fragment the target answered with 401.
+VL_KEY = ("Xq3-vT9_kLm2PzR8wNcY4bHs6JdF1gAeU7oKiQ5tZrWx0Cy-MnB_pVfGh3LsDj9Ek2Ra6Tu8Wq1Yz4Nc7Op"
+          "5Ab")
+
+
+def test_the_vulnlookup_key_capture_takes_the_whole_key():
+    assert len(VL_KEY) == 86 and "-" in VL_KEY and "_" in VL_KEY
+    step = next(st for st in S.get("vulnlookup").steps if st.capture_as == "admin_api_key")
+    # Lines of the kind a CLI may print before the key, a poetry notice and a log line
+    # with a long word in it; made up for the test, not copied from VulnLookup's output.
+    out = ("Skipping virtualenv creation, as specified in config file.\n"
+           "WARNING:website.web.bootstrap:VulnerabilityLookupInstanceConfiguration loaded\n"
+           f"{VL_KEY}\n")
+    recipe = SeedRecipe(name="t", steps=(step,))
+    res = run_seed(FakeRuntime({"user_get_api_key": (0, out)}), object(), recipe)
+    assert res.credentials == {"admin_api_key": VL_KEY}
+
+
+def test_the_vulnlookup_key_capture_invents_nothing_for_a_missing_user():
+    step = next(st for st in S.get("vulnlookup").steps if st.capture_as == "user_api_key")
+    res = run_seed(FakeRuntime({"user_get_api_key": (0, "No such user.\n")}), object(),
+                   SeedRecipe(name="t", steps=(step,)))
+    assert "user_api_key" not in res.credentials
+
+
 def test_the_vulnlookup_cross_user_spec_uses_only_keys_the_recipe_captures():
     import json
     r = S.get("vulnlookup")
