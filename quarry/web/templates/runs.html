@@ -33,8 +33,11 @@
           {#  "not run" until the stage has run, so 0 means it ran and found nothing. #}
           {% set v = r.stage.Validate %}
           <td class="num r">{% if v.status in ('not run', 'running') %}<a class="plain dim" href="/runs/{{ r.id }}/validation">{{ 'running' if v.status == 'running' else 'not&nbsp;run'|safe }}</a>
-            {%- else %}<a class="plain" href="/runs/{{ r.id }}/validation">{{ r.n_verdicts }}</a>{% if r.n_confirmed %}
+            {#- The count is the verdicts that say something; untested ones, which a probe
+                could not exercise, are counted apart (706 of run 3's 800 on 2026-11-10). #}
+            {%- else %}<a class="plain" href="/runs/{{ r.id }}/validation">{{ r.n_verdicts - r.n_untested }}</a>{% if r.n_confirmed %}
             <a class="pill verified" href="/runs/{{ r.id }}/validation?state=confirmed">{{ r.n_confirmed }} confirmed</a>{% endif %}
+            {%- if r.n_untested %}<div class="sm"><a class="plain dim" href="/runs/{{ r.id }}/validation?state=untested">{{ r.n_untested }} untested</a></div>{% endif %}
             {%- if v.short %}<div class="sm dim">{{ v.short }}</div>{% endif %}{% endif %}</td>
           {% set rp = r.stage.Report %}
           <td class="num r">{% if rp.status in ('not run', 'running') %}<a class="plain dim" href="/runs/{{ r.id }}/advisories">{{ 'running' if rp.status == 'running' else 'not&nbsp;run'|safe }}</a>

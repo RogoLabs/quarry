@@ -258,7 +258,9 @@ def funnel_summary(con: sqlite3.Connection, run_id: int) -> list[dict[str, Any]]
 
 # ------------------------------------------------------------------ adjudication
 
-VERDICTS = ("confirmed", "needs-review", "rejected")
+# `untested`: a probe ran for the finding but could not exercise it (no route to address,
+# no check for its class, nothing measured). Not a review state (migration _v12).
+VERDICTS = ("confirmed", "needs-review", "rejected", "untested")
 
 
 def verdict(con: sqlite3.Connection, finding_id: str, run_id: int, *,

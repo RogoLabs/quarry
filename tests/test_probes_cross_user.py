@@ -240,7 +240,7 @@ def test_missing_credentials_send_nothing():
     running = _running()
     running.credentials.pop("user2_api_key")
     ev = probe_cross_user(running, _cand(), _routes("DELETE"), vl.fake)
-    assert adjudicate(ev) == "needs-review" and vl.fake.requests == []
+    assert adjudicate(ev) == "untested" and vl.fake.requests == []
     assert "user2_api_key" in ev.summary
 
 

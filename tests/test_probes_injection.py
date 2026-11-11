@@ -368,4 +368,4 @@ def test_ssrf_rejected_when_internal_addresses_are_refused():
 
 def test_injection_needs_review_without_routes():
     ev = probe_injection_observable(RUNNING, _cand("CWE-79"), [], curl(lambda r: (200, "")))
-    assert adjudicate(ev) == "needs-review"
+    assert adjudicate(ev) == "untested"

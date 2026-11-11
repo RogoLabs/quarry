@@ -154,7 +154,8 @@ CREATE TABLE IF NOT EXISTS verdicts (
     seat            TEXT    NOT NULL DEFAULT 'chair',
     model           TEXT    NOT NULL,
     effort          TEXT,
-    verdict         TEXT    NOT NULL CHECK (verdict IN ('confirmed','needs-review','rejected')),
+    verdict         TEXT    NOT NULL CHECK (verdict IN ('confirmed','needs-review','rejected',
+                                                    'untested')),
     reason          TEXT,                      -- the six-class taxonomy + local-dev-fixture
     adjusted_severity TEXT,
     cvss_vector     TEXT,

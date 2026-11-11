@@ -93,9 +93,13 @@
       <span class="pill incomplete">needs review</span><span class="v">{{ vc['needs-review'] }}</span></a>
     <a href="/runs/{{ run.id }}/validation?state=rejected" class="vstat">
       <span class="pill killed">rejected</span><span class="v">{{ vc.rejected }}</span></a>
+    <a href="/runs/{{ run.id }}/validation?state=untested" class="vstat">
+      <span class="pill inert">untested</span><span class="v">{{ vc.untested }}</span></a>
     <p class="note">{% if vc.total %}{{ vc.total }} verdict(s) in this run.
       <a href="/runs/{{ run.id }}/validation">All of them</a>. A probe with no recorded
-      baseline is held as needs review, so that state is the common one.{% else %}No
+      baseline is held as needs review. Untested means the probe could not exercise the
+      finding at all (no route in its file, no check for its class, nothing measured),
+      so it asks nothing of you.{% else %}No
       verdicts yet. <code>quarry validate {{ run.id }} --dry-run</code> plans the probes;
       <code>quarry validate {{ run.id }}</code> builds the target with no network and
       probes it; add <code>--build-network</code> for a Dockerfile that installs its

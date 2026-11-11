@@ -294,10 +294,82 @@ def _v11_finding_reach(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE research_findings ADD COLUMN reach TEXT")
 
 
+_VERDICTS_V12 = """
+    CREATE TABLE verdicts_v12 (
+        id              INTEGER PRIMARY KEY,
+        finding_id      TEXT    NOT NULL REFERENCES findings(id),
+        run_id          INTEGER NOT NULL REFERENCES runs(id),
+        seat            TEXT    NOT NULL DEFAULT 'chair',
+        model           TEXT    NOT NULL,
+        effort          TEXT,
+        verdict         TEXT    NOT NULL CHECK (verdict IN ('confirmed','needs-review','rejected',
+                                                            'untested')),
+        reason          TEXT,
+        adjusted_severity TEXT,
+        cvss_vector     TEXT,
+        cwe             TEXT,
+        evidence_score  INTEGER NOT NULL DEFAULT 0,
+        executed_score  INTEGER NOT NULL DEFAULT 0,
+        rationale       TEXT,
+        cost_usd        REAL    NOT NULL DEFAULT 0,
+        cache_read_tokens    INTEGER NOT NULL DEFAULT 0,
+        cache_write_tokens   INTEGER NOT NULL DEFAULT 0,
+        created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+    )"""
+_VERDICT_COLS = ("id, finding_id, run_id, seat, model, effort, verdict, reason, "
+                 "adjusted_severity, cvss_vector, cwe, evidence_score, executed_score, "
+                 "rationale, cost_usd, cache_read_tokens, cache_write_tokens, created_at")
+
+
+def _v12_untested_verdict(con: sqlite3.Connection) -> None:
+    """`untested` joins the verdict values: a probe that could not exercise the finding
+    (no route in its file, no check for its class, nothing measured) is not waiting on a
+    person. On run 3 (2026-11-10) 706 of 800 verdicts were that, all labelled
+    needs-review, so the review queue read 800 where 94 had anything to judge.
+
+    The CHECK is rebuilt the way SQLite's documentation gives for a schema change it
+    cannot make in place: a new table, copy, drop the old one, rename the new one in.
+    Not v1's order (rename the old one away first): with foreign keys on, that rename
+    repoints `advisories.verdict_id` at the copy about to be dropped, and v4 exists
+    because the same rename rewrote a view. Foreign keys are off while the tables swap,
+    and checked before the change is kept."""
+    def current() -> bool:
+        sql = con.execute("SELECT sql FROM sqlite_master WHERE type='table' "
+                          "AND name='verdicts'").fetchone()
+        return sql is None or "'untested'" in sql[0]
+    if current():
+        return                                   # a new database has it from schema.sql
+    fk = con.execute("PRAGMA foreign_keys").fetchone()[0]
+    con.execute("PRAGMA foreign_keys = OFF")     # a no-op inside a transaction
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        if current():                            # another process got here first
+            con.execute("COMMIT")
+            return
+        try:
+            con.execute("DROP TABLE IF EXISTS verdicts_v12")
+            con.execute(_VERDICTS_V12)
+            con.execute(f"INSERT INTO verdicts_v12 ({_VERDICT_COLS}) "
+                        f"SELECT {_VERDICT_COLS} FROM verdicts")
+            con.execute("DROP TABLE verdicts")
+            con.execute("ALTER TABLE verdicts_v12 RENAME TO verdicts")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_verdict_finding "
+                        "ON verdicts(finding_id)")
+            bad = con.execute("PRAGMA foreign_key_check").fetchall()
+            if bad:
+                raise sqlite3.IntegrityError(f"foreign key check failed: {bad[:5]}")
+        except BaseException:
+            con.execute("ROLLBACK")
+            raise
+        con.execute("COMMIT")
+    finally:
+        con.execute(f"PRAGMA foreign_keys = {'ON' if fk else 'OFF'}")
+
+
 MIGRATIONS = (_v1_funnel_actions, _v2_rank_view, _v3_issue_membership,
               _v4_repair_views, _v5_targets, _v6_research, _v7_research_liveness,
               _v8_advisories, _v9_deep_verdicts, _v10_unsupported_refutations,
-              _v11_finding_reach)
+              _v11_finding_reach, _v12_untested_verdict)
 
 
 def migrate(con: sqlite3.Connection) -> int:

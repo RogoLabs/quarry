@@ -68,9 +68,9 @@ def test_selection_is_in_catalogue_priority_order():
     assert keys[0] == "broken-authz-idor"            # highest priority wins the top slot
 
 
-def test_an_unwired_probe_can_only_yield_needs_review():
+def test_an_unwired_probe_can_only_yield_untested():
     lens = ProbeLens(key="x", cwes=frozenset({"CWE-862"}), requires=("http_routes",),
                      rationale="")
     ev = lens.probe(running=None, candidate=_cand("f1", "CWE-862"), routes=[],
                     exec_fn=lambda a: (0, ""))
-    assert ev.reproduced is False and adjudicate(ev) == "needs-review"
+    assert ev.reproduced is False and adjudicate(ev) == "untested"

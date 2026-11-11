@@ -63,7 +63,8 @@ def test_latest_verdict_per_slot_wins(seeded):
     _verdict(con, fid, "rejected")                     # same slot, later: wins
     _verdict(con, fid, "needs-review", model="ssrf")   # another lens: its own slot
     counts = q.verdict_counts(con, 1)
-    assert counts == {"confirmed": 0, "needs-review": 1, "rejected": 1, "total": 2}
+    assert counts == {"confirmed": 0, "needs-review": 1, "rejected": 1, "untested": 0,
+                      "total": 2}
     slots = q.verdicts_for_finding(con, fid)
     assert {(v["model"], v["verdict"]) for v in slots} == {("idor", "rejected"),
                                                            ("ssrf", "needs-review")}

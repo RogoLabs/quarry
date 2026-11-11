@@ -694,6 +694,8 @@ def all_runs(con: sqlite3.Connection) -> list[dict[str, Any]]:
                  WHERE lv.run_id=r.id) AS n_verdicts,
                (SELECT COUNT(*) FROM ({LATEST_VERDICTS}) lv
                  WHERE lv.run_id=r.id AND lv.verdict='confirmed') AS n_confirmed,
+               (SELECT COUNT(*) FROM ({LATEST_VERDICTS}) lv
+                 WHERE lv.run_id=r.id AND lv.verdict='untested') AS n_untested,
                (SELECT COUNT(*) FROM advisories a WHERE a.run_id=r.id) AS n_advisories
         FROM runs r ORDER BY r.id DESC""")]
 
@@ -1279,7 +1281,8 @@ def elapsed(started_at: str | None) -> str:
 # so a finding probed by two lenses has two slots and two verdicts. Counts on screen
 # are counts of slots, and the pages say so.
 
-VERDICT_STATES = ("confirmed", "needs-review", "rejected")
+# `untested` last: a probe that could not exercise the finding asks nothing of a person.
+VERDICT_STATES = ("confirmed", "needs-review", "rejected", "untested")
 
 #: The latest verdict in each (run, finding, seat, model) slot.
 LATEST_VERDICTS = """
@@ -1544,7 +1547,8 @@ def run_stages(con: sqlite3.Connection, run: dict[str, Any],
     out.append({"stage": "Validate", "status": vs["status"], "short": vs["short"],
                 "why": vs["note"],
                 "detail": (f"{vc['total']} latest verdict(s): {vc['confirmed']} confirmed, "
-                           f"{vc['needs-review']} needs review, {vc['rejected']} rejected"
+                           f"{vc['needs-review']} needs review, {vc['rejected']} rejected, "
+                           f"{vc['untested']} untested"
                            + (f"; last attempt: {vs['note']}" if vs["note"] else "")),
                 "cmd": shell("quarry", "validate", rid, "--dry-run"),
                 "note": "plans the probes; run it again without --dry-run to probe"})
@@ -1835,8 +1839,11 @@ def pipeline(con: sqlite3.Connection, run: dict[str, Any],
                                      if vs["status"] == "not run"
                                      else f"probing; {vc['total']} verdict(s) so far")
     else:
-        v_n, v_unit = vc["total"], f"verdicts, {vc['confirmed']} confirmed" + (
-            f"; {vs['short']}" if vs["short"] else "")
+        # Untested counted apart, as on the Runs list: the probe could not exercise them.
+        v_n, v_unit = vc["total"] - vc["untested"], (
+            f"verdicts, {vc['confirmed']} confirmed"
+            + (f"; {vc['untested']} untested" if vc["untested"] else "")
+            + (f"; {vs['short']}" if vs["short"] else ""))
     if rs["status"] in ("not run", "running"):
         r_n, r_unit = rs["status"], ("report has not run on this run"
                                      if rs["status"] == "not run" else "drafting")

@@ -93,9 +93,9 @@ def test_status_prints_every_section_of_the_run_page(seeded, tmp_path):
             "health.scan.trivy: failed: timed out after 5s",
             "health.vulndb.osv-scanner: osv database is 9 days old",
             "funnel.drift: 0",
-            "verdicts: confirmed=1 needs-review=1 rejected=1 total=3",
-            "verdicts.chair: confirmed=0 needs-review=0 rejected=1 total=1",
-            "verdicts.dynamic: confirmed=1 needs-review=1 rejected=0 total=2",
+            "verdicts: confirmed=1 needs-review=1 rejected=1 untested=0 total=3",
+            "verdicts.chair: confirmed=0 needs-review=0 rejected=1 untested=0 total=1",
+            "verdicts.dynamic: confirmed=1 needs-review=1 rejected=0 untested=0 total=2",
             "advisories: 1"):
         assert want in lines, want
     # A recovered opengrep run with a note is not "nothing to scan" (item 24), and
@@ -201,8 +201,10 @@ def test_verdict_counts_by_seat_count_latest_slots_only(seeded, tmp_path):
     _, con = seeded
     _seed_everything(con, tmp_path)
     assert q.verdict_counts_by_seat(con, 1) == {
-        "chair": {"confirmed": 0, "needs-review": 0, "rejected": 1, "total": 1},
-        "dynamic": {"confirmed": 1, "needs-review": 1, "rejected": 0, "total": 2}}
+        "chair": {"confirmed": 0, "needs-review": 0, "rejected": 1, "untested": 0,
+                  "total": 1},
+        "dynamic": {"confirmed": 1, "needs-review": 1, "rejected": 0, "untested": 0,
+                    "total": 2}}
     assert q.verdict_counts_by_seat(con, 2) == {}
     by_seat = q.verdict_counts_by_seat(con, 1)
     assert sum(s["total"] for s in by_seat.values()) == q.verdict_counts(con, 1)["total"]

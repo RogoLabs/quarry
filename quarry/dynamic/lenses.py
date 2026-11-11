@@ -66,7 +66,7 @@ class ProbeLens:
     def probe(self, running: RunningTarget, candidate: Candidate,
               routes: list, exec_fn: ExecFn) -> ProbeEvidence:
         if self.run is None:
-            return ProbeEvidence(
+            return ProbeEvidence(exercised=False, 
                 reproduced=False, determinism="unknown",
                 summary=f"{self.key}: probe body not wired yet; left for review")
         return self.run(running, candidate, routes, exec_fn)

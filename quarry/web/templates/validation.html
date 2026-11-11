@@ -12,7 +12,8 @@
   <p class="prose mb-6">Each row is the latest verdict one seat and lens gave a finding,
     from probes run against the target in Docker. A probe that reproduced but has no
     recorded baseline is stored as needs review, not confirmed, so needs review is the
-    common state.</p>
+    common state among probes that measured something. Untested means the probe could not
+    exercise the finding at all, and the reason says why; it is not a review queue.</p>
 
   <nav class="seg" aria-label="Filter by verdict">
     <a href="{{ here }}"

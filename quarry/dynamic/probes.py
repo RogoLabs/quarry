@@ -347,7 +347,7 @@ def probe_broken_authz(running: RunningTarget, candidate: Candidate,
         why = (f"; {len(inherited)} route(s) in the file inherit only the spec-wide "
                "security requirement, which also covers the public reads, so it is not "
                "counted as declared protection" if inherited else "")
-        return ProbeEvidence(
+        return ProbeEvidence(exercised=False, 
             reproduced=False, determinism="unknown",
             summary="no route in the finding's file is declared auth-protected by its own "
                     f"operation (no per-operation OpenAPI security){why}, so "
@@ -526,13 +526,13 @@ def probe_cross_user(running: RunningTarget, candidate: Candidate,
     xu = _CrossUser(running, spec, res, exec_fn)
     missing = [k for k, v in xu.keys.items() if not v]
     if missing:
-        return ProbeEvidence(
+        return ProbeEvidence(exercised=False, 
             reproduced=False, determinism="unknown",
             summary=f"cross-user {check} check on {res.name} needs the seeded "
                     f"credentials {missing}, which the seed did not capture")
     if not xu.create():
         note = xu.cleanup()
-        return ProbeEvidence(
+        return ProbeEvidence(exercised=False, 
             reproduced=False, determinism="unknown", request="; ".join(xu.log),
             summary=f"cross-user {check} check on {res.name}: {xu.owner} could not create "
                     f"both canary records, so there is nothing to compare{note}")
@@ -772,14 +772,14 @@ def probe_missing_rate_limit(running: RunningTarget, candidate: Candidate,
     a RateLimit-Remaining that counts down, is a limit that exists. GET, or a failed login
     POST: nothing is created or changed."""
     if probe_class(candidate.cwe) == "CWE-400":
-        return ProbeEvidence(
+        return ProbeEvidence(exercised=False, 
             reproduced=False, determinism="unknown",
             summary="CWE-400 is resource consumption per request (mostly ReDoS); a request "
                     "rate limit neither confirms nor refutes it, so no burst was sent")
     pool, own = _scope(routes, candidate, _burstable)
     pool = _auth_first(pool)
     if not pool:
-        return ProbeEvidence(reproduced=False, determinism="unknown",
+        return ProbeEvidence(exercised=False, reproduced=False, determinism="unknown",
                              summary="no GET or login-like POST route in the finding's file "
                                      "to exercise")
     r = pool[0]
@@ -789,7 +789,7 @@ def probe_missing_rate_limit(running: RunningTarget, candidate: Candidate,
                                                   "retry_after": "", "remaining": ""}])[0]
     request = f"{method} {url}  (x1, then x{burst} back to back in one connection)"
     if lone["status"] not in _REAL or lone["status"] == "429":
-        return ProbeEvidence(
+        return ProbeEvidence(exercised=False, 
             reproduced=False, determinism="unknown", handled=False, request=request,
             observed=f"lone request: HTTP {lone['status'] or 'none'}",
             summary=f"{method} {r.path} answered {lone['status'] or 'nothing'} to a lone "
@@ -968,7 +968,7 @@ def probe_auth_timing_oracle(running: RunningTarget, candidate: Candidate,
         (r for r in _auth_first(routes) if any(h in r.path.lower() for h in AUTH_HINTS)),
         None)
     if auth is None:
-        return ProbeEvidence(reproduced=False, determinism="unknown",
+        return ProbeEvidence(exercised=False, reproduced=False, determinism="unknown",
                              summary="no auth-like route in the finding's file to time")
     slot = _id_slot(auth)
     known = _known_identifier(running, slot)
@@ -985,13 +985,14 @@ def probe_auth_timing_oracle(running: RunningTarget, candidate: Candidate,
         # A 404 or 405 to both identifiers times the router, not the auth check, so
         # equal medians say nothing about the finding. This was a rejection, and the
         # rejection carried forward to every later run.
-        return ProbeEvidence(
+        return ProbeEvidence(exercised=False, 
             reproduced=False, determinism="unknown", handled=False, request=request,
             summary=f"{auth.path} answered {every} to GET; no auth handler was timed",
             observed=f"HTTP {every}")
     tp, ta, tb = ([s for _, s in g if s is not None] for g in got)
     if min(len(tp), len(ta), len(tb)) < 5:
-        return ProbeEvidence(reproduced=False, determinism="unknown", request=request,
+        return ProbeEvidence(exercised=False, reproduced=False, determinism="unknown",
+                             request=request,
                              summary="could not collect enough timing samples "
                                      f"({len(tp)}/{len(ta)}/{len(tb)} of {samples})")
     if not codes[0] == codes[1] == codes[2]:
@@ -1070,7 +1071,7 @@ def probe_injection_observable(running: RunningTarget, candidate: Candidate,
     the probe sends only what that class needs."""
     pool, own = _scope(routes, candidate, _readable)
     if not pool:
-        return ProbeEvidence(reproduced=False, determinism="unknown",
+        return ProbeEvidence(exercised=False, reproduced=False, determinism="unknown",
                              summary="no GET route in the finding's file to inject into")
     cwe = probe_class(candidate.cwe) or ""
     if cwe == "CWE-79":
@@ -1079,7 +1080,7 @@ def probe_injection_observable(running: RunningTarget, candidate: Candidate,
         return _sqli(running, candidate, pool, own, exec_fn)
     if cwe == "CWE-77":
         return _cmdi(running, candidate, pool, own, exec_fn)
-    return ProbeEvidence(reproduced=False, determinism="unknown",
+    return ProbeEvidence(exercised=False, reproduced=False, determinism="unknown",
                          summary=f"no in-band injection check for {cwe or 'this finding'}")
 
 
@@ -1232,7 +1233,7 @@ def _sqli(running, cand, pool, own, exec_fn) -> ProbeEvidence:
                            "values before they can reach a query. Input from a body, a "
                            "header or a cookie was not tested")
     if not exercised:
-        return ProbeEvidence(reproduced=False, determinism="unknown",
+        return ProbeEvidence(exercised=False, reproduced=False, determinism="unknown",
                              summary="the candidate route(s) returned nothing to inject into")
     held = (f"; not refused, or not decidable: {', '.join(accepted[:6])}"
             if refused and accepted else "")
@@ -1331,14 +1332,14 @@ def probe_path_traversal_ssrf(running: RunningTarget, candidate: Candidate,
     that can never resolve, against a benign token. Neither reaches an external host."""
     pool, own = _scope(routes, candidate, _readable)
     if not pool:
-        return ProbeEvidence(reproduced=False, determinism="unknown",
+        return ProbeEvidence(exercised=False, reproduced=False, determinism="unknown",
                              summary="no GET route in the finding's file to test")
     cwe = probe_class(candidate.cwe) or ""
     if cwe == "CWE-22":
         return _traversal(running, candidate, pool, own, exec_fn)
     if cwe == "CWE-918":
         return _ssrf(running, candidate, pool, own, exec_fn)
-    return ProbeEvidence(reproduced=False, determinism="unknown",
+    return ProbeEvidence(exercised=False, reproduced=False, determinism="unknown",
                          summary=f"no traversal or SSRF check for {cwe or 'this finding'}")
 
 

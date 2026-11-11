@@ -109,6 +109,10 @@ class ProbeEvidence:
     # the defence shows as a difference (a 429). Stored in the rationale, so the
     # disclosure step reads a "same" confirmation the right way round.
     reproduces_when: str = "differs"
+    # False when the probe could not exercise the finding at all: no route in its file to
+    # address, no check for its class, nothing measured. The verdict is then `untested`,
+    # which asks nothing of a person, rather than needs-review, which does.
+    exercised: bool = True
 
     @property
     def _supporting(self) -> bool:
@@ -133,6 +137,8 @@ NO_BASELINE = "no baseline comparison recorded"
 NO_CONTROL = "no control comparison recorded"
 # The reason a confirmation is held back when replaying it did not give the same result.
 DID_NOT_REPLAY = "did not replay"
+# The reason stored beside an `untested` verdict; the evidence summary says which gap.
+UNTESTED = "the probe could not exercise the finding"
 # The reason a rejection is held back when the candidate's CWE was inferred from a lens.
 INFERRED_CWE = "CWE inferred from a deep-review lens, so not reproducing it rejects nothing"
 
@@ -439,7 +445,10 @@ def adjudicate(evidence: ProbeEvidence) -> str:
 
 def adjudicate_with_reason(evidence: ProbeEvidence) -> tuple[str, str]:
     """The verdict and the reason stored beside it: the determinism of the signal, or
-    NO_BASELINE / NO_CONTROL when a measured result was held back for want of a control."""
+    NO_BASELINE / NO_CONTROL when a measured result was held back for want of a control,
+    or UNTESTED when the probe could not exercise the finding at all."""
+    if not evidence.exercised:
+        return "untested", UNTESTED
     if evidence.reproduced:
         if evidence.has_baseline_comparison:
             return "confirmed", evidence.determinism
@@ -508,6 +517,7 @@ class ValidationResult:
     confirmed: int = 0
     rejected: int = 0
     needs_review: int = 0
+    untested: int = 0
     verdicts: list[tuple[str, str, str]] = field(default_factory=list)  # finding, lens, verdict
     #: How the run ended, as the Runs page shows it: "probed", or why nothing was.
     outcome: str = ""
@@ -715,6 +725,7 @@ def _run_validation(con: sqlite3.Connection, run_id: int, rundir: Path, runtime,
                 res.confirmed += v == "confirmed"
                 res.rejected += v == "rejected"
                 res.needs_review += v == "needs-review"
+                res.untested += v == "untested"
     finally:
         running.stop()
         # The precision ledger is derived from verdicts, so refresh it here rather than

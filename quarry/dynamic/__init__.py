@@ -11,8 +11,10 @@ reproducible artifact rather than a model's opinion:
   * rejected   — the probe ran and the finding did not reproduce. Killed with evidence,
                  not with "looks defended".
 
-Anything the probe could not decide stays `needs-review`; Layer 3 never upgrades a
-guess into a confirmation. This is the only thing that writes a non-zero
+Anything the probe measured but could not decide stays `needs-review`; Layer 3 never
+upgrades a guess into a confirmation. A probe that could not exercise the finding at
+all (no route in its file, no check for its class, nothing measured) writes
+`untested`, which is not a review state. This is the only thing that writes a non-zero
 `executed_score` into the verdict ledger.
 
 Which probe runs is chosen per codebase, not hardcoded: `lenses.select_probe_lenses`

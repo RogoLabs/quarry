@@ -819,10 +819,18 @@ def validate(run_id: int = typer.Argument(..., help="a scanned + funnelled run")
         return
     con_out.print(f"[bold]validation of run {run_id}[/]: "
                   f"[green]{res.confirmed} confirmed[/], {res.rejected} rejected, "
-                  f"{res.needs_review} needs-review")
+                  f"{res.needs_review} needs-review, {res.untested} untested")
+    # One line per verdict that says something; untested ones are only counted, since
+    # on run 3 they were 706 lines of the 800 and asked nothing of anyone.
     for finding, lens, verdict in res.verdicts:
+        if verdict == "untested":
+            continue
         colour = {"confirmed": "green", "rejected": "dim", "needs-review": "yellow"}[verdict]
         con_out.print(f"  [{colour}]{verdict:12}[/] {_e(f'{lens:20}')} {_e(finding)}")
+    if res.untested:
+        con_out.print(f"[dim]{res.untested} untested: the probe could not exercise them (no "
+                      f"route in the file, no check for the class, nothing measured); the "
+                      f"run's Validation page lists each with the reason[/]")
     if res.confirmed:
         con_out.print(f"[dim]write advisories with: quarry report {run_id}[/]")
 

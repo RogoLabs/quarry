@@ -127,7 +127,7 @@ def test_a_spec_wide_requirement_is_not_declared_protection():
     assert routes[0].auth_required is True and routes[0].auth_scope == "global"
     fake = _server({"/secret": {"none": 200, "invalid": 401, "valid": 200}})
     ev = probe_broken_authz(RUNNING, CAND, routes, fake)
-    assert ev.reproduced is False and adjudicate(ev) == "needs-review"
+    assert ev.reproduced is False and adjudicate(ev) == "untested"
     assert "spec-wide" in ev.summary and fake.requests == []      # nothing was sent
 
 
@@ -146,7 +146,7 @@ def test_probe_needs_review_without_a_security_signal():
     routes = [Route("GET", "/secret", "app/api.py", "static", line=4, end_line=6)]
     ev = probe_broken_authz(RUNNING, CAND, routes, _server({"/secret": {"none": 200}}))
     assert ev.reproduced is False and ev.determinism == "unknown"
-    assert adjudicate(ev) == "needs-review"
+    assert adjudicate(ev) == "untested"
 
 
 def test_crawl_is_bounded_and_get_only():

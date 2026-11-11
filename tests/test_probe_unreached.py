@@ -85,7 +85,7 @@ def test_no_probe_rejects_on_404_or_405(lens, cwe, statuses):
     ev = lens.probe(RUNNING, _cand(cwe), ROUTES, _target(statuses))
     verdict, reason = adjudicate_with_reason(ev)
     assert verdict != "rejected", (lens.key, cwe, ev.summary)
-    assert verdict == "needs-review", (lens.key, cwe, verdict, ev.summary)
+    assert verdict in ("needs-review", "untested"), (lens.key, cwe, verdict, ev.summary)
     assert ev.handled is not True, ev.summary
 
 
@@ -94,7 +94,8 @@ def test_no_probe_rejects_on_404_or_405(lens, cwe, statuses):
 def test_no_probe_rejects_when_nothing_answered(lens, cwe):
     """curl exits 7 (could not connect) on every request: there is no response at all."""
     ev = lens.probe(RUNNING, _cand(cwe), ROUTES, _target(["000"], rc=7))
-    assert adjudicate_with_reason(ev)[0] == "needs-review", (lens.key, cwe, ev.summary)
+    assert adjudicate_with_reason(ev)[0] in ("needs-review", "untested"), \
+        (lens.key, cwe, ev.summary)
 
 
 def test_the_sweep_can_see_a_rejection():
@@ -188,6 +189,6 @@ def test_validate_against_a_target_that_only_404s_writes_no_rejection(tmp_path, 
     assert res.rejected == 0 and res.confirmed == 0
     rows = [dict(r) for r in con.execute("SELECT verdict, rationale FROM verdicts")]
     assert len(rows) == len(cwes)
-    assert {r["verdict"] for r in rows} == {"needs-review"}
+    assert {r["verdict"] for r in rows} <= {"needs-review", "untested"}
     assert not [r for r in rows if json.loads(r["rationale"])["handled"] is True]
     assert runtime.stopped is True

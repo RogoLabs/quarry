@@ -87,7 +87,7 @@ def test_rate_limit_is_not_decided_when_no_handler_answered(code):
     # GET on a POST-only login yields 405s: the burst would time the router.
     fake = _limited([code])
     ev = probe_missing_rate_limit(RUNNING, CAND, LOGIN, fake, burst=20)
-    assert ev.handled is False and adjudicate(ev) == "needs-review"
+    assert ev.handled is False and adjudicate(ev) == "untested"
     assert len(fake.requests) == 1                      # no burst sent
 
 
@@ -109,7 +109,7 @@ def test_cwe_400_is_not_a_request_rate_question():
     cand = Candidate("f1", 1, "o/r", "app/auth.py", 5, "prod", "CWE-1333", "regex")
     fake = _limited([200])
     ev = probe_missing_rate_limit(RUNNING, cand, LOGIN, fake, burst=20)
-    assert adjudicate(ev) == "needs-review" and fake.requests == []
+    assert adjudicate(ev) == "untested" and fake.requests == []
 
 
 def test_a_login_post_is_burst_with_a_bogus_credential_and_register_never():
@@ -123,13 +123,13 @@ def test_a_login_post_is_burst_with_a_bogus_credential_and_register_never():
                       line=3, end_line=9)]
     fake = _limited([201])
     ev = probe_missing_rate_limit(RUNNING, CAND, register, fake, burst=5)
-    assert adjudicate(ev) == "needs-review" and fake.requests == []
+    assert adjudicate(ev) == "untested" and fake.requests == []
 
 
 def test_rate_limit_needs_review_without_routes():
     fake = _limited([200])
     ev = probe_missing_rate_limit(RUNNING, CAND, [], fake, burst=5)
-    assert adjudicate(ev) == "needs-review" and fake.requests == []
+    assert adjudicate(ev) == "untested" and fake.requests == []
 
 
 # ------------------------------------------------------------------ timing oracle
@@ -273,7 +273,7 @@ def test_timing_oracle_is_not_rejected_when_no_handler_answered(code):
     """Both identifiers 404: equal medians time the router, not the auth check. This
     was a rejection, and rejected-carry-forward then killed the finding in every run."""
     ev = probe_auth_timing_oracle(SEEDED, TIMING, LOGIN_ID, _clock(20.0, 20.0, code=code))
-    assert ev.handled is False and adjudicate(ev) == "needs-review"
+    assert ev.handled is False and adjudicate(ev) == "untested"
     assert str(code) in ev.summary
 
 
@@ -281,4 +281,4 @@ def test_timing_oracle_needs_review_without_auth_route():
     # a route with no auth-like name is not a timing target.
     ev = probe_auth_timing_oracle(SEEDED, TIMING, [Route("GET", "/items", "app/auth.py")],
                                   _clock(60.0, 5.0))
-    assert adjudicate(ev) == "needs-review"
+    assert adjudicate(ev) == "untested"

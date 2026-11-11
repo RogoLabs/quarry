@@ -38,7 +38,8 @@ run one status read from every stage, so the Runs page stops calling a run done 
 its deep review works. On 2026-11-10 item 32 let the nightly job finish a refute pass
 and run only on AC power, and made a stopped review read as stopped. Open: decision J,
 whose default is taken. Item 33 (2026-11-10) brought the deep review's findings into
-Layer 3. The suite collects 1235; the last full run passed 1232 and skipped 3, all
+Layer 3, and item 34 split out the verdicts no probe could exercise. The suite
+collects 1240; the last full run passed 1237 and skipped 3, all
 because setuptools is absent.
 
 Every item says where its evidence came from:
@@ -2265,3 +2266,39 @@ keys.
   rejected and 800 needs-review. The bundle create (`POST /api/bundle/` as the admin) now
   answers 400 instead of 401: the key is accepted and the request body is not. Not yet
   checked: what the comment and sighting checks did on that run.
+
+### 34. Needs-review counted findings no probe could exercise [DB]
+
+After item 33, run 3 had 800 verdicts, all needs-review. 706 of them were a probe that
+never exercised the finding: no route in the finding's file (435, 280 of them HTML
+templates, whose route lives in the view that renders them), no route declared
+protected by its own operation (264), a cross-user check that could not create its
+canaries (4), and the rate-limit early return for CWE-400 (3). Only 94 were a probe that
+measured something it could not decide. Labelled alike, the review queue read 800.
+
+- **Done (2026-11-10).** A probe that cannot exercise the finding sets
+  `ProbeEvidence.exercised` to False, and the verdict is `untested` with
+  `validate.UNTESTED` as its reason; the evidence summary says which gap. Fifteen
+  returns do so: no route to address, no check for the class, no handler answered, no
+  timing samples, nothing returned to inject into, missing seeded credentials, canaries
+  not created, and a lens whose probe is not wired. Measured but undecided results stay
+  needs-review.
+- Migration `_v12_untested_verdict` widens the verdicts CHECK. SQLite cannot alter a
+  CHECK, so the table is rebuilt: new table, copy, drop the old one, rename the new one
+  in, with foreign keys off and `foreign_key_check` before commit. Renaming the old
+  table away first, as v1 did, would repoint `advisories.verdict_id` at the copy about
+  to be dropped. The live database was backed up first
+  (`archive/quarry.db.before-untested-20261110`) and migrated with all 2,087 verdict
+  rows kept and the foreign key and integrity checks clean.
+- `quarry validate` prints the untested count and lists only the other verdicts. The
+  Runs list and the pipeline card count verdicts without untested and show "N
+  untested" beside them; the run page and the Validation page have an untested state. Untested is neutral to the
+  funnel's carry-forward and to the precision ledger, which count only confirmed and
+  rejected.
+
+Tests: `tests/test_untested_verdict.py` (5). Existing tests in eight files expected
+needs-review from these returns, or verdict counts without the new state; 35 test cases
+failed until they were updated.
+
+Re-probed the same evening: 0 confirmed, 0 rejected, 94 needs-review, 706 untested, the
+split counted from the earlier run's summaries before the change.
