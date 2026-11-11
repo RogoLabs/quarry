@@ -134,7 +134,7 @@ def test_the_vulnlookup_cross_user_spec_uses_only_keys_the_recipe_captures():
         assert {res.owner, res.other} <= captured and res.owner != res.other
         assert "{id}" in res.item and res.collection.endswith("/")
         # The body is valid JSON once filled, carries the probe's own id, and puts no CVE
-        # id in free text (a bundle would turn that into automatic sightings).
+        # id in free text (a bundle adds a sighting for each one it finds there).
         filled = res.body.replace("{id}", "00000000-0000-4000-8000-000000000000") \
                          .replace("{marker}", "qz00").replace("{vulnerability_id}", "CVE-1")
         doc = json.loads(filled)
@@ -144,6 +144,32 @@ def test_the_vulnlookup_cross_user_spec_uses_only_keys_the_recipe_captures():
     owners = {res.name: (res.owner, res.other) for res in spec.resources}
     assert owners["sighting"] == owners["comment"] == ("user_api_key", "user2_api_key")
     assert owners["bundle"] == ("admin_api_key", "user_api_key")
+
+
+# The bundle POST fills in uuid, origin and both timestamps, then validates against
+# Security_Advisory_Bundle.json (VulnLookup 7d77b9b): no property outside this set
+# (additionalProperties is false), name and description required, and
+# related_vulnerabilities a list of at least one non-empty string.
+VL_BUNDLE_PROPERTIES = {"uuid", "vulnerability_lookup_origin", "creation_timestamp",
+                        "timestamp", "name", "description", "description_format",
+                        "related_vulnerabilities", "meta"}
+
+
+def test_the_vulnlookup_bundle_canary_passes_the_bundle_schema():
+    """The canary sent `related_vulnerabilities: []` and its description named no CVE, so
+    the list stayed empty, failed `minItems: 1`, and all 8 bundle creates on 2026-11-10
+    were answered 400."""
+    import json
+    r = S.get("vulnlookup")
+    res = next(x for x in r.cross_user.resources if x.name == "bundle")
+    doc = json.loads(res.body.replace("{id}", "00000000-0000-4000-8000-000000000000")
+                     .replace("{marker}", "qz00")
+                     .replace("{vulnerability_id}", r.param_values["vulnerability_id"]))
+    assert set(doc) <= VL_BUNDLE_PROPERTIES
+    assert isinstance(doc["name"], str) and isinstance(doc["description"], str)
+    rel = doc["related_vulnerabilities"]
+    assert isinstance(rel, list) and rel and all(isinstance(v, str) and v for v in rel)
+    assert rel == ["CVE-2021-44228"], "the one entry is the probe's own CVE"
 
 
 def test_a_recipe_hands_its_cross_user_spec_to_the_probes():

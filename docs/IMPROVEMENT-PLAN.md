@@ -38,9 +38,10 @@ run one status read from every stage, so the Runs page stops calling a run done 
 its deep review works. On 2026-11-10 item 32 let the nightly job finish a refute pass
 and run only on AC power, and made a stopped review read as stopped. Open: decision J,
 whose default is taken. Item 33 (2026-11-10) brought the deep review's findings into
-Layer 3, and item 34 split out the verdicts no probe could exercise. The suite
-collects 1240; the last full run passed 1237 and skipped 3, all
-because setuptools is absent.
+Layer 3, and item 34 split out the verdicts no probe could exercise. On 2026-11-11
+item 33's bundle canary was fixed, so the cross-user bundle checks run. The suite
+collects 1241; the last full run passed 1238 and skipped 3, all because setuptools is
+absent.
 
 Every item says where its evidence came from:
 
@@ -2266,6 +2267,27 @@ keys.
   rejected and 800 needs-review. The bundle create (`POST /api/bundle/` as the admin) now
   answers 400 instead of 401: the key is accepted and the request body is not. Not yet
   checked: what the comment and sighting checks did on that run.
+- **Fixed (2026-11-11): why the bundle create was refused.** A new bundle is validated
+  against VulnLookup's CIRCL schema (`Security_Advisory_Bundle.json`), whose
+  `related_vulnerabilities` needs at least one entry. The canary sent `[]` and its
+  description named no CVE id, so the list stayed empty, and on the 2026-11-10
+  re-probe all 8 bundle creates (4 checks, 2 canaries each) were answered 400. The
+  probe keeps no response body, so the cause was checked offline: the handler's
+  payload, built the same way, fails that schema with the old body and passes with one
+  entry. The canary now names the probe CVE. A new bundle adds a `seen` sighting for
+  each entry and a bundle DELETE leaves those in place, so each bundle canary leaves
+  one admin sighting in the throwaway instance; that comes from reading the source, not
+  from looking in the instance. Test: one in `tests/test_seed.py`, which fails on the
+  old body.
+- Re-probed 2026-11-11: 0 confirmed, 0 rejected, 98 needs-review, 702 untested. All 10
+  bundle creates as the admin answered 201 (8 canaries, plus the owner's own change in
+  each of the 2 modify checks), and the owner deleted all 8 canaries afterwards (204).
+  The four bundle checks, all on deep-review findings, moved from untested to
+  needs-review. In three, quarry_user was refused the delete or the change (403) like
+  the anonymous control (401), and the record survived unchanged; the fourth found
+  bundles served to anonymous clients, so whether they should be private is a design
+  question. None could be rejected: a CWE inferred from a lens rejects nothing, and the
+  two change checks addressed a handler that does not enclose the finding's line.
 
 ### 34. Needs-review counted findings no probe could exercise [DB]
 

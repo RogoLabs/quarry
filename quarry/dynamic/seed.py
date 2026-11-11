@@ -221,8 +221,13 @@ register(SeedRecipe(
     # the feeders (network); this id is what probes try regardless.
     param_values={"vulnerability_id": "CVE-2021-44228"},
     # Read from website/web/api/v1/{bundle,sighting,comment}.py at a9c6edf. Each POST
-    # accepts a client-supplied uuid. Bodies carry no CVE id in free text, so the bundle
-    # creates no automatic sightings. A commenter's new comment awaits moderation and
+    # accepts a client-supplied uuid. A bundle is checked against the CIRCL schema
+    # (website/web/static/schemas/CIRCL/Security_Advisory_Bundle.json, read at 7d77b9b),
+    # whose `related_vulnerabilities` needs at least one entry. The canary sent `[]`, and
+    # all 8 bundle creates of 2026-11-10 were answered 400. It now names the probe CVE. A new bundle adds a `seen` sighting for each entry and a
+    # bundle DELETE leaves those in place, so each bundle canary leaves one admin
+    # sighting in the throwaway instance. Free text names no CVE id, which would add
+    # more. A commenter's new comment awaits moderation and
     # GET serves only published ones, so the comment read check finds no baseline and
     # its delete check relies on the owner's own DELETE afterwards. Sightings cannot be
     # updated ("It is not possible to update a sighting"), so they have no modify check.
@@ -235,7 +240,7 @@ register(SeedRecipe(
                 name="bundle", collection="/api/bundle/", item="/api/bundle/{id}",
                 body='{"uuid": "{id}", "name": "quarry canary {marker}", '
                      '"description": "Quarry cross-user canary.", '
-                     '"related_vulnerabilities": []}',
+                     '"related_vulnerabilities": ["{vulnerability_id}"]}',
                 owner="admin_api_key", other="user_api_key", modify="post-collection"),
             OwnedResource(
                 name="sighting", collection="/api/sighting/", item="/api/sighting/{id}",
